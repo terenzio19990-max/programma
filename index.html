@@ -1,4 +1,4 @@
-<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610080057"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610081138"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Orbita">
@@ -931,6 +931,15 @@ html.reduce-glass[data-theme="dark"]{--surface:#1C1C1E;--cell:#2C2C2E;--material
 .welcome-box .form-grid{grid-template-columns:1fr}
 .welcome-box .sync-card>div:first-child{display:none!important}
 .welcome-logo{width:72px;height:72px;border-radius:18px;margin:0 auto;box-shadow:0 10px 24px -10px rgba(0,0,0,.4)}
+/* ---------- Scrolling fixes: sheets always scroll to the bottom, real viewport height on phones/iPad ---------- */
+.sheet-b{flex:1 1 auto;min-height:0;overscroll-behavior:contain;padding-bottom:calc(22px + env(safe-area-inset-bottom,0px))}
+.sheet-b>*{flex-shrink:0}
+@supports (height:100dvh){.sheet{max-height:min(86dvh,820px)}}
+@media (max-width:760px){@supports (height:100dvh){.sheet{max-height:92dvh}}}
+.scroller{overscroll-behavior-y:contain}
+.am-embed{width:100%;border:0;border-radius:12px;overflow:hidden;background:transparent;display:block;margin-top:4px}
+.am-logo{display:inline-block;width:20px;height:20px;border-radius:6px;margin-right:8px;vertical-align:-3px;background:linear-gradient(160deg,#FB5C74,#FA233B);position:relative}
+.am-logo::after{content:"♪";position:absolute;inset:0;display:grid;place-items:center;color:#fff;font-size:13px;font-weight:700}
 </style>
 <div class="app" id="app">
   <aside class="sidebar" id="sidebar" aria-label="Navigazione"></aside>
@@ -2133,14 +2142,15 @@ function editTask(id, preset = {}) {
     right: { label: id ? 'Fine' : 'Aggiungi', act: s => {
       const title = $('#tT', s.el).value.trim(); if (!title) { $('#tT', s.el).focus(); return; }
       const o = id ? t : { id: uid(), done: false, created: Date.now() };
-      Object.assign(o, { project: $('#tPr', s.el) ? ($('#tPr', s.el).value || null) : (o.project || null), course: $('#tCo', s.el) ? ($('#tCo', s.el).value || null) : (o.course || null), title, notes: $('#tN', s.el).value.trim(), due: $('#tHasDue', s.el).getAttribute('aria-pressed') === 'true' ? ($('#tD', s.el).value || todayK()) : null, time: $('#tTime', s.el).value || null, prio: +prio, cat: cat || null });
+      Object.assign(o, { project: $('#tPr', s.el) ? ($('#tPr', s.el).value || null) : (o.project || null), course: $('#tCo', s.el) ? ($('#tCo', s.el).value || null) : (o.course || null), title, alert: $('#tAl', s.el) ? $('#tAl', s.el).value : (o.alert || ''), notes: $('#tN', s.el).value.trim(), due: $('#tHasDue', s.el).getAttribute('aria-pressed') === 'true' ? ($('#tD', s.el).value || todayK()) : null, time: $('#tTime', s.el).value || null, prio: +prio, cat: cat || null });
       if (!id) S.tasks.push(o);
       save('tasks'); s.close(); App.refresh();
     } },
     body: `<input class="input" id="tT" placeholder="Titolo" value="${esc(t.title)}">
       <textarea class="input" id="tN" placeholder="Note" rows="2">${esc(t.notes || '')}</textarea>
       <div class="list flat"><div class="row"><span class="tile-ico" style="background:var(--red)">${ico('cal')}</span><span class="grow t">Data</span>${toggleBtn('tHasDue', !!t.due)}</div>
-      <div class="row" id="tDueRow" ${t.due ? '' : 'hidden'}><input class="input" type="date" id="tD" value="${t.due || todayK()}" style="flex:1"><input class="input" type="time" id="tTime" value="${t.time || ''}" style="width:130px"></div></div>
+      <div class="row" id="tDueRow" ${t.due ? '' : 'hidden'}><input class="input" type="date" id="tD" value="${t.due || todayK()}" style="flex:1"><input class="input" type="time" id="tTime" value="${t.time || ''}" style="width:130px"></div>
+      <div class="row" id="tAlRow" ${t.due ? '' : 'hidden'}><span class="t" style="width:70px">Avviso</span><select class="input" id="tAl" style="flex:1">${alertOpts(t.alert, 'task')}</select></div></div>
       <div class="field"><span class="lbl">Priorità</span>${seg('tp', [[0, 'Nessuna'], [1, 'Bassa !'], [2, 'Media !!'], [3, 'Alta !!!']], prio)}</div>
       <div class="field"><span class="lbl">Area</span>${catChips('tc', cat)}</div>
       ${S.courses.length ? `<div class="field"><label for="tCo">Corso</label><select class="input" id="tCo"><option value="">Nessuno</option>${S.courses.map(c => `<option value="${c.id}" ${c.id === (t.course || preset.course) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>` : ''}
@@ -2149,7 +2159,7 @@ function editTask(id, preset = {}) {
     onMount(el) {
       wireSeg(el, 'tp', v => prio = +v);
       wireSeg(el, 'tc', v => cat = cat === v ? '' : v);
-      wireToggle($('#tHasDue', el), on => $('#tDueRow', el).hidden = !on);
+      wireToggle($('#tHasDue', el), on => { $('#tDueRow', el).hidden = !on; const a = $('#tAlRow', el); if (a) a.hidden = !on; });
       const d = $('#tDel', el);
       if (d) d.onclick = () => { const i = S.tasks.indexOf(t); S.tasks.splice(i, 1); save('tasks'); sh.close(); App.refresh(); undoToast('Promemoria eliminato', () => { S.tasks.splice(i, 0, t); save('tasks'); App.refresh(); }); };
     },
@@ -2305,7 +2315,7 @@ function editEvent(id, preset = {}, occK) {
       let start = g('#eS').value || '09:00', end = g('#eE').value || m2hm(hm2m(start) + 60);
       if (hm2m(end) <= hm2m(start)) end = m2hm(hm2m(start) + 30);
       const o = ev || { id: uid(), created: Date.now() };
-      Object.assign(o, { title, date: g('#eD').value || todayK(), start: allDay ? '' : start, end: allDay ? '' : end, allDay, endDate: allDay && g('#eD2').value > g('#eD').value ? g('#eD2').value : null, cat, rec: g('#eR').value, until: g('#eR').value !== 'none' && g('#eU').value ? g('#eU').value : null, loc: g('#eL').value.trim(), notes: g('#eN').value.trim() });
+      Object.assign(o, { title, date: g('#eD').value || todayK(), start: allDay ? '' : start, end: allDay ? '' : end, allDay, endDate: allDay && g('#eD2').value > g('#eD').value ? g('#eD2').value : null, cat, alert: g('#eAl') ? g('#eAl').value : (o.alert || ''), rec: g('#eR').value, until: g('#eR').value !== 'none' && g('#eU').value ? g('#eU').value : null, loc: g('#eL').value.trim(), notes: g('#eN').value.trim() });
       if (!ev && !IN_CLAUDE && S.profile.extTarget && S.profile.extTarget !== 'none') Ext.push(o);
       if (!ev) { S.events.push(o); Game.bump('events'); Game.add(5, 'Evento in agenda', { icon: 'cal' }); }
       save('events'); s.close(); App.refresh();
@@ -2318,13 +2328,14 @@ function editEvent(id, preset = {}, occK) {
         <div class="row"><span class="t" style="width:70px">Fine</span><input class="input" type="date" id="eD2" value="${f.endDate || f.date}" style="flex:1" ${f.allDay ? '' : 'hidden'}><input class="input" type="time" id="eE" value="${f.end || '10:00'}" style="width:120px;margin-left:auto" ${f.allDay ? 'hidden' : ''}></div>
         <div class="row"><span class="t" style="width:70px">Ripeti</span><select class="input" id="eR" style="flex:1">${Object.entries(REC).map(([k, v]) => `<option value="${k}" ${k === (f.rec || 'none') ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
         <div class="row" id="eURow" ${(f.rec || 'none') === 'none' ? 'hidden' : ''}><span class="t" style="width:70px">Fino al</span><input class="input" type="date" id="eU" value="${f.until || ''}" style="flex:1"></div>
+        <div class="row" id="eAlRow" ${f.allDay ? 'hidden' : ''}><span class="t" style="width:70px">Avviso</span><select class="input" id="eAl" style="flex:1">${alertOpts(f.alert, 'event')}</select></div>
       </div>
       <div class="field"><span class="lbl">Calendario</span>${catChips('ec', cat)}</div>
       <textarea class="input" id="eN" placeholder="Note" rows="2">${esc(f.notes || '')}</textarea>
       ${ev ? `<div style="display:flex;gap:8px;flex-wrap:wrap" id="eDelBox">${recurring && occK ? `<button class="btn danger" id="eDelOne">${ico('trash', 'sm')}Elimina solo ${relDay(occK)}</button><button class="btn danger" id="eDelAll">Elimina la serie</button>` : `<button class="btn danger" id="eDelAll">${ico('trash', 'sm')}Elimina evento</button>`}<button class="btn" id="eDup">${ico('copy', 'sm')}Duplica</button></div>` : ''}`,
     onMount(el) {
       wireSeg(el, 'ec', v => cat = v);
-      wireToggle($('#eAll', el), on => { $('#eS', el).hidden = on; $('#eE', el).hidden = on; $('#eD2', el).hidden = !on; });
+      wireToggle($('#eAll', el), on => { $('#eS', el).hidden = on; $('#eE', el).hidden = on; $('#eD2', el).hidden = !on; const a = $('#eAlRow', el); if (a) a.hidden = on; });
       $('#eR', el).onchange = e => $('#eURow', el).hidden = e.target.value === 'none';
       $('#eS', el).onchange = e => { const d = hm2m(f.end) - hm2m(f.start) || 60; $('#eE', el).value = m2hm(hm2m(e.target.value) + d); };
       if (!ev) return;
@@ -6934,6 +6945,240 @@ const Welcome = {
 { const old = Cloud.connectStore.bind(Cloud); Cloud.connectStore = function () { const r = old(); if (r) Welcome.hide(); return r; }; }
 { const old = Cloud.logout.bind(Cloud); Cloud.logout = function () { old(); try { localStorage.removeItem('orbita.noAccount'); } catch (_) {} setTimeout(() => Welcome.show(), 200); }; }
 Promise.resolve().then(() => setTimeout(() => { try { if (!Cloud.cfg.url && ORBITA_CLOUD.url) Cloud.load(); Welcome.show(); } catch (_) {} }, 400));
+
+/* =========================================================
+   AVVISI — notifiche prima di eventi, promemoria con orario,
+   scadenze ed esami. Sul programma per computer le notifiche
+   arrivano anche a finestra chiusa (Orbita resta nella barra);
+   nel sito/iPad mentre l'app è aperta o in secondo piano.
+   ========================================================= */
+const ALERT_OPTS = [['', 'Predefinito'], ['none', 'Nessun avviso'], ['0', "All'ora esatta"], ['5', '5 minuti prima'], ['10', '10 minuti prima'], ['15', '15 minuti prima'], ['30', '30 minuti prima'], ['60', '1 ora prima'], ['120', '2 ore prima'], ['1440', '1 giorno prima']];
+function alertOpts(cur, kind) {
+  const def = Alerts.defLabel(kind);
+  return ALERT_OPTS.map(([v, l]) => `<option value="${v}" ${String(cur || '') === v ? 'selected' : ''}>${v === '' ? `Predefinito (${def})` : l}</option>`).join('');
+}
+const Alerts = {
+  KF: 'orbita.fired', fired: {}, timer: null, last: 0,
+  P() { return { ev: 10, task: 0, taskDay: '09:00', exams: true, sound: true, ...(S.profile.alerts || {}) }; },
+  set(k, v) { S.profile.alerts = { ...this.P(), [k]: v }; save('profile'); this.sync(); },
+  defLabel(kind) { const p = this.P(), m = kind === 'event' ? p.ev : p.task; return m === 'none' || m == null ? 'nessuno' : +m === 0 ? "all'ora esatta" : +m >= 1440 ? '1 giorno prima' : +m >= 60 ? (+m / 60) + ' h prima' : m + ' min prima'; },
+  lead(kind, v) { if (v === 'none') return null; if (v !== '' && v != null) return +v; const d = kind === 'event' ? this.P().ev : this.P().task; return d === 'none' ? null : +d; },
+  at(k, hm) { return new Date(`${k}T${hm || '00:00'}:00`).getTime(); },
+  fmtLead(m) { return m <= 0 ? 'Adesso' : m >= 1440 ? 'Domani' : m >= 60 ? `Tra ${Math.round(m / 6) / 10} ore`.replace('.', ',') : `Tra ${m} minuti`; },
+  /** every alert due in the next `hours` (and the last 10 minutes, for ones missed while closed) */
+  list(hours = 48) {
+    const now = Date.now(), from = now - 10 * 60e3, to = now + hours * 36e5, out = [], p = this.P();
+    const push = a => { if (a.at >= from && a.at <= to) out.push(a); };
+    for (let d = 0; d <= Math.ceil(hours / 24) + 1; d++) {
+      const k = addDK(todayK(), d);
+      for (const it of itemsOn(k)) {
+        if (it.kind !== 'event' || it.allDay || !it.s) continue;
+        const ev = S.events.find(e => e.id === it.id), L = this.lead('event', ev && ev.alert); if (L == null) continue;
+        push({ key: `ev:${it.id}:${k}:${L}`, at: this.at(k, it.s) - L * 60e3, st: this.at(k, it.s), tail: ` · ${it.s}${it.e ? '–' + it.e : ''}${it.loc ? ' · ' + it.loc : ''}`, title: it.title, body: `${this.fmtLead(L)} · ${it.s}${it.e ? '–' + it.e : ''}${it.loc ? ' · ' + it.loc : ''}`, open: `event:${it.id}:${k}`, view: 'calendar' });
+      }
+    }
+    for (const t of S.tasks) {
+      if (t.done || !t.due) continue;
+      if (t.time) { const L = this.lead('task', t.alert); if (L == null) continue; push({ key: `tk:${t.id}:${t.due}:${t.time}:${L}`, at: this.at(t.due, t.time) - L * 60e3, st: this.at(t.due, t.time), tail: ` · promemoria delle ${t.time}`, title: t.title, body: `${L ? this.fmtLead(L) + ' · ' : ''}Promemoria delle ${t.time}`, task: t.id, view: 'tasks' }); }
+      else if (p.taskDay && p.taskDay !== 'none' && t.alert !== 'none') push({ key: `td:${t.id}:${t.due}`, at: this.at(t.due, p.taskDay), title: t.title, body: 'Da fare oggi', task: t.id, view: 'tasks' });
+    }
+    if (p.exams) for (const x of S.exams) {
+      if (x.status !== 'planned' || !x.date) continue;
+      push({ key: `ex1:${x.id}:${x.date}`, at: this.at(addDK(x.date, -1), '18:00'), title: `Domani: esame di ${x.name}`, body: x.time ? `Alle ${x.time}${x.room ? ' · ' + x.room : ''}. In bocca al lupo!` : 'Ripassa i punti chiave e dormi bene.', view: 'exams' });
+      if (x.time) push({ key: `ex0:${x.id}:${x.date}`, at: this.at(x.date, x.time) - 90 * 60e3, title: `Esame di ${x.name} tra un'ora e mezza`, body: x.room ? x.room : 'Controlla documenti e materiale', view: 'exams' });
+    }
+    return out.filter(a => !this.fired[a.key]).sort((a, b) => a.at - b.at);
+  },
+  loadFired() { try { this.fired = JSON.parse(localStorage.getItem(this.KF) || '{}'); } catch (_) { this.fired = {}; } const lim = Date.now() - 4 * 864e5; for (const k in this.fired) if (this.fired[k] < lim) delete this.fired[k]; },
+  mark(key) { this.fired[key] = Date.now(); try { localStorage.setItem(this.KF, JSON.stringify(this.fired)); } catch (_) {} },
+  native() { return !!(window.orbitaDesktop && window.orbitaDesktop.notify); },
+  /** hand the schedule to the desktop app (fires even with the window closed) */
+  sync() {
+    clearTimeout(this.st); this.st = setTimeout(() => {
+      if (!this.native()) return;
+      const on = S.profile.alertsOn !== false;
+      window.orbitaDesktop.notify.schedule(on ? this.list(48).map(a => ({ key: a.key, at: a.at, title: a.title, body: a.body, data: { open: a.open || null, task: a.task || null, view: a.view } })) : []);
+    }, 400);
+  },
+  fire(a) {
+    this.mark(a.key);
+    if (a.st) { const m = Math.round((a.st - Date.now()) / 60e3); a.body = (m > 0 ? this.fmtLead(m) : m < -1 ? `Iniziato da ${-m} minuti` : 'Adesso') + a.tail; }
+    if (!document.hidden || !this.native()) {
+      Island.toast({ icon: a.view === 'exams' ? 'grad' : a.task ? 'check' : 'cal', c: 'var(--accent)', t: a.title, s: a.body, action: { label: 'Apri', fn: () => this.open(a) }, ms: 9000 });
+      if (this.P().sound) try { Sound.chime(); } catch (_) {}
+    }
+    if (!this.native()) Notify.send(a.title, a.body, a);
+  },
+  open(a) {
+    if (a.task) { go('tasks'); setTimeout(() => editTask(a.task), 200); return; }
+    if (a.open) { const [kind, id, k] = a.open.split(':'); if (kind === 'event') { go('calendar'); setTimeout(() => editEvent(id, {}, k), 200); return; } }
+    go(a.view || 'today');
+  },
+  tick() { const now = Date.now(); for (const a of this.list(1)) if (a.at <= now) this.fire(a); },
+  start() {
+    this.loadFired(); clearInterval(this.timer); this.timer = setInterval(() => this.tick(), 15000); setTimeout(() => this.tick(), 3000);
+    this.sync();
+    if (this.native() && window.orbitaDesktop.notify.onClick) window.orbitaDesktop.notify.onClick(d => { this.mark(d.key); this.open(d.data || {}); });
+    if (this.native() && window.orbitaDesktop.notify.onFired) window.orbitaDesktop.notify.onFired(key => this.mark(key));
+  },
+};
+/* the old 10-minute in-page toast is replaced by Alerts (keeps only the "now" line in the calendar) */
+Reminders.tick = function () { const nl = $('#nowLine'); if (nl) { const d = new Date(); nl.style.top = ((d.getHours() * 60 + d.getMinutes()) / 60 * HOUR) + 'px'; } };
+/* re-plan whenever data changes */
+{ const old = Store.touch.bind(Store); Store.touch = function (id, ...r) { const x = old(id, ...r); if (/^(events|tasks|exams|profile)$/.test(id)) { Alerts.sync(); clearTimeout(Alerts.tt); Alerts.tt = setTimeout(() => Alerts.tick(), 800); } return x; }; }
+/* system notifications on unless switched off (permission is asked once on the web; the desktop app has it already) */
+Notify.ok = function () { return !IN_CLAUDE && 'Notification' in window && Notification.permission === 'granted' && S.profile.alertsOn !== false; };
+Notify.ask = async function () {
+  if (IN_CLAUDE || !('Notification' in window)) { Island.toast({ icon: 'bolt', c: 'var(--orange)', t: 'Notifiche non disponibili qui', s: 'Su iPad aggiungi Orbita alla schermata Home e aprilo da lì', ms: 3600 }); return false; }
+  const r = await Notification.requestPermission(); S.profile.alertsOn = r === 'granted'; save('profile'); App.refresh(); Alerts.sync();
+  if (r === 'granted') this.send('Notifiche attive', 'Ti avviso prima di eventi, promemoria ed esami.');
+  return r === 'granted';
+};
+/* system notification: on the web, clicking it opens the right item */
+Notify.send = async function (title, body, a) {
+  if (!this.ok()) return;
+  try { const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration(); if (reg) { reg.showNotification(title, { body, icon: 'icon-192.png', badge: 'icon-192.png', tag: a ? a.key : title, data: a ? { open: a.open, task: a.task, view: a.view } : null }); return; } } catch (_) {}
+  try { const n = new Notification(title, { body, icon: 'icon-192.png', tag: a ? a.key : title }); if (a) n.onclick = () => { window.focus(); Alerts.open(a); n.close(); }; } catch (_) {}
+};
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.type === 'open') Alerts.open(e.data.data || {}); });
+
+/* ---------- settings ---------- */
+Promise.resolve().then(() => {
+  const oldR = VIEWS.settings.render, oldM = VIEWS.settings.mount;
+  VIEWS.settings.render = function () {
+    const h = oldR.call(this), p = Alerts.P(), perm = IN_CLAUDE ? 'claude' : !('Notification' in window) ? 'none' : Notification.permission;
+    const leads = [['none', 'Nessuno'], ['0', "All'ora esatta"], ['5', '5 min prima'], ['10', '10 min prima'], ['15', '15 min prima'], ['30', '30 min prima'], ['60', '1 ora prima']];
+    const sec = `<div class="section-h">Avvisi e notifiche</div>
+      <div class="list flat">
+        <div class="row"><span class="tile-ico" style="background:var(--red)">${ico('bolt')}</span><span class="grow"><div class="t">Notifiche</div><div class="s">${perm === 'claude' ? 'Dentro Claude vedi gli avvisi solo nell\'app aperta. Il programma e il sito mandano vere notifiche.' : perm === 'granted' ? (Alerts.native() ? 'Attive: arrivano anche con la finestra chiusa, finché Orbita è nella barra' : 'Attive: arrivano mentre Orbita è aperto o in secondo piano') : perm === 'denied' ? 'Bloccate: riattivale dalle impostazioni del sistema o del browser' : perm === 'none' ? 'Questo browser non le supporta: su iPad aggiungi Orbita alla schermata Home' : 'Non ancora attive'}</div></span>${perm === 'default' ? `<button class="btn sm primary" data-act="notifyOn">Attiva</button>` : perm === 'granted' ? `<button class="btn sm" data-act="alertTest">Prova</button>` : ''}</div>
+        ${perm === 'granted' ? `<div class="row"><span class="grow"><div class="t">Notifiche di sistema</div><div class="s">Spente: vedi gli avvisi solo dentro Orbita</div></span>${toggleBtn('alOn', S.profile.alertsOn !== false)}</div>` : ''}
+        <div class="row"><span class="t" style="width:190px">Eventi in agenda</span><select class="input" id="alEv" style="max-width:220px">${leads.map(([v, l]) => `<option value="${v}" ${String(p.ev) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="row"><span class="t" style="width:190px">Promemoria con orario</span><select class="input" id="alTk" style="max-width:220px">${leads.map(([v, l]) => `<option value="${v}" ${String(p.task) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="row"><span class="t" style="width:190px">Promemoria senza orario</span><select class="input" id="alTd" style="max-width:220px">${[['none', 'Nessun avviso'], ['07:30', 'Alle 7:30'], ['08:00', 'Alle 8:00'], ['09:00', 'Alle 9:00'], ['10:00', 'Alle 10:00'], ['12:00', 'Alle 12:00']].map(([v, l]) => `<option value="${v}" ${p.taskDay === v ? 'selected' : ''}>${l} del giorno di scadenza</option>`).join('')}</select></div>
+        <div class="row"><span class="grow"><div class="t">Esami</div><div class="s">La sera prima alle 18 e un'ora e mezza prima, se c'è l'orario</div></span>${toggleBtn('alEx', p.exams)}</div>
+        <div class="row"><span class="grow"><div class="t">Suono negli avvisi</div></span>${toggleBtn('alSnd', p.sound)}</div>
+        ${Alerts.native() ? `<div class="row"><span class="grow"><div class="t">Resta attivo nella barra</div><div class="s">Chiudendo la finestra Orbita continua ad avvisarti</div></span>${toggleBtn('alTray', UI.appPrefs ? UI.appPrefs.keepRunning !== false : true)}</div>
+        <div class="row"><span class="grow"><div class="t">Avvia con il computer</div><div class="s">Parte da solo, nascosto nella barra</div></span>${toggleBtn('alBoot', UI.appPrefs ? !!UI.appPrefs.openAtLogin : false)}</div>` : ''}
+      </div>
+      <p class="muted" style="font-size:13px;margin:6px 4px 0">Ogni evento e promemoria può avere un avviso diverso: lo scegli nella sua scheda, alla voce “Avviso”.</p>`;
+    const mark = '<div class="section-h">Università</div>', i = h.indexOf(mark);
+    return i >= 0 ? h.slice(0, i) + sec + h.slice(i) : h + sec;
+  };
+  VIEWS.settings.mount = function (root) {
+    if (oldM) oldM.call(this, root);
+    const sel = (id, k) => { const e = $('#' + id, root); if (e) e.onchange = () => Alerts.set(k, e.value === 'none' || /:/.test(e.value) ? e.value : +e.value); };
+    sel('alEv', 'ev'); sel('alTk', 'task'); sel('alTd', 'taskDay');
+    const on = $('#alOn', root); if (on) wireToggle(on, v => { S.profile.alertsOn = v; save('profile'); Alerts.sync(); });
+    const ex = $('#alEx', root); if (ex) wireToggle(ex, on => Alerts.set('exams', on));
+    const sn = $('#alSnd', root); if (sn) wireToggle(sn, on => Alerts.set('sound', on));
+    const tr = $('#alTray', root); if (tr) wireToggle(tr, on => window.orbitaDesktop.app.setPrefs({ keepRunning: on }).then(p => UI.appPrefs = p));
+    const bo = $('#alBoot', root); if (bo) wireToggle(bo, on => window.orbitaDesktop.app.setPrefs({ openAtLogin: on }).then(p => UI.appPrefs = p));
+  };
+  if (window.orbitaDesktop && window.orbitaDesktop.app) window.orbitaDesktop.app.prefs().then(p => { UI.appPrefs = p; }).catch(() => {});
+  Alerts.start();
+});
+ACT.alertTest = () => {
+  const a = { key: 'test:' + Date.now(), at: Date.now(), title: 'Orbita · prova notifica', body: 'Così ti avviserò prima di eventi e promemoria.', view: 'settings' };
+  if (Alerts.native()) window.orbitaDesktop.notify.test(a.title, a.body); else Notify.send(a.title, a.body, a);
+  Island.toast({ icon: 'bolt', c: 'var(--accent)', t: 'Notifica di prova inviata', ms: 2000 });
+};
+
+/* =========================================================
+   APPLE MUSIC — cerca brani, album e artisti, ascolta
+   l'anteprima, usa playlist/album di Apple Music per il focus
+   (lettore ufficiale di Apple dentro Orbita) e apri nell'app Musica.
+   Nessuna chiave sviluppatore: catalogo pubblico + player embed.
+   ========================================================= */
+const amParse = url => { const m = String(url || '').match(/music\.apple\.com\/([a-z]{2})\/(playlist|album|song|station|artist|music-video)\/(?:[^/?#]+\/)?([\w.-]+)/i); return m ? { cc: m[1], type: m[2].toLowerCase(), id: m[3] } : null; };
+const amEmbed = url => String(url).replace(/^https?:\/\/(?:geo\.|embed\.)?music\.apple\.com/i, 'https://embed.music.apple.com').replace(/([?&])(app|ls)=[^&]*/g, '$1').replace(/[?&]$/, '');
+const AM = {
+  q: '', kind: 'song', res: null, busy: false, err: '', audio: null, playing: null,
+  ok() { return !IN_CLAUDE; },
+  async search(q) {
+    this.q = q = String(q || '').trim(); if (!q) return;
+    this.busy = true; this.err = ''; this.paint();
+    const ent = { song: 'song', album: 'album', artist: 'musicArtist' }[this.kind];
+    const url = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&country=it&media=music&entity=${ent}&limit=15&lang=it_it`;
+    try {
+      let j; try { j = await (await fetch(url)).json(); } catch (_) { j = await this.jsonp(url); }
+      this.res = (j.results || []).map(r => ({ type: r.wrapperType === 'artist' ? 'artist' : r.wrapperType === 'collection' ? 'album' : 'song', name: r.trackName || r.collectionName || r.artistName, by: r.wrapperType === 'artist' ? (r.primaryGenreName || 'Artista') : r.artistName, sub: r.wrapperType === 'track' ? r.collectionName : r.wrapperType === 'collection' ? `${r.trackCount || ''} brani · ${(r.releaseDate || '').slice(0, 4)}` : '', art: (r.artworkUrl100 || '').replace('100x100bb', '200x200bb'), preview: r.previewUrl || null, url: r.trackViewUrl || r.collectionViewUrl || r.artistLinkUrl || r.artistViewUrl || null }));
+      if (!this.res.length) this.err = 'Nessun risultato.';
+    } catch (_) { this.res = null; this.err = 'Apple Music non raggiungibile: controlla la connessione.'; }
+    this.busy = false; this.paint();
+  },
+  jsonp(url) { return new Promise((res, rej) => { const cb = 'am_' + uid().replace(/\W/g, ''); const s = document.createElement('script'); window[cb] = j => { res(j); delete window[cb]; s.remove(); }; s.onerror = () => { rej(); s.remove(); }; s.src = url + '&callback=' + cb; document.head.appendChild(s); setTimeout(() => rej(), 10000); }); },
+  play(i) {
+    const r = this.res && this.res[i]; if (!r || !r.preview) return;
+    if (this.playing === i && this.audio && !this.audio.paused) { this.audio.pause(); this.playing = null; this.paint(); return; }
+    if (!this.audio) { this.audio = new Audio(); this.audio.addEventListener('ended', () => { this.playing = null; this.paint(); }); }
+    this.audio.src = r.preview; this.audio.play().catch(() => {}); this.playing = i; this.paint();
+  },
+  useForFocus(r) {
+    const o = { id: uid(), name: r.name, sub: r.by, url: r.url, c: '#FA2D48', provider: 'apple' };
+    S.music.playlists.push(o); S.music.cur = o.id; save('music');
+    Island.toast({ icon: 'music', c: '#FA2D48', t: 'Musica per il focus', s: r.name, ms: 2200 }); App.render();
+  },
+  playerHtml() {
+    const cur = S.music.playlists.find(x => x.id === S.music.cur), am = cur && amParse(cur.url); if (!am) return '';
+    const h = am.type === 'song' || am.type === 'music-video' ? 175 : 450;
+    return this.ok()
+      ? `<iframe class="am-embed" src="${esc(amEmbed(cur.url))}" height="${h}" allow="autoplay *; encrypted-media *; fullscreen *; clipboard-write" sandbox="allow-forms allow-popups allow-same-origin allow-scripts allow-storage-access-by-user-activation allow-top-navigation-by-user-activation" loading="lazy" title="Apple Music"></iframe>
+         <p class="muted" style="font-size:12.5px;margin:6px 2px 0">Con l'abbonamento: tocca “Accedi” nel lettore per ascoltare i brani interi, altrimenti senti le anteprime.</p>`
+      : `<a class="btn" href="${esc(cur.url)}" target="_blank" rel="noopener" style="color:#FA2D48">${ico('play', 'sm')}Apri “${esc(cur.name)}” in Apple Music</a>`;
+  },
+  html() {
+    const r = this.res;
+    return `<div class="card-h"><h3><span class="am-logo"></span>Apple Music</h3>${this.audio && this.playing != null ? `<span class="more" style="color:#FA2D48"><span class="eq"><i></i><i></i><i></i></span>Anteprima</span>` : ''}</div>
+      ${this.playerHtml()}
+      ${this.ok() ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><label class="quick" style="margin:0;flex:1;min-width:200px;background:var(--fill);box-shadow:none">${ico('search')}<input id="amQ" placeholder="Cerca brani, album o artisti" value="${esc(this.q)}" autocomplete="off" enterkeyhint="search"></label>${seg('amK', [['song', 'Brani'], ['album', 'Album'], ['artist', 'Artisti']], this.kind)}</div>
+      ${this.busy ? `<p class="muted" style="margin:12px 0 0">Cerco…</p>` : this.err ? `<p class="muted" style="margin:12px 0 0">${esc(this.err)}</p>` : ''}
+      ${r && r.length ? `<div class="list flat am-res" style="box-shadow:none;margin:10px -8px 0">${r.map((x, i) => `<div class="row">${x.art ? `<img src="${esc(x.art)}" alt="" width="44" height="44" style="border-radius:${x.type === 'artist' ? '50%' : '8px'};flex:none;object-fit:cover">` : `<span class="tile-ico" style="background:#FA2D48;width:44px;height:44px">${ico('music')}</span>`}<span class="grow" style="min-width:0"><div class="t" style="font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(x.name)}</div><div class="s" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(x.by)}${x.sub ? ' · ' + esc(x.sub) : ''}</div></span>
+          <span style="display:flex;gap:6px;flex:none">${x.preview ? `<button class="btn sm" data-amplay="${i}" aria-label="Anteprima" style="color:#FA2D48">${ico(this.playing === i ? 'pause' : 'play', 'sm')}</button>` : ''}${x.url && x.type !== 'artist' ? `<button class="btn sm hide-narrow" data-amuse="${i}">Per il focus</button>` : ''}${x.url ? `<a class="btn sm" href="${esc(x.url)}" target="_blank" rel="noopener" aria-label="Apri in Apple Music">${ico('right', 'sm')}</a>` : ''}</span></div>`).join('')}</div>` : ''}
+      ${!r && !this.busy && !this.err ? `<div class="chips" style="margin-top:10px">${['Musica per studiare', 'Lo-fi', 'Piano classico', 'Colonne sonore', 'Hans Zimmer'].map(c => `<button class="chip" data-amq="${esc(c)}">${esc(c)}</button>`).join('')}</div>` : ''}`
+      : `<p class="muted" style="font-size:14px;margin:8px 0 0">Incolla il link di una playlist o di un album di Apple Music in “Aggiungi playlist” qui sotto. Per cercare e ascoltare dentro Orbita usa il programma o il sito.</p>`}`;
+  },
+  paint() { const h = $('#amCard'); if (h) { const f = document.activeElement && document.activeElement.id === 'amQ'; h.innerHTML = this.html(); this.wire(h); if (f) { const i = $('#amQ', h); i.focus(); i.setSelectionRange(i.value.length, i.value.length); } } },
+  wire(root) {
+    const q = $('#amQ', root); if (q) q.onkeydown = e => { if (e.key === 'Enter') this.search(q.value); };
+    wireSeg(root, 'amK', v => { this.kind = v; if (this.q) this.search(this.q); });
+    $$('[data-amq]', root).forEach(b => b.onclick = () => this.search(b.dataset.amq));
+    $$('[data-amplay]', root).forEach(b => b.onclick = () => this.play(+b.dataset.amplay));
+    $$('[data-amuse]', root).forEach(b => b.onclick = () => this.useForFocus(this.res[+b.dataset.amuse]));
+  },
+};
+/* playlists for focus: Spotify or Apple Music links */
+editPl = function (id) {
+  const p = id ? S.music.playlists.find(x => x.id === id) : null;
+  const sh = openSheet({
+    title: p ? 'Playlist' : 'Nuova playlist', left: { label: 'Annulla' },
+    right: { label: p ? 'Fine' : 'Aggiungi', act: s => {
+      const url = $('#plU', s.el).value.trim(), name = $('#plN', s.el).value.trim(), apple = !!amParse(url);
+      if (!spId(url) && !apple) { $('#plErr', s.el).hidden = false; return; }
+      const o = p || { id: uid(), c: apple ? '#FA2D48' : ['#1E3264', '#8C1932', '#477D95', '#503750', '#0D73EC', '#E8115B', '#148A08', '#BA5D07'][S.music.playlists.length % 8] };
+      Object.assign(o, { url, provider: apple ? 'apple' : 'spotify', name: name || 'La mia playlist', sub: $('#plS', s.el).value.trim() });
+      if (!p) S.music.playlists.push(o);
+      S.music.cur = o.id; save('music'); s.close(); App.refresh();
+    } },
+    body: `<input class="input" id="plU" placeholder="Link di Spotify o di Apple Music" value="${esc(p ? p.url : '')}" inputmode="url">
+      <p class="muted" id="plErr" hidden style="margin:0;color:var(--red);font-size:14px">Incolla un link di Spotify (open.spotify.com/…) o di Apple Music (music.apple.com/…). Lo trovi in Condividi › Copia link.</p>
+      <input class="input" id="plN" placeholder="Nome" value="${esc(p ? p.name : '')}"><input class="input" id="plS" placeholder="Descrizione (facoltativa)" value="${esc(p ? p.sub || '' : '')}">
+      ${p ? `<button class="btn danger" id="plDel">${ico('trash', 'sm')}Elimina playlist</button>` : ''}`,
+    onMount(el, api) {
+      const d = $('#plDel', el); if (d) d.onclick = () => { S.music.playlists = S.music.playlists.filter(x => x !== p); if (S.music.cur === p.id) S.music.cur = (S.music.playlists[0] || {}).id || null; save('music'); api.close(); App.refresh(); };
+      setTimeout(() => $('#plU', el).focus(), 150);
+    },
+  });
+};
+{ // Apple Music card in "Focus e musica"
+  const oldR = VIEWS.focus.render, oldM = VIEWS.focus.mount;
+  VIEWS.focus.render = function () {
+    let h = oldR.call(this).replace('<small>Incolla un link di Spotify</small>', '<small>Spotify o Apple Music</small>');
+    const mark = '<div class="section-h">Playlist per lo studio</div>', i = h.indexOf(mark);
+    const card = `<div class="section-h">Apple Music</div><div class="card" id="amCard">${AM.html()}</div>`;
+    return i >= 0 ? h.slice(0, i) + card + h.slice(i) : h + card;
+  };
+  VIEWS.focus.mount = function (root) { oldM.call(this, root); const c = $('#amCard', root); if (c) AM.wire(c); };
+}
 
 /* =========================================================
    BOARDS — Apple Pencil whiteboard (pressure, palm rejection,
