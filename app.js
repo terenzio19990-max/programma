@@ -4887,6 +4887,11 @@ const AIX = {
     list = list.filter(m => !/embed|tts|whisper|audio|image-generation|imagen|veo|guard|moderation|aqa|live/i.test(m));
     this.models[p] = { list }; return this.models[p];
   },
+  busy(r) { return r.code === 'rate_limited' || /high demand|overload|unavailable|try again later|temporar|capacity|503|529|RESOURCE_EXHAUSTED|too many requests/i.test(String(r.message || '') + ' ' + (r.status || '')); },
+  /** another model of the same service to fall back on when the chosen one is overloaded */
+  async alt(p, tried, needVision) { let list = (this.models[p] && this.models[p].list) || null; if (!list) { try { list = (await this.loadModels(p)).list || null; } catch (_) {} }
+    const pref = { gemini: [/gemini-[\d.]+-flash$/i, /gemini-flash-latest/i, /gemini-[\d.]+-flash-lite$/i, /gemini-flash-lite-latest/i, /gemini-[\d.]+-pro$/i], groq: this.P.groq.pick, openrouter: this.P.openrouter.pick, anthropic: [/haiku/i, /sonnet/i], ollama: [/./] }[p] || [/./];
+    for (const re of pref) { const m = (list || []).filter(x => re.test(x) && !tried.has(x) && (!needVision || this.vision(x))).sort().reverse()[0]; if (m) return m; } return ''; },
   pickModel(p, list) { for (const re of this.P[p].pick) { const m = list.find(x => re.test(x)); if (m) return m; } return list[0] || ''; },
   err(r, shown) { const code = { bad_key: 'bad_key', rate_limited: 'rate_limited', model_not_found: 'model_not_found', network: 'network', cancelled: 'cancelled', not_configured: 'not_configured', bad_request: 'bad_request' }[r.code] || 'upstream_error'; return { code, message: r.message || code, ...(shown ? { text: shown } : {}) }; },
   async toDataUrl(blob) {
@@ -4917,17 +4922,22 @@ const AIX = {
       }
       const clean = sc => { if (!sc || typeof sc !== 'object') return sc; if (Array.isArray(sc)) return sc.map(clean); const o = {}; for (const [k, v] of Object.entries(sc)) { if (k === 'additionalProperties' || k === '$schema' || k === 'default') continue; o[k] = clean(v); } if (o.enum && o.type && o.type !== 'string') { o.description = ((o.description || '') + ' Valori ammessi: ' + o.enum.join(', ')).trim(); delete o.enum; } return o; };
       const tools = tl ? tl.map(t => ({ type: 'function', function: { name: t.name, description: t.description || '', parameters: clean(t.inputSchema || { type: 'object', properties: {} }) } })) : null;
-      let useTools = !!tools, rounds = 0, shown = '';
+      let useTools = !!tools, rounds = 0, shown = '', cur = c.model, tries = 0; const tried = new Set([c.model]);
       const abort = () => DESK.ai.cancel(id); if (opts.signal) opts.signal.addEventListener('abort', abort);
       try {
         for (;;) {
           if (opts.signal && opts.signal.aborted) throw { code: 'cancelled', message: 'cancelled' };
-          const body = { model: c.model, messages: msgs, temperature: opts.json ? .2 : .6, ...(useTools ? { tools, tool_choice: 'auto' } : {}) };
+          const body = { model: cur, messages: msgs, temperature: opts.json ? .2 : .6, ...(useTools ? { tools, tool_choice: 'auto' } : {}) };
           if (c.provider === 'anthropic') body.max_tokens = 4096;
           const r = await DESK.ai.chat(id, c.provider, body);
           if (opts.signal && opts.signal.aborted) throw { code: 'cancelled', message: 'cancelled' };
           if (!r.ok) {
             if (useTools && r.code === 'bad_request' && /tool|function/i.test(r.message || '')) { useTools = false; continue; }
+            /* busy or overloaded (e.g. Gemini "high demand", 503, 429): wait and retry, then switch to a sibling model of the same service */
+            if (self.busy(r) && tries < 6) { tries++;
+              if (tries <= 2) { if (opts.onBusy) try { opts.onBusy(tries); } catch (_) {} await new Promise(z => setTimeout(z, tries * 2500)); continue; }
+              const alt = await self.alt(c.provider, tried, opts.images && opts.images.length); if (alt) { tried.add(alt); cur = alt; if (opts.onBusy) try { opts.onBusy(tries, alt); } catch (_) {} continue; }
+              await new Promise(z => setTimeout(z, 4000)); continue; }
             throw self.err(r, shown);
           }
           const ch = r.json && r.json.choices && r.json.choices[0], m = ch && ch.message;
@@ -4971,7 +4981,7 @@ if (DESK) {
   aiUnavailable = () => { Island.toast({ icon: 'spark', c: 'var(--purple)', t: 'Collega un\'intelligenza artificiale', s: 'Account › Intelligenza artificiale: ce ne sono di gratuite', ms: 3600 }); go('account'); setTimeout(() => { const el = $('#aiSec'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 250); };
   { const old = aiError;
     aiError = e => {
-      const m = { bad_key: ['Chiave IA non valida', 'Controllala in Account › Intelligenza artificiale'], network: ['Servizio IA non raggiungibile', AIX.conf().provider === 'ollama' ? 'Apri Ollama sul computer e riprova' : 'Controlla la connessione'], model_not_found: ['Modello IA non disponibile', 'Scegline un altro in Account'], not_configured: ['IA non configurata', 'Account › Intelligenza artificiale'], upstream_error: ['Il servizio IA ha dato un errore', String((e && e.message) || '').slice(0, 90) || 'Riprova tra poco'], bad_request: ['Richiesta non accettata dal modello', 'Prova un altro modello in Account'] }[e && e.code];
+      const m = { bad_key: ['Chiave IA non valida', 'Controllala in Account › Intelligenza artificiale'], network: ['Servizio IA non raggiungibile', AIX.conf().provider === 'ollama' ? 'Apri Ollama sul computer e riprova' : 'Controlla la connessione'], model_not_found: ['Modello IA non disponibile', 'Scegline un altro in Account'], not_configured: ['IA non configurata', 'Account › Intelligenza artificiale'], upstream_error: /high demand|overload|unavailable|try again|capacity|503/i.test(String(e && e.message)) ? ['Il servizio IA è sovraccarico', 'Succede a volte con Gemini gratis: riprova tra un minuto'] : ['Il servizio IA ha dato un errore', String((e && e.message) || '').slice(0, 90) || 'Riprova tra poco'], bad_request: ['Richiesta non accettata dal modello', 'Prova un altro modello in Account'] }[e && e.code];
       if (m) return Island.toast({ icon: 'spark', c: 'var(--red)', t: m[0], s: m[1], ms: 4200 });
       return old(e);
     };
@@ -13707,17 +13717,25 @@ async function routeMap(box, rt, opt = {}) { const m = await miniMap(box, [{ lat
   if (rt.geom && rt.geom.length > 1) { const line = window.L.polyline(rt.geom.map(([x, y]) => [y, x]), { color: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#0A84FF', weight: 5, opacity: .85 }).addTo(m); m.fitBounds(line.getBounds(), { padding: [34, 34] }); }
   return m; }
 const routeBtns = rt => `<a class="btn sm primary" target="_blank" rel="noopener" href="${esc(Route.link(rt))}">🧭 Itinerario</a><a class="btn sm" target="_blank" rel="noopener" href="${esc(Route.url(rt, !Route.apple()))}">${Route.apple() ? 'Google Maps' : 'Apple Mappe'}</a>`;
+/** text from photos with Tesseract (free, on the device) */
+async function ocrImages(images) { await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js'); const T = window.Tesseract; if (!T) return ''; const w = await T.createWorker(['ita', 'eng']); let out = ''; try { for (const im of images.slice(0, 4)) { const r = await w.recognize(im); out += '\n' + ((r && r.data && r.data.text) || ''); } } finally { try { await w.terminate(); } catch (_) {} } return out.trim(); }
+/** a plain-Italian reason for an AI failure */
+function scanWhy(e) { const c = e && e.code, m = String((e && e.message) || '').slice(0, 160);
+  if (/high demand|overload|unavailable|try again later|capacity|503|529/i.test(m)) return ['Il servizio di intelligenza artificiale è sovraccarico in questo momento.', 'Ho già riprovato da solo e con un altro modello. Aspetta un minuto e tocca Riprova: di solito passa subito.'];
+  return ({ no_vision: [m, 'Vai in Account › Intelligenza artificiale e scegli Google Gemini (gratis): legge anche le foto. Oppure incolla il testo dell\'email.'], not_configured: ['L\'intelligenza artificiale non è collegata.', 'Account › Intelligenza artificiale: Google Gemini è gratis.'], bad_key: ['La chiave dell\'intelligenza artificiale non è valida.', 'Controllala in Account › Intelligenza artificiale.'], rate_limited: ['Troppe richieste all\'intelligenza artificiale.', 'Aspetta un minuto e riprova.'], network: ['Il servizio di intelligenza artificiale non risponde.', 'Controlla la connessione.'], model_not_found: ['Il modello scelto non esiste più.', 'Scegline un altro in Account › Intelligenza artificiale.'], bad_request: ['Il modello non accetta questo documento.', 'Prova con Google Gemini in Account › Intelligenza artificiale, oppure incolla il testo.'], invalid_json: ['L\'intelligenza artificiale ha risposto in modo confuso.', 'Riprova: di solito la seconda volta va.'], not_granted: ['Non hai dato il permesso a Claude.', 'Riprova e consenti quando te lo chiede.'] })[c] || [m ? 'Errore: ' + m : 'Non sono riuscito a leggere il documento.', 'Prova con una foto più nitida, un PDF o incolla il testo dell\'email.']; }
 const SmartScan = {
   async read(files, text) { const sample = await Cap.get('sample'); if (!sample) { aiUnavailable(); return null; } let images = [], txt = text || '';
     for (const f of files || []) { if (/pdf/i.test(f.type) || /\.pdf$/i.test(f.name)) { const p = await readPdf(f, true); if ((p.text || '').trim().length > 80) txt += '\n' + p.text; images.push(...(p.images || []).slice(0, 2)); } else if (/^image\//.test(f.type)) images.push(f); else if (/^text\//.test(f.type)) txt += '\n' + await f.text(); }
     if (!txt.trim() && !images.length) return null;
+    /* a model that can't see pictures (e.g. Groq, many free ones): read the text in the photo here, on the device */
+    if (images.length) { let lim = null; try { lim = sample.limits ? await sample.limits() : null; } catch (_) {} if (lim && !lim.images) { this.onStep && this.onStep('ocr'); const t = await ocrImages(images).catch(() => ''); if (t.replace(/\s/g, '').length > 40) { txt += '\n' + t; images = []; } else if (!txt.trim()) throw { code: 'no_vision', message: 'Il modello di intelligenza artificiale scelto non legge le foto e non sono riuscito a leggere il testo dell\'immagine.' }; else images = []; } }
     const r = await sample.json(`Oggi è ${todayK()} (${DOW[new Date().getDay()]}). ${images.length ? 'Nelle immagini c\'è' : 'Qui sotto c\'è'} un documento: può essere un biglietto (treno, aereo, bus, nave, concerto, cinema, museo), una prenotazione (hotel, ristorante, visita medica, auto a noleggio), un invito, una convocazione o l'email di conferma di qualcosa. Estrai SOLO le informazioni scritte, senza inventare. Per date relative calcola la data esatta. Rispondi solo con JSON {
 "tipo": breve descrizione di cosa è (es. "biglietto Frecciarossa", "prenotazione hotel"),
 "travel": [{"mode": "treno"|"aereo"|"bus"|"nave"|"auto"|"altro", "from": partenza, "to": arrivo, "date": "YYYY-MM-DD", "dep": "HH:MM", "arr": "HH:MM" o "", "arr_date": "YYYY-MM-DD" se diversa, "code": numero treno/volo, "seat": posto/carrozza, "carrier": compagnia, "booking": codice prenotazione/PNR, "gate": gate o binario se c'è, "checkin": "YYYY-MM-DDTHH:MM" quando apre il check-in online se indicato altrimenti ""}],
 "events": [{"title": titolo breve, "date": "YYYY-MM-DD", "start": "HH:MM" o "", "end": "HH:MM" o "", "place": luogo/indirizzo, "notes": dettagli utili (codice, sala, posto, medico…), "bring": [cose da portare indicate nel documento]}],
 "stay": [{"name": nome struttura, "place": indirizzo/città, "in_date": "YYYY-MM-DD", "in_time": "HH:MM" o "", "out_date": "YYYY-MM-DD", "out_time": "HH:MM" o "", "code": codice prenotazione}],
 "tasks": [{"title": cosa fare (es. "pagare il saldo", "portare la tessera sanitaria", "fare il check-in online"), "due": "YYYY-MM-DD", "time": "HH:MM" o ""}],
-"city": città principale di destinazione o dell'evento}.${txt.trim() ? '\n\n' + txt.slice(0, 14000) : ''}`, { images: images.slice(0, 4), cache: false });
+"city": città principale di destinazione o dell'evento}.${txt.trim() ? '\n\n' + txt.slice(0, 14000) : ''}`, { images: images.slice(0, 4), cache: false, onBusy: (n, alt) => { this.onStep && this.onStep(alt ? 'alt:' + alt : 'busy') } });
     return r && typeof r === 'object' ? r : null; },
   /** turn the raw read into a list of proposals the user can tick */
   plan(r, opt = {}) { const P = [], toSt = +opt.toStation || +S.profile.toStation || 20;
@@ -13750,7 +13768,7 @@ const SmartScan = {
     if (file) (async () => { const old = UI.docFilter; UI.docFilter = 'all'; const before = new Set(S.docs.map(d => d.id)); try { await Docs.upload([file]); } catch (_) {} UI.docFilter = old; const d = S.docs.find(x => !before.has(x.id)); if (d) { if (trip) { d.trip = trip.id; d.subject = 'Viaggi'; } save('docs'); } })();
     Alerts.sync && Alerts.sync(); return { days: [...days].sort(), trip }; },
 };
-function smartScan(pre) { let files = [], step = 'pick', R = null, P = [], tripMode = 'new'; const forced = pre && pre.trip ? S.trips.find(t => t.id === pre.trip) || null : null;
+function smartScan(pre) { let files = [], step = 'pick', R = null, P = [], tripMode = 'new', why = null; const forced = pre && pre.trip ? S.trips.find(t => t.id === pre.trip) || null : null;
   const sh = openSheet({ title: forced ? '📷 Biglietto per ' + forced.title : '📷 Scansiona e organizza', wide: true, left: { label: 'Chiudi' }, body: '<div id="ssB" style="display:flex;flex-direction:column;gap:12px"></div>' }), B = $('#ssB', sh.el);
   const pick = (accept, cam) => { const i = document.createElement('input'); i.type = 'file'; i.multiple = true; i.accept = accept; if (cam) i.setAttribute('capture', 'environment'); i.onchange = () => { files.push(...i.files); paint(); }; i.click(); };
   const paint = () => {
@@ -13767,9 +13785,12 @@ function smartScan(pre) { let files = [], step = 'pick', R = null, P = [], tripM
       $('#ssHere', B).onclick = async () => { try { const g = await geoHere(); S.profile.home = { addr: $('#ssH', B).value.trim() || 'Posizione salvata', lat: g.lat, lng: g.lng }; save('profile'); if (!$('#ssH', B).value.trim()) $('#ssH', B).value = 'Posizione salvata'; Island.toast({ icon: 'pin', c: 'var(--green)', t: 'Casa salvata', s: 'Userò questo punto per calcolare i percorsi', ms: 2200 }); } catch (_) { Island.toast({ icon: 'pin', c: 'var(--orange)', t: 'Posizione non disponibile', s: 'Scrivi l\'indirizzo', ms: 2400 }); } };
       $('#ssC', B).onclick = () => pick('image/*', true); $('#ssF', B).onclick = () => pick('image/*,.pdf,application/pdf'); $$('[data-ssx]', B).forEach(b => b.onclick = () => { files.splice(+b.dataset.ssx, 1); paint(); });
       $('#ssGo', B).onclick = async () => { const txt = $('#ssT', B).value.trim(); S.profile.toStation = +$('#ssM', B).value || 20; { const ha = $('#ssH', B).value.trim(), oh = S.profile.home || {}; if (ha !== (oh.addr || '')) S.profile.home = ha ? (ha === 'Posizione salvata' && oh.lat != null ? oh : { addr: ha }) : null; } save('profile'); if (!files.length && !txt) { Island.toast({ icon: 'image', c: 'var(--orange)', t: 'Aggiungi una foto, un PDF o il testo', ms: 2000 }); return; }
-        step = 'wait'; paint(); try { R = await SmartScan.read(files, txt); } catch (e) { aiError(e); R = null; } if (!R) { step = 'pick'; paint(); Island.toast({ icon: 'x', c: 'var(--red)', t: 'Non riesco a leggere il documento', s: 'Prova con una foto più nitida', ms: 3000 }); return; }
+        if (!(await Cap.get('sample'))) { aiUnavailable(); return; }
+        step = 'wait'; why = null; paint(); SmartScan.onStep = k => { const b = $('.empty p', B); if (!b) return; b.textContent = k === 'ocr' ? 'Leggo il testo dalla foto (prima volta: qualche secondo in più)…' : k === 'busy' ? 'Il servizio IA è affollato: riprovo tra un attimo…' : /^alt:/.test(k) ? 'Il modello è affollato: provo con ' + k.slice(4) + '…' : b.textContent; }; try { R = await SmartScan.read(files, txt); } catch (e) { R = null; why = scanWhy(e); } SmartScan.onStep = null; if (!R) { why ||= ['Non ho trovato niente da leggere.', 'Prova con una foto più nitida, il PDF originale o incolla il testo dell\'email.']; step = 'err'; paint(); return; }
         if ((R.travel || []).length || (R.events || []).some(e => e.place)) { step = 'route'; paint(); try { await Route.prep(R); } catch (_) {} }
         P = SmartScan.plan(R); if (!P.length) { step = 'pick'; paint(); Island.toast({ icon: 'cal', c: 'var(--orange)', t: 'Non trovo date o orari in questo documento', ms: 3000 }); return; } step = 'review'; paint(); }; return; }
+    if (step === 'err') { B.innerHTML = `<div class="ss-err"><span>⚠️</span><b>${esc(why[0])}</b><p>${esc(why[1])}</p></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="ssRe">${ico('refresh', 'sm')}Riprova</button><button class="btn" id="ssBk2">Indietro</button>${/Account/.test(why[1]) ? '<button class="btn" id="ssAi">Apri le impostazioni IA</button>' : ''}</div>`;
+      $('#ssRe', B).onclick = () => { step = 'pick'; paint(); $('#ssGo', B).click(); }; $('#ssBk2', B).onclick = () => { step = 'pick'; paint(); }; const a = $('#ssAi', B); if (a) a.onclick = () => { sh.close(); aiUnavailable(); }; return; }
     if (step === 'route') { B.innerHTML = `<div class="empty" style="padding:30px 10px"><span class="ai-orb"></span><b>Calcolo il percorso…</b><p>Strada fino a stazione, aeroporto o luogo, con l'ora di punta.</p></div>`; return; }
     if (step === 'wait') { B.innerHTML = `<div class="empty" style="padding:30px 10px"><span class="ai-orb"></span><b>Leggo il documento…</b><p>Cerco date, orari, posti e codici.</p></div>`; return; }
     if (step === 'review') { const ex = forced || SmartScan.trip(R, P), hasTravel = P.some(p => (p.k === 'leg' || p.stay) && p.on);
