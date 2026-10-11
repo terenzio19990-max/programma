@@ -1,4 +1,4 @@
-<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610120044"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610120101"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Orbita">
@@ -1525,6 +1525,8 @@ body:has(.sheet-wrap) .vc-fab,body:has(.wr) .vc-fab,body:has(.cmd) .vc-fab{opaci
 .live-a{display:flex;flex-direction:column;gap:6px;align-self:center}
 @media (max-width:640px){.live-row{flex-wrap:wrap}.live-row>.grow{flex:1 1 calc(100% - 52px)}.live-a{flex-direction:row;width:100%;padding-left:48px}.live-a .btn{flex:1}}
 .ss-err{display:flex;flex-direction:column;align-items:center;text-align:center;gap:6px;padding:22px 14px;border-radius:16px;background:color-mix(in srgb,var(--orange) 10%,var(--surface))}.ss-err>span{font-size:34px}.ss-err b{font-size:17px}.ss-err p{margin:0;color:var(--label-2,var(--gray));font-size:14.5px;max-width:460px}
+.ai-prov{display:flex;flex-direction:column}.ai-prov .row{cursor:pointer}.ai-prov .row[aria-checked="true"] .chk{opacity:1}.ai-prov .chk{opacity:0;color:var(--accent);transition:opacity .15s}.ai-prov .t{white-space:normal;overflow:visible}
+.ai-tag{font-size:11px;font-weight:700;letter-spacing:.02em;padding:2px 7px;border-radius:999px;background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green);margin-left:6px;vertical-align:1px;white-space:nowrap}.ai-tag.paid{background:color-mix(in srgb,var(--orange) 16%,transparent);color:var(--orange)}
 </style>
 <div class="app" id="app">
   <aside class="sidebar" id="sidebar" aria-label="Navigazione"></aside>
@@ -1626,7 +1628,7 @@ body:has(.sheet-wrap) .vc-fab,body:has(.wr) .vc-fab,body:has(.cmd) .vc-fab{opaci
     <symbol id="i-bank" viewBox="0 0 24 24"><path d="M3.5 9.5L12 4l8.5 5.5zM5.5 10v7M10 10v7M14 10v7M18.5 10v7M3.5 20h17"/></symbol>
   </defs>
 </svg>
-<script src="app.js?v=202610120044"></script>
+<script src="app.js?v=202610120101"></script>
 <script id="orbita-motion">
 (()=>{
 const RM=matchMedia('(prefers-reduced-motion: reduce)'), FINE=matchMedia('(hover:hover) and (pointer:fine)');
