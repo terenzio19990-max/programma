@@ -1,4 +1,4 @@
-<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610120756"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610121522"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Orbita">
@@ -1534,6 +1534,29 @@ body:has(.sheet-wrap) .vc-fab,body:has(.wr) .vc-fab,body:has(.cmd) .vc-fab{opaci
 .hw-legs{display:flex;flex-direction:column;gap:3px;margin-top:8px;padding-left:10px;border-left:2px solid var(--sep);font-size:13.5px}.hw-legs small{color:var(--label-3,var(--gray))}.hw-a{display:flex;flex-direction:column;gap:6px;flex:none}
 .btn.danger-soft{background:color-mix(in srgb,var(--red) 14%,var(--surface));color:var(--red)}.hw-ev{margin-top:10px;align-self:flex-start}
 @media (max-width:640px){.hw-opt{flex-wrap:wrap}.hw-opt>.grow{flex:1 1 calc(100% - 54px)}.hw-a{flex-direction:row;width:100%;padding-left:54px}.hw-a .btn{flex:1}}
+
+/* ---------- quaderni (GoodNotes) ---------- */
+.nb-lib{margin-bottom:10px}.nb-folders{margin-bottom:8px}
+.bthumb.nb-cover .pv{position:relative;background:color-mix(in srgb,var(--cv) 14%,var(--surface));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--cv) 30%,transparent)}.nb-spine{position:absolute;left:0;top:0;bottom:0;width:8px;background:var(--cv);border-radius:8px 0 0 8px;z-index:1}.nb-star{position:absolute;top:4px;right:6px;color:#FFCC00;font-size:14px;text-shadow:0 1px 2px rgba(0,0,0,.3)}
+.nb-pg{position:absolute;top:62px;left:50%;transform:translateX(-50%);z-index:3;padding:3px 10px;border-radius:99px;background:var(--material-strong);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);font-size:12px;font-weight:600;color:var(--label-2);box-shadow:var(--shadow-sm);pointer-events:none}
+.nb-ro{position:absolute;top:62px;left:12px;z-index:3;padding:5px 12px;border-radius:99px;background:var(--material-strong);font-size:13px;box-shadow:var(--shadow-sm)}.nb-ro button{color:var(--accent);font-weight:600}
+.palette .tool .ico{width:22px;height:22px}.palette{scrollbar-width:none}.palette::-webkit-scrollbar{display:none}
+.nb-add{display:grid;place-items:center;font-weight:700;color:var(--label-2);--c:var(--fill);position:relative;overflow:hidden;cursor:pointer}.nb-add input{position:absolute;inset:0;opacity:0;cursor:pointer}
+.sel-menu{position:absolute;z-index:4;display:flex;align-items:center;gap:2px;padding:5px;border-radius:14px;background:var(--material-strong);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);box-shadow:var(--shadow-lg);max-width:calc(100% - 16px);overflow-x:auto;scrollbar-width:none}.sel-menu::-webkit-scrollbar{display:none}
+.sel-menu button{padding:7px 10px;border-radius:9px;font-size:13.5px;font-weight:600;white-space:nowrap;color:var(--label)}.sel-menu button:hover{background:var(--fill)}.sel-menu button.danger{color:var(--red)}.sel-menu .sm-c{width:22px;height:22px;padding:0;border-radius:50%;background:var(--c);flex:none;margin:0 2px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}.sel-menu .sm-d{width:.5px;height:22px;background:var(--sep);margin:0 4px;flex:none}
+.nb-pop{position:absolute;left:50%;bottom:84px;transform:translateX(-50%);z-index:4;width:min(380px,calc(100% - 24px));padding:14px;border-radius:18px;background:var(--material-strong);backdrop-filter:blur(26px) saturate(180%);-webkit-backdrop-filter:blur(26px) saturate(180%);box-shadow:var(--shadow-lg);display:flex;flex-direction:column;gap:10px}
+.nb-pop b{font-size:15px}.nbp-r{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:14px}.nbp-r .seg{flex:none}.nbp-r input[type=range]{width:170px;accent-color:var(--accent)}
+.nb-txt{position:absolute;z-index:4;min-width:120px;padding:2px 4px;margin:-2px -4px;border:1.5px dashed var(--accent);border-radius:6px;background:color-mix(in srgb,var(--surface) 70%,transparent);font-family:-apple-system,"SF Pro Text","Segoe UI",Inter,sans-serif;resize:none;overflow:hidden;outline:none}
+.nb-els{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px}.nb-el{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px;border-radius:14px;background:var(--fill)}.nb-el canvas{width:100%;max-width:160px;aspect-ratio:4/3}.nb-el small{font-size:12px;color:var(--label-2)}.nb-elx{position:absolute;top:4px;right:8px;font-size:18px;color:var(--label-3)}
+.nb-pgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px;margin-top:12px}.nb-pgt{display:flex;flex-direction:column;gap:6px}.nb-pgc{position:relative;border-radius:8px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.14);background:#fff}.nb-pgc canvas{display:block;width:100%;height:auto}.nb-pgt.cur .nb-pgc{box-shadow:0 0 0 3px var(--accent),0 2px 10px rgba(0,0,0,.14)}.nb-bm{position:absolute;top:2px;right:6px}.nb-pgl{display:flex;align-items:center;gap:6px;font-size:13px}.nb-pgl .grow{color:var(--label-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nb-tpls{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:10px}.nb-tpl{display:flex;flex-direction:column;align-items:center;gap:5px;padding:6px;border-radius:12px}.nb-tpl canvas{width:72px;height:96px;border-radius:5px;box-shadow:0 1px 6px rgba(0,0,0,.15)}.nb-tpl small{font-size:12px;text-align:center}.nb-tpl[aria-pressed="true"]{background:color-mix(in srgb,var(--accent) 14%,transparent)}.nb-tpl[aria-pressed="true"] canvas{box-shadow:0 0 0 2.5px var(--accent)}
+.nb-cv{width:32px;height:32px;border-radius:9px;background:var(--c);flex:none}.nb-cv[aria-pressed="true"]{box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--c)}
+.icon-btn.nb-rec{color:#fff;background:var(--red);animation:nbrec 1.2s infinite}@keyframes nbrec{50%{opacity:.6}}
+.board-wrap.nb-present{border-radius:0;height:100vh}.board-wrap.nb-present .board-top,.board-wrap.nb-present .nb-pg,.board-wrap.nb-present .palette{opacity:0;transition:opacity .3s}.board-wrap.nb-present:hover .palette{opacity:1}
+.nb-hint{font-size:12.5px;margin:10px 4px 0}
+@media (max-width:640px){.nb-pop{bottom:76px}.nbp-r{flex-wrap:wrap}.nbp-r input[type=range]{width:100%}}
+.nb-pop[hidden],.sel-menu[hidden],.nb-pg[hidden],.nb-ro[hidden]{display:none!important}
+@media (max-width:640px){.board-wrap{height:calc(100dvh - 210px);min-height:380px}.board-wrap.with-lib{height:calc(100dvh - 375px);min-height:340px}.board-top{gap:4px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}.board-top>span[style]{display:none}.board-top .board-title{width:92px;min-width:0}.board-top .glass .icon-btn{width:32px;height:32px}.board-top .glass{padding:2px}.nb-lib .bthumb{width:120px}.nb-lib .bthumb .pv{height:70px}.nb-hint{display:none}body:has(.board-wrap) .vc-fab{display:none}.palette{bottom:10px}.nb-pop{bottom:70px}}
 </style>
 <div class="app" id="app">
   <aside class="sidebar" id="sidebar" aria-label="Navigazione"></aside>
@@ -1635,7 +1658,7 @@ body:has(.sheet-wrap) .vc-fab,body:has(.wr) .vc-fab,body:has(.cmd) .vc-fab{opaci
     <symbol id="i-bank" viewBox="0 0 24 24"><path d="M3.5 9.5L12 4l8.5 5.5zM5.5 10v7M10 10v7M14 10v7M18.5 10v7M3.5 20h17"/></symbol>
   </defs>
 </svg>
-<script src="app.js?v=202610120756"></script>
+<script src="app.js?v=202610121522"></script>
 <script id="orbita-motion">
 (()=>{
 const RM=matchMedia('(prefers-reduced-motion: reduce)'), FINE=matchMedia('(hover:hover) and (pointer:fine)');
