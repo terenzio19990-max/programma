@@ -1,4 +1,4 @@
-<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610121626"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610121913"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Orbita">
@@ -1561,6 +1561,39 @@ body:has(.sheet-wrap) .vc-fab,body:has(.wr) .vc-fab,body:has(.cmd) .vc-fab{opaci
 .nb-swap{font-weight:700}
 .nb-swap.on,.nb-rul.on{background:var(--accent,#0a84ff);color:#fff}
 @media (max-width:640px){.board-wrap{height:calc(100dvh - 210px);min-height:380px}.board-wrap.with-lib{height:calc(100dvh - 375px);min-height:340px}.board-top{gap:4px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}.board-top>span[style]{display:none}.board-top .board-title{width:92px;min-width:0}.board-top .glass .icon-btn{width:32px;height:32px}.board-top .glass{padding:2px}.nb-lib .bthumb{width:120px}.nb-lib .bthumb .pv{height:70px}.nb-hint{display:none}body:has(.board-wrap) .vc-fab{display:none}.palette{bottom:10px}.nb-pop{bottom:70px}}
+
+/* piano di studio 2 */
+.sp-wrap{display:flex;flex-direction:column}.sp-wrap+.sp-wrap{border-top:.5px solid var(--sep)}.sp-wrap .sp-row{border-top:0!important}
+.sp-sub{display:flex;flex-direction:column;gap:7px;padding:0 0 12px 58px}
+.sp-prog{height:5px;border-radius:3px;background:var(--fill);overflow:hidden;max-width:360px}.sp-prog i{display:block;height:100%;background:var(--c,var(--indigo));border-radius:3px;transition:width .5s cubic-bezier(.2,.8,.2,1)}
+.sp-pt{font-size:12px;margin-top:-3px}
+.sp-chips{display:flex;flex-wrap:wrap;gap:6px}
+.sp-u{display:inline-flex;align-items:center;gap:6px;min-height:32px;padding:5px 11px 5px 8px;border-radius:999px;border:0;background:color-mix(in srgb,var(--c,var(--indigo)) 12%,var(--cell));color:var(--label);font:inherit;font-size:13.5px;cursor:pointer;max-width:100%;transition:transform .15s,background .2s}
+.sp-u span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}.sp-u small{color:var(--label-3);font-size:12px}
+.sp-u .ico{width:16px;height:16px;padding:2px;border-radius:50%;border:1.5px solid var(--c,var(--indigo));color:transparent;box-sizing:border-box}
+.sp-u:hover .ico{color:var(--c,var(--indigo))}.sp-u:active{transform:scale(.96)}
+.sp-u[aria-pressed=true]{background:color-mix(in srgb,var(--green) 16%,var(--cell))}.sp-u[aria-pressed=true] .ico{background:var(--green);border-color:var(--green);color:#fff}.sp-u[aria-pressed=true] span{text-decoration:line-through;color:var(--label-3)}
+.sp-u.rev{cursor:default;background:color-mix(in srgb,var(--orange) 12%,var(--cell))}.sp-u.fc{background:color-mix(in srgb,var(--purple) 12%,var(--cell))}
+.sp-late{font-size:13px;color:var(--indigo)}.sp-mat{align-self:flex-start;margin-left:-8px}
+.spu-list .row{gap:8px;padding-top:6px;padding-bottom:6px}.spu-t{flex:1;min-width:0}.spu-p{width:72px;text-align:center}.spu-w{width:92px;font-size:12px;text-align:right}.spu-a{display:flex;gap:2px}.spu-row.done .spu-t{text-decoration:line-through;color:var(--label-3)}
+@media (max-width:640px){.sp-sub{padding-left:0}.spu-list .row{flex-wrap:wrap;row-gap:6px}.spu-t{flex:1 1 calc(100% - 52px)}.spu-p{width:76px;margin-left:44px;padding-left:8px;padding-right:8px}.spu-w{display:block;flex:1;text-align:left;width:auto}.spu-a{margin-left:auto}}
+.spu-p{padding-left:8px;padding-right:8px}
+/* calendario Apple */
+.ap-steps{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+/* ricerca nei quaderni */
+#nsR mark,.cmd mark{background:color-mix(in srgb,var(--yellow,#FFCC00) 45%,transparent);color:inherit;border-radius:3px;padding:0 1px}
+/* il tuo mattino */
+.mb-card{background:linear-gradient(160deg,color-mix(in srgb,var(--orange) 12%,var(--surface)) 0%,color-mix(in srgb,var(--blue) 7%,var(--surface)) 60%,var(--surface))}
+.mb-head{display:flex;align-items:center;gap:16px;justify-content:space-between;margin:-2px 0 12px}
+.mb-g{font-size:26px;font-weight:700;letter-spacing:-.02em;line-height:1.1}.mb-d{color:var(--label-2);font-size:15px;margin-top:3px}
+.mb-w{display:flex;align-items:center;gap:10px;padding:8px 14px 8px 10px;border-radius:16px;background:color-mix(in srgb,var(--surface) 70%,transparent);box-shadow:var(--shadow-sm)}.mb-wi{font-size:30px;line-height:1}.mb-w b{font-size:22px;display:block;line-height:1}.mb-w small{color:var(--label-2);font-size:12.5px;white-space:nowrap}
+.mb-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:8px}
+.mb-r{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:14px;background:color-mix(in srgb,var(--surface) 78%,transparent);min-width:0}
+.mb-r .t{font-weight:600;font-size:15px;line-height:1.35}.mb-r .s{color:var(--label-2);font-size:13px;margin-top:1px}.mb-e{font-size:22px;width:28px;text-align:center;flex:none}
+.mb-r.go{background:color-mix(in srgb,var(--blue) 12%,var(--surface))}.mb-r.warn{background:color-mix(in srgb,var(--orange) 14%,var(--surface))}.mb-r.bad{background:color-mix(in srgb,var(--red) 14%,var(--surface))}
+.mb-r .btn{flex:none}
+.mb-sheet{border-radius:var(--r-lg);padding:16px}
+@media (max-width:640px){.mb-head{flex-direction:column;align-items:flex-start;gap:10px}.mb-g{font-size:22px}.mb-list{grid-template-columns:1fr}}
 </style>
 <div class="app" id="app">
   <aside class="sidebar" id="sidebar" aria-label="Navigazione"></aside>
@@ -1662,7 +1695,7 @@ body:has(.sheet-wrap) .vc-fab,body:has(.wr) .vc-fab,body:has(.cmd) .vc-fab{opaci
     <symbol id="i-bank" viewBox="0 0 24 24"><path d="M3.5 9.5L12 4l8.5 5.5zM5.5 10v7M10 10v7M14 10v7M18.5 10v7M3.5 20h17"/></symbol>
   </defs>
 </svg>
-<script src="app.js?v=202610121626"></script>
+<script src="app.js?v=202610121913"></script>
 <script id="orbita-motion">
 (()=>{
 const RM=matchMedia('(prefers-reduced-motion: reduce)'), FINE=matchMedia('(hover:hover) and (pointer:fine)');
