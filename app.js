@@ -15401,6 +15401,201 @@ document.addEventListener('keydown', e => { if (UI.view !== 'boards' || !Board.b
 if (typeof FEAT !== 'undefined') { const i = FEAT.findIndex(f => f[2] === 'Mappa concettuale'); FEAT.splice(i >= 0 ? i + 1 : FEAT.length, 0, ['Studio', '📒', 'Quaderni come GoodNotes', 'Pagine e modelli, lazo, forme perfette, testo, immagini, nastro, laser, audio, IA', () => ACT.newBoard()]); }
 
 /* =========================================================
+   LAVAGNA → QUADERNI · Parte 4: precisione e velocità
+   · due livelli di disegno: il foglio (in cache, ridisegnato solo
+     quando cambia) e il tratto in corso (solo lui, a ogni evento,
+     con i punti previsti dal sistema) → niente ritardo della penna
+   · tratto vero da penna: contorno a larghezza variabile con
+     pressione, rastremazione, punte arrotondate (come GoodNotes)
+   · scorrimento senza ridisegnare tutto, sposta/ruota fluidi
+   · forme riconosciute molto meglio · righello vero
+   · pagine verticali o orizzontali, nuova pagina scorrendo oltre
+     la fine · scambio rapido tra strumenti
+   ========================================================= */
+/* ---------- pages along an axis (vertical or horizontal) ---------- */
+NB.h = b => b && b.dir === 'h';
+NB.rects = function (b) { const H = this.h(b); let o = 0; return b.pages.map(p => { const [w, h] = this.dim(p); const r = H ? { x: o, y: 0, w, h, p } : { x: -w / 2, y: o, w, h, p }; o += (H ? w : h) + this.GAP; return r; }); };
+NB.pageAt = function (b, x, y) { const R = this.rects(b), H = this.h(b), c = H ? x : y; for (let i = 0; i < R.length; i++) if (c < (H ? R[i].x + R[i].w : R[i].y + R[i].h) + this.GAP / 2) return i; return R.length - 1; };
+NB.strokesOf = function (b, i) { const R = this.rects(b)[i]; if (!R) return []; const H = this.h(b), a = H ? R.x : R.y, z = H ? R.x + R.w : R.y + R.h; return b.strokes.filter(st => { const c = this.center(st)[H ? 0 : 1]; return c >= a - this.GAP / 2 && c < z + this.GAP / 2; }); };
+NB.shiftAfter = function (b, from, d) { const H = this.h(b); for (const st of b.strokes) { const c = this.center(st)[H ? 0 : 1]; if (c >= from) moveStroke(st, H ? d : 0, H ? 0 : d); } };
+NB.addPage = function (b, at, page) { const R = this.rects(b), H = this.h(b), i = clamp(at, 0, b.pages.length), [w, h] = this.dim(page); if (i < R.length) this.shiftAfter(b, (H ? R[i].x : R[i].y) - this.GAP / 2, (H ? w : h) + this.GAP); b.pages.splice(i, 0, page); return i; };
+NB.delPage = function (b, i) { if (b.pages.length < 2) return false; const R = this.rects(b)[i], H = this.h(b), mine = new Set(this.strokesOf(b, i)); b.strokes = b.strokes.filter(st => !mine.has(st)); this.shiftAfter(b, H ? R.x + R.w : R.y + R.h, -((H ? R.w : R.h) + this.GAP)); b.pages.splice(i, 1); return true; };
+NB.setDir = function (b, dir) { if ((b.dir || 'v') === dir) return; const R0 = this.rects(b), G = b.pages.map((_, k) => this.strokesOf(b, k)); b.dir = dir; const R1 = this.rects(b); R0.forEach((r, k) => { const dx = R1[k].x - r.x, dy = R1[k].y - r.y; if (dx || dy) G[k].forEach(st => moveStroke(st, dx, dy)); }); };
+goPage = function (i, anim) { const B = Board, b = B.b; if (!NB.is(b)) return; const R = NB.rects(b)[clamp(i, 0, b.pages.length - 1)]; let to;
+  if (NB.h(b)) { const top = 58, bot = 92, s = clamp(Math.min((B.W - 40) / R.w, (B.H - top - bot) / R.h), .2, 2.5); to = { s, x: B.W / 2 - (R.x + R.w / 2) * s, y: top + (B.H - top - bot - R.h * s) / 2 - R.y * s }; }
+  else { const s = clamp(Math.min((B.W - 40) / R.w, 2.5), .2, 2.5); to = { s, x: B.W / 2 - (R.x + R.w / 2) * s, y: 16 - R.y * s }; }
+  if (!anim) { B.view = to; B.draw(); B.paintPalette(); return; } const v0 = { ...B.view }, t0 = performance.now(), D = 240; cancelAnimationFrame(B._anim);
+  const step = t => { const k = Math.min(1, (t - t0) / D), e = 1 - Math.pow(1 - k, 3); B.view = { s: v0.s + (to.s - v0.s) * e, x: v0.x + (to.x - v0.x) * e, y: v0.y + (to.y - v0.y) * e }; B.draw(); if (k < 1) B._anim = requestAnimationFrame(step); else B.paintPalette(); }; B._anim = requestAnimationFrame(step); };
+Board.curPage = function () { const b = this.b; if (!NB.is(b)) return 0; const [x0, y0, x1, y1] = this.vis(); return NB.h(b) ? NB.pageAt(b, (x0 + x1) / 2, 0) : NB.pageAt(b, 0, (y0 + y1) / 2 - (y1 - y0) * .2); };
+
+/* ---------- ink: a real variable-width outline ---------- */
+const PATHC = new WeakMap();
+function inkBuild(path, p, size, k) { const n0 = p.length / 3; if (!n0) return; let P = []; for (let i = 0; i < n0; i++) { const q = [p[i * 3], p[i * 3 + 1], p[i * 3 + 2]]; const l = P[P.length - 1]; if (l && Math.abs(l[0] - q[0]) < .05 && Math.abs(l[1] - q[1]) < .05) { l[2] = Math.max(l[2], q[2]); continue; } P.push(q); }
+  const n = P.length; if (n > 4) { const S = P.map(q => q.slice()); for (let i = 1; i < n - 1; i++) { S[i][0] = (P[i - 1][0] + P[i][0] * 2 + P[i + 1][0]) / 4; S[i][1] = (P[i - 1][1] + P[i][1] * 2 + P[i + 1][1]) / 4; S[i][2] = (P[i - 1][2] + P[i][2] * 2 + P[i + 1][2]) / 4; } P = S; }
+  const lens = [0]; for (let i = 1; i < n; i++) lens.push(lens[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1])); const L = lens[n - 1], rad = [];
+  for (let i = 0; i < n; i++) { const pr = clamp(P[i][2] || .5, .05, 1); let w; if (k === 'ball') w = size * (.92 + pr * .16); else if (k === 'brush') { const sp = i ? Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]) : 0; w = size * clamp(.1 + Math.pow(pr, 1.2) * 2.6 - sp * .018, .1, 3.2); } else w = size * (.3 + Math.pow(pr, .8) * 1.35);
+    if (k !== 'ball') { const t = Math.min(lens[i], L - lens[i]), tl = Math.max(4, size * 2.6); w *= .42 + .58 * clamp(t / tl, 0, 1); } rad.push(Math.max(.22, w / 2)); }
+  for (let i = 1; i < n; i++) rad[i] = rad[i - 1] * .35 + rad[i] * .65;
+  if (n === 1 || L < .6) { path.moveTo(P[0][0] + rad[0], P[0][1]); path.arc(P[0][0], P[0][1], rad[0], 0, Math.PI * 2); return; }
+  const Lp = [], Rp = [], ang = []; for (let i = 0; i < n; i++) { const a = P[Math.max(0, i - 1)], c = P[Math.min(n - 1, i + 1)]; let dx = c[0] - a[0], dy = c[1] - a[1]; const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l; ang.push(Math.atan2(dy, dx)); Lp.push([P[i][0] - dy * rad[i], P[i][1] + dx * rad[i]]); Rp.push([P[i][0] + dy * rad[i], P[i][1] - dx * rad[i]]); }
+  path.moveTo(Lp[0][0], Lp[0][1]); for (let i = 1; i < n - 1; i++) path.quadraticCurveTo(Lp[i][0], Lp[i][1], (Lp[i][0] + Lp[i + 1][0]) / 2, (Lp[i][1] + Lp[i + 1][1]) / 2); path.lineTo(Lp[n - 1][0], Lp[n - 1][1]);
+  const ae = ang[n - 1]; path.arc(P[n - 1][0], P[n - 1][1], rad[n - 1], ae + Math.PI / 2, ae - Math.PI / 2, true);
+  for (let i = n - 2; i > 0; i--) path.quadraticCurveTo(Rp[i][0], Rp[i][1], (Rp[i][0] + Rp[i - 1][0]) / 2, (Rp[i][1] + Rp[i - 1][1]) / 2); path.lineTo(Rp[0][0], Rp[0][1]);
+  const as = ang[0]; path.arc(P[0][0], P[0][1], rad[0], as - Math.PI / 2, as + Math.PI / 2, true); path.closePath(); }
+function inkPath(st) { const p = st.p, sg = p.length + '|' + p[0] + '|' + p[1] + '|' + p[p.length - 3] + '|' + p[p.length - 2] + '|' + st.w + '|' + (st.k || ''); const c = PATHC.get(st); if (c && c.sg === sg) return c.p; const path = new Path2D(); inkBuild(path, p, st.w, st.k); PATHC.set(st, { sg, p: path }); return path; }
+{ const oD = drawStroke; drawStroke = function (g, st, ink) { if (st.t === 'pen' && !st.hide2) { g.fillStyle = st.c === 'ink' ? ink : st.c; g.fill(inkPath(st)); return; } return oD(g, st, ink); }; }
+
+/* ---------- two layers: cached sheet + live ink ---------- */
+const ARRID = new WeakMap(); let arrN = 0; const arrId = a => { let i = ARRID.get(a); if (!i) { i = ++arrN; ARRID.set(a, i); } return i; };
+Object.assign(Board, { ver: 0, pred: [], rulerAuto: (() => { try { return localStorage.getItem('orbita.rulerAuto') !== '0'; } catch (_) { return true; } })(),
+  sigNow() { const b = this.b, dark = matchMedia('(prefers-color-scheme: dark)').matches; return [b.id, arrId(b.strokes), b.strokes.length, this.ver, b.pages ? b.pages.length + (b.dir || 'v') : 'inf', b.paper, b.bg, this.excl ? this.excl.size : 0, this.W, this.H, dark, this.play ? Math.floor(this.play.t / 200) : ''].join('|'); },
+  sameView(a, c) { return a && c && a.s === c.s && a.x === c.x && a.y === c.y; },
+  ensureLive() { const cv = this.cv; if (!cv) return null; let L = cv.parentNode && $('#boardLive', cv.parentNode); if (!L) { L = document.createElement('canvas'); L.id = 'boardLive'; L.className = 'nb-live'; cv.after(L); } if (this.liveCv !== L) { this.liveCv = L; let g = null; try { g = L.getContext('2d', { desynchronized: true }); } catch (_) {} this.lctx = g || L.getContext('2d'); } if (L.width !== cv.width || L.height !== cv.height) { L.width = cv.width; L.height = cv.height; } return this.lctx; },
+  paint() { const g = this.ctx, d = this.dpr, v = this.view, b = this.b; if (!g || !b) return; const pages = NB.is(b); this.ensureLive();
+    g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, this.cv.width, this.cv.height);
+    if (pages) { g.fillStyle = this.desk(); g.fillRect(0, 0, this.cv.width, this.cv.height); g.setTransform(d * v.s, 0, 0, d * v.s, d * v.x, d * v.y); const [x0, y0, x1, y1] = this.vis(), sh = 1 / v.s;
+      NB.rects(b).forEach((R, i) => { if (R.y > y1 || R.y + R.h < y0 || R.x > x1 || R.x + R.w < x0) return; g.fillStyle = 'rgba(0,0,0,.07)'; g.fillRect(R.x + 2 * sh, R.y + 3 * sh, R.w, R.h); g.fillStyle = 'rgba(0,0,0,.05)'; g.fillRect(R.x - sh, R.y - sh, R.w + 2 * sh, R.h + 2 * sh); g.fillStyle = NB.paper(b); g.fillRect(R.x, R.y, R.w, R.h);
+        g.save(); g.beginPath(); g.rect(R.x, R.y, R.w, R.h); g.clip(); if (R.p.bg) { const im = imgOf({ src: R.p.bg }); if (im) g.drawImage(im, R.x, R.y, R.w, R.h); } drawTpl(g, R, R.p.tpl, NB.lineCol(b), v.s); g.restore();
+        if (R.p.star) { g.save(); g.fillStyle = '#FF3B30'; g.beginPath(); g.moveTo(R.x + R.w - 46, R.y); g.lineTo(R.x + R.w - 26, R.y); g.lineTo(R.x + R.w - 26, R.y + 34); g.lineTo(R.x + R.w - 36, R.y + 26); g.lineTo(R.x + R.w - 46, R.y + 34); g.closePath(); g.fill(); g.restore(); }
+        g.save(); g.fillStyle = 'rgba(128,128,140,.85)'; g.font = `${12 / Math.max(.5, v.s)}px -apple-system, sans-serif`; g.textAlign = 'center'; NB.h(b) ? g.fillText(`${i + 1}${R.p.title ? ' · ' + R.p.title : ''}`, R.x + R.w / 2, R.y + R.h + 20 / Math.max(.5, v.s)) : g.fillText(`${i + 1}${R.p.title ? ' · ' + R.p.title : ''}`, R.x + R.w / 2, R.y + R.h + 22); g.restore(); });
+    } else { g.setTransform(d, 0, 0, d, 0, 0); drawBg(g, b.bg, v, this.W, this.H); }
+    g.setTransform(d * v.s, 0, 0, d * v.s, d * v.x, d * v.y); const ink = pages ? NB.ink(b) : this.ink(), [x0, y0, x1, y1] = this.vis(), P = this.play, X = this.excl;
+    for (const st of b.strokes) { if (X && X.has(st)) continue; const sb = strokeBox(st); if (sb[2] < x0 || sb[0] > x1 || sb[3] < y0 || sb[1] > y1) continue; if (P && st.rec === P.id && st.at > P.t) { g.globalAlpha = .16; drawStroke(g, st, ink); g.globalAlpha = 1; } else drawStroke(g, st, ink); }
+    if (!this.snap) this.snap = document.createElement('canvas'); if (this.snap.width !== this.cv.width || this.snap.height !== this.cv.height) { this.snap.width = this.cv.width; this.snap.height = this.cv.height; } const sg = this.snap.getContext('2d'); sg.setTransform(1, 0, 0, 1, 0, 0); sg.clearRect(0, 0, this.snap.width, this.snap.height); sg.drawImage(this.cv, 0, 0);
+    this.snapV = { ...v }; this.sig = this.sigNow(); this.liveDraw(); this.pageChip(); },
+  desk() { return matchMedia('(prefers-color-scheme: dark)').matches ? '#2C2C30' : '#E4E4EA'; },
+  blit() { const g = this.ctx, d = this.dpr, v = this.view, s0 = this.snapV, k = v.s / s0.s; g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, this.cv.width, this.cv.height); if (NB.is(this.b)) { g.fillStyle = this.desk(); g.fillRect(0, 0, this.cv.width, this.cv.height); } g.imageSmoothingEnabled = true; g.drawImage(this.snap, (v.x - s0.x * k) * d, (v.y - s0.y * k) * d, this.snap.width * k, this.snap.height * k); },
+  draw(force) { if (!this.cv || !this.b || !this.ctx) return; const sg = this.sigNow();
+    if (!force && this.snap && sg === this.sig) { if (this.sameView(this.snapV, this.view)) { this.liveDraw(); return; } this.blit(); this.liveDraw(); this.pageChip(); clearTimeout(this.fullT); this.fullT = setTimeout(() => { cancelAnimationFrame(this.raf); this.raf = requestAnimationFrame(() => this.paint()); }, 110); this.overscroll(); return; }
+    cancelAnimationFrame(this.raf); this.raf = requestAnimationFrame(() => this.paint()); },
+  liveDraw() { const L = this.ensureLive(); if (!L) return; const d = this.dpr, v = this.view, b = this.b; L.setTransform(1, 0, 0, 1, 0, 0); L.clearRect(0, 0, this.liveCv.width, this.liveCv.height); if (!b) return; L.setTransform(d * v.s, 0, 0, d * v.s, d * v.x, d * v.y); const ink = NB.is(b) ? NB.ink(b) : this.ink(), s = v.s;
+    const D = this.drawing; if (D && D.st) { let st = D.st; if (this.pred.length && (st.t === 'pen' || st.t === 'hl') && !D.held) st = { ...st, p: st.p.concat(this.pred) }; drawStroke(L, st, ink); }
+    if (this.excl && this.sel) for (const st of this.sel) drawStroke(L, st, ink);
+    if (this.lasso && this.lasso.length > 1) { L.save(); L.strokeStyle = '#0A84FF'; L.lineWidth = 1.5 / s; L.setLineDash([6 / s, 5 / s]); L.fillStyle = 'rgba(10,132,255,.06)'; L.beginPath(); this.lasso.forEach(([x, y], i) => i ? L.lineTo(x, y) : L.moveTo(x, y)); L.closePath(); L.fill(); L.stroke(); L.restore(); }
+    if (this.sel && this.sel.length) { const bb = this.selBox(); L.save(); L.strokeStyle = '#0A84FF'; L.lineWidth = 1.4 / s; L.setLineDash([7 / s, 5 / s]); L.strokeRect(bb.x, bb.y, bb.w, bb.h); L.setLineDash([]); L.fillStyle = '#fff'; for (const [hx, hy] of this.handles(bb)) { L.beginPath(); L.arc(hx, hy, 7 / s, 0, 7); L.fill(); L.stroke(); } const [rx, ry] = this.rotH(bb); L.beginPath(); L.moveTo(bb.x + bb.w / 2, bb.y); L.lineTo(rx, ry + 7 / s); L.stroke(); L.fillStyle = '#0A84FF'; L.beginPath(); L.arc(rx, ry, 7 / s, 0, 7); L.fill(); L.restore(); }
+    if (this.laser.length) { const now = performance.now(); this.laser = this.laser.filter(q => now - q.t < 750); L.save(); L.lineCap = 'round'; L.lineJoin = 'round'; for (let i = 1; i < this.laser.length; i++) { const a = this.laser[i - 1], q = this.laser[i], k = 1 - (now - q.t) / 750; L.strokeStyle = `rgba(255,45,85,${(k * .9).toFixed(3)})`; L.lineWidth = (3 + 5 * k) / s; L.beginPath(); L.moveTo(a.x, a.y); L.lineTo(q.x, q.y); L.stroke(); } const q = this.laser[this.laser.length - 1]; if (q) { L.fillStyle = '#FF2D55'; L.shadowColor = '#FF2D55'; L.shadowBlur = 14; L.beginPath(); L.arc(q.x, q.y, 5 / s, 0, 7); L.fill(); } L.restore(); if (this.laser.length) { cancelAnimationFrame(this._lz); this._lz = requestAnimationFrame(() => this.liveDraw()); } }
+    if (this.ruler) drawRuler(L, this.ruler, s, this.rLock);
+    this.placeMenu(); },
+});
+{ const oS = Board.saveSoon.bind(Board), oP = Board.persist.bind(Board); Board.saveSoon = function () { this.ver++; return oS(); }; Board.persist = function () { this.ver++; return oP(); }; }
+{ const oR = Board.resize.bind(Board); Board.resize = function () { this.snap = null; this.sig = null; oR(); this.ensureLive(); this.draw(true); }; }
+{ const oU = Board.unmount.bind(Board); Board.unmount = function () { oU(); this.snap = null; this.sig = null; this.liveCv = null; this.lctx = null; this.excl = null; this.pred = []; }; }
+/* selection moves on the live layer only: the rest of the page stays cached */
+{ const oXS = Board.xfStart.bind(Board), oXE = Board.xfEnd.bind(Board); Board.xfStart = function (...a) { oXS(...a); this.excl = new Set(this.sel); this.draw(true); }; Board.xfMove = (o => function (x, y) { const X = this.xf; if (!X) return; const keep = this.draw; this.draw = () => this.liveDraw(); try { o.call(this, x, y); } finally { this.draw = keep; } })(Board.xfMove); Board.xfEnd = function () { this.excl = null; oXE(); this.draw(true); }; }
+{ const oSel = Board.select.bind(Board); Board.select = function (l) { oSel(l); this.liveDraw(); }; }
+
+/* ---------- precise, low-latency input ---------- */
+{ const m2 = Board.move.bind(Board); Board.move = function (e) { const D = this.drawing;
+    if (D && D.pid === e.pointerId && this.pointers.has(e.pointerId)) {
+      if (D.laser) { const [x, y] = this.toWorld(e); this.laser.push({ x, y, t: performance.now() }); this.liveDraw(); return; }
+      if (D.st && (D.st.t === 'pen' || D.st.t === 'hl') && !D.held && !D.tape) { this.pointers.set(e.pointerId, { ...this.pointers.get(e.pointerId), x: e.clientX, y: e.clientY }); const p = D.st.p, s = this.view.s, evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+        for (const ev of (evs.length ? evs : [e])) { let [x, y] = this.toWorld(ev); if (this.rLock) [x, y] = rulerProj(this.rLock, x, y); const lx = p[p.length - 3], ly = p[p.length - 2]; if (Math.hypot(x - lx, y - ly) * s < .45) continue; p.push(r1(x), r1(y), r2(D.pen ? (ev.pressure || .5) : .5)); }
+        const [x, y] = this.toWorld(e); if (D.lm && Math.hypot(x - D.lm[0], y - D.lm[1]) * s > 3) { D.lm = [x, y]; if (!this.rLock) this.armHold(D); }
+        this.pred = []; if (!this.rLock && e.getPredictedEvents) { for (const ev of e.getPredictedEvents().slice(0, 3)) { const [px, py] = this.toWorld(ev); this.pred.push(r1(px), r1(py), r2(D.pen ? (ev.pressure || .5) : .5)); } }
+        this.liveDraw(); return; } }
+    return m2(e); }; }
+{ const u2 = Board.up.bind(Board); Board.up = function (e) { const D = this.drawing, b = this.b, arr0 = b && b.strokes, n0 = arr0 ? arr0.length : 0, wasPan = this.pan && this.pan.pid === e.pointerId, lock = this.rLock;
+    u2(e); this.pred = []; if (D && D.pid === e.pointerId) this.rLock = null;
+    if (b && D && D.st && b.strokes === arr0 && b.strokes.length === n0 + 1 && this.snap && this.sameView(this.snapV, this.view)) { cancelAnimationFrame(this.raf); const st = b.strokes[n0], d = this.dpr, v = this.view, ink = NB.is(b) ? NB.ink(b) : this.ink(); for (const g of [this.ctx, this.snap.getContext('2d')]) { g.setTransform(d * v.s, 0, 0, d * v.s, d * v.x, d * v.y); drawStroke(g, st, ink); } this.sig = this.sigNow(); this.liveDraw(); }
+    if (lock && D && D.st && this.rulerAuto) { this.ruler = null; this.liveDraw(); }
+    if (wasPan && !this.pan && NB.is(b) && NB.h(b)) { const dx = this.view.x - (this._px0 ?? this.view.x), i0 = this._pg0 ?? this.curPage(), last = b.pages.length - 1; let t = i0; if (dx < -this.W * .06) t = i0 + 1; else if (dx > this.W * .06) t = i0 - 1; else t = null;
+      if (t == null) this.snapPage(); else if (t > last) { if (b.autoAdd !== false && !b.ro && Date.now() - (this._addT || 0) > 1400) this.addEndPage(); else goPage(last, true); } else goPage(Math.max(0, t), true); } }; }
+{ const d3 = Board.down.bind(Board); Board.down = function (e) { if (this.b && NB.is(this.b) && NB.h(this.b) && !this.pan) { this._px0 = this.view.x; this._pg0 = this.curPage(); } return d3(e); }; }
+Board.snapPage = function () { const b = this.b, R = NB.rects(b), [x0, , x1] = this.vis(), c = (x0 + x1) / 2; let best = 0, bd = Infinity; R.forEach((r, i) => { const d = Math.abs(r.x + r.w / 2 - c); if (d < bd) { bd = d; best = i; } }); goPage(best, true); };
+/* a new page appears by itself when you scroll past the last one */
+Board.overscroll = function () { const b = this.b; if (!NB.is(b) || b.autoAdd === false || b.ro || this.drawing && this.drawing.st) return; if (Date.now() - (this._addT || 0) < 1400) return; const R = NB.rects(b), L = R[R.length - 1], [x0, y0, x1, y1] = this.vis();
+  const past = NB.h(b) ? x1 - (L.x + L.w) > Math.max(90, (x1 - x0) * .28) : y1 - (L.y + L.h) > Math.max(110, (y1 - y0) * .3); if (!past) return; this.addEndPage(); };
+Board.addEndPage = function () { const b = this.b; this._addT = Date.now();
+  const before = b.strokes.slice(), pg = JSON.stringify(b.pages), last = b.pages[b.pages.length - 1]; NB.addPage(b, b.pages.length, NB.newPage(last.bg ? 'blank' : last.tpl, last.size)); this.hist.push({ swap: before, after: b.strokes.slice(), pages: pg }); this.fut = []; this.persist(); this.draw(true); if (NB.h(b)) setTimeout(() => goPage(b.pages.length - 1, true), 30);
+  Island.toast({ icon: 'pages', t: `Nuova pagina ${b.pages.length}`, s: 'Aggiunta scorrendo oltre la fine · ↶ per toglierla', ms: 1800 }); };
+/* wheel / trackpad: horizontal notebooks snap to a page when you stop */
+document.addEventListener('wheel', e => { if (UI.view !== 'boards' || !Board.b || !NB.is(Board.b) || !NB.h(Board.b) || !e.target.closest || !e.target.closest('#boardWrap') || e.ctrlKey || e.metaKey) return; clearTimeout(Board._wsnap); Board._wsnap = setTimeout(() => Board.snapPage(), 220); }, { passive: true });
+
+/* ---------- shape recognition, much better ---------- */
+const mergeV = (V, closed, tol = .33) => { let ch = true; while (ch && V.length > (closed ? 3 : 2)) { ch = false; const n = V.length; for (let i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) { const a = V[(i - 1 + n) % n], q = V[i], c = V[(i + 1) % n]; let d = Math.atan2(c[1] - q[1], c[0] - q[0]) - Math.atan2(q[1] - a[1], q[0] - a[0]); d = Math.abs(Math.atan2(Math.sin(d), Math.cos(d))); if (d < tol) { V = V.slice(0, i).concat(V.slice(i + 1)); ch = true; break; } } } return V; };
+const snapAng = (a, tol = .1) => { const st = Math.PI / 4, k = Math.round(a / st); return Math.abs(a - k * st) < tol ? k * st : a; };
+function resample(P, step) { const out = [P[0]]; let acc = 0; for (let i = 1; i < P.length; i++) { let [ax, ay] = P[i - 1]; const [bx, by] = P[i]; let d = Math.hypot(bx - ax, by - ay); while (acc + d >= step) { const t = (step - acc) / d; ax += (bx - ax) * t; ay += (by - ay) * t; out.push([ax, ay]); d = Math.hypot(bx - ax, by - ay); acc = 0; } acc += d; } if (Hypot(out[out.length - 1], P[P.length - 1]) > step * .3) out.push(P[P.length - 1]); return out; }
+function polyErr(P, V, closed) { let e = 0; for (const q of P) { let m = Infinity; for (let i = 0; i < V.length - (closed ? 0 : 1); i++) { const a = V[i], c = V[(i + 1) % V.length]; m = Math.min(m, segDist(q[0], q[1], a[0], a[1], c[0], c[1])); } e += m; } return e / P.length; }
+Shape.rec = function (st) { const p = st.p, raw = []; for (let i = 0; i < p.length; i += 3) raw.push([p[i], p[i + 1]]); if (raw.length < 3) return null;
+  let L = 0; for (let i = 1; i < raw.length; i++) L += Hypot(raw[i], raw[i - 1]); const bb0 = bbox([{ ...st, t: 'pen', w: 0 }]), diag = Math.hypot(bb0.w, bb0.h); if (diag < 12 || L < 16) return null;
+  const P = resample(raw, Math.max(1.5, L / 96)), base = { c: st.c, w: st.t === 'hl' ? st.w : Math.max(1.2, st.w * (st.k === 'ball' ? 1 : .9)) }, hl = st.t === 'hl', mk = (t, pts, extra = {}) => ({ ...base, t, p: pts.flatMap(([x, y]) => [r1(x), r1(y), .5]), ...extra });
+  const a = P[0], z = P[P.length - 1], chord = Hypot(a, z);
+  /* straight line: max deviation from the chord is small → snap to 0/45/90° */
+  let dev = 0; for (const q of P) dev = Math.max(dev, segDist(q[0], q[1], a[0], a[1], z[0], z[1]));
+  if (chord > L * .8 && dev < Math.max(3, chord * .055)) { const ang = snapAng(Math.atan2(z[1] - a[1], z[0] - a[0])); const e = [a[0] + Math.cos(ang) * chord, a[1] + Math.sin(ang) * chord]; return hl ? { ...base, t: 'hl', ball: 0, p: [r1(a[0]), r1(a[1]), .5, r1(e[0]), r1(e[1]), .5] } : mk('line', [a, e]); }
+  if (hl) return null;
+  const closed = chord < Math.max(14, Math.min(diag * .28, L * .18));
+  if (!closed) { const V = mergeV(Shape.rdp(P, diag * .05), false, .2); if (V.length >= 3 && V.length <= 6 && polyErr(P, V, false) < diag * .03) { /* polyline: straighten each segment's angle */ const Q = [V[0]]; for (let i = 1; i < V.length; i++) { const prv = Q[i - 1], d = Hypot(V[i], V[i - 1]), an = snapAng(Math.atan2(V[i][1] - V[i - 1][1], V[i][0] - V[i - 1][0]), .09); Q.push([prv[0] + Math.cos(an) * d, prv[1] + Math.sin(an) * d]); }
+      /* arrow: long shaft then a short "V" head at the end */
+      if (V.length === 4 || V.length === 5) { const sh = Hypot(V[1], V[0]); if (Hypot(V[2], V[1]) < sh * .45 && Hypot(V[3], V[2]) < sh * .6) { const tip = V[1], an = Math.atan2(tip[1] - V[0][1], tip[0] - V[0][0]), hlen = Math.max(10, Math.min(sh * .25, Hypot(V[2], V[1]) * 1.1)); const h1 = [tip[0] - Math.cos(an - .5) * hlen, tip[1] - Math.sin(an - .5) * hlen], h2 = [tip[0] - Math.cos(an + .5) * hlen, tip[1] - Math.sin(an + .5) * hlen]; return { ...mk('poly', [V[0], tip, h1, tip, h2]) }; } }
+      return mk('poly', Q); } return null; }
+  /* closed: compare an ellipse fit and a polygon fit, keep the better one */
+  const xs = P.map(q => q[0]), ys = P.map(q => q[1]), x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, rx = (x1 - x0) / 2 || 1, ry = (y1 - y0) / 2 || 1;
+  let eE = 0; for (const q of P) { const r = Math.hypot((q[0] - cx) / rx, (q[1] - cy) / ry); eE += Math.abs(r - 1) * Math.min(rx, ry); } eE /= P.length;
+  let far = 0, fd = 0; P.forEach((q, i) => { const d = Math.hypot(q[0] - cx, q[1] - cy); if (d > fd) { fd = d; far = i; } }); const Pc = P.slice(far).concat(P.slice(1, far + 1));
+  let V = Shape.rdp(Pc, diag * .075); if (V.length > 2 && Hypot(V[0], V[V.length - 1]) < diag * .2) V = V.slice(0, -1); V = mergeV(V, true); const eP = V.length >= 3 ? polyErr(P, V, true) : Infinity;
+  if (V.length >= 3 && V.length <= 8 && eP < eE * .8) {
+    if (V.length === 4) { const angs = V.map((q, i) => { const pv = V[(i + 3) % 4], nx = V[(i + 1) % 4], a1 = Math.atan2(pv[1] - q[1], pv[0] - q[0]), a2 = Math.atan2(nx[1] - q[1], nx[0] - q[0]); let d = Math.abs(a1 - a2) % (2 * Math.PI); if (d > Math.PI) d = 2 * Math.PI - d; return d; });
+      if (angs.every(x => Math.abs(x - Math.PI / 2) < .3)) { const e0 = Math.atan2(V[1][1] - V[0][1], V[1][0] - V[0][0]), an = snapAng(e0, .14), w = (Hypot(V[0], V[1]) + Hypot(V[2], V[3])) / 2, h = (Hypot(V[1], V[2]) + Hypot(V[3], V[0])) / 2, mx = V.reduce((s, q) => s + q[0], 0) / 4, my = V.reduce((s, q) => s + q[1], 0) / 4;
+        if (Math.abs(Math.sin(an * 2)) < 1e-6) { const W2 = Math.abs(Math.cos(an)) > .5 ? w : h, H2 = Math.abs(Math.cos(an)) > .5 ? h : w; return mk('rect', [[mx - W2 / 2, my - H2 / 2], [mx + W2 / 2, my + H2 / 2]]); }
+        const ux = Math.cos(an), uy = Math.sin(an), vx = -uy, vy = ux, C = [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]].map(([a2, b2]) => [mx + ux * a2 + vx * b2, my + uy * a2 + vy * b2]); return mk('poly', C, { z: 1 }); } }
+    /* triangles and polygons: straighten nearly horizontal / vertical sides */
+    const Q = V.map(q => q.slice()); for (let i = 0; i < Q.length; i++) { const c = Q[(i + 1) % Q.length], an = Math.atan2(c[1] - Q[i][1], c[0] - Q[i][0]); if (Math.abs(Math.sin(an)) < .07) c[1] = Q[i][1]; else if (Math.abs(Math.cos(an)) < .07) c[0] = Q[i][0]; }
+    return mk('poly', Q, { z: 1 }); }
+  if (eE < diag * .06) { if (rx / ry > .86 && rx / ry < 1.16) { const r = (rx + ry) / 2; return mk('ellipse', [[cx - r, cy - r], [cx + r, cy + r]]); } return mk('ellipse', [[x0, y0], [x1, y1]]); }
+  return null; };
+
+/* ---------- ruler ---------- */
+function rulerGeo(R, s) { return { T: 64 / s, len: R.len, c: Math.cos(R.a), sn: Math.sin(R.a) }; }
+function rulerLocal(R, s, x, y) { const G = rulerGeo(R, s), dx = x - R.x, dy = y - R.y; return { u: dx * G.c + dy * G.sn, w: -dx * G.sn + dy * G.c, ...G }; }
+function rulerProj(lock, x, y) { const dx = x - lock.x, dy = y - lock.y, c = Math.cos(lock.a), sn = Math.sin(lock.a), u = dx * c + dy * sn; return [lock.x + c * u - sn * lock.off, lock.y + sn * u + c * lock.off]; }
+function drawRuler(g, R, s, lock) { const G = rulerGeo(R, s); g.save(); g.translate(R.x, R.y); g.rotate(R.a); const T = G.T, h = R.len / 2;
+  g.fillStyle = 'rgba(245,245,250,.72)'; g.strokeStyle = 'rgba(60,60,70,.45)'; g.lineWidth = 1 / s; g.beginPath(); if (g.roundRect) g.roundRect(-h, -T / 2, R.len, T, 8 / s); else g.rect(-h, -T / 2, R.len, T); g.fill(); g.stroke();
+  const mm = 3.78; g.strokeStyle = 'rgba(30,30,40,.75)'; g.fillStyle = 'rgba(30,30,40,.75)'; g.font = `${10 / s}px -apple-system, sans-serif`; g.textAlign = 'center'; const showMm = mm * s >= 4;
+  for (let k = -Math.floor(h / mm); k * mm <= h; k++) { const x = k * mm, cm = k % 10 === 0, half = k % 5 === 0; if (!cm && !half && !showMm) continue; const tl = (cm ? 14 : half ? 9 : 5) / s; g.beginPath(); g.moveTo(x, -T / 2); g.lineTo(x, -T / 2 + tl); g.moveTo(x, T / 2); g.lineTo(x, T / 2 - tl); g.stroke(); if (cm && (mm * 10 * s > 22)) g.fillText(String(Math.abs(k / 10)), x, -T / 2 + 26 / s); }
+  let deg = ((R.a * 180 / Math.PI) % 180 + 180) % 180; if (deg > 90) deg = 180 - deg; g.font = `600 ${13 / s}px -apple-system, sans-serif`; g.fillStyle = '#0A84FF'; g.fillText(`${Math.round(deg)}°`, 0, 6 / s);
+  g.fillStyle = 'rgba(10,132,255,.9)'; g.beginPath(); g.arc(h - 18 / s, 0, 9 / s, 0, 7); g.fill(); g.strokeStyle = '#fff'; g.lineWidth = 1.6 / s; g.beginPath(); g.arc(h - 18 / s, 0, 4.5 / s, -2.2, 1.6); g.stroke();
+  if (lock) { g.strokeStyle = 'rgba(10,132,255,.9)'; g.lineWidth = 2 / s; g.beginPath(); const y = lock.side * T / 2; g.moveTo(-h, y); g.lineTo(h, y); g.stroke(); }
+  g.restore(); }
+ACT.nbRuler = () => { const B = Board; if (B.ruler) { B.ruler = null; B.liveDraw(); B.paintPalette(); return; } const [x0, y0, x1, y1] = B.vis(); B.ruler = { x: (x0 + x1) / 2, y: (y0 + y1) / 2, a: 0, len: Math.min(2200, (x1 - x0) * 1.1) }; if (B.tool !== 'pen' && B.tool !== 'hl') B.tool = 'pen'; B.liveDraw(); B.paintPalette(); Island.toast({ icon: 'pencil', t: 'Righello', s: `Scrivi lungo il bordo · trascinalo con il dito · due dita o il pallino per ruotarlo${B.rulerAuto ? ' · sparisce dopo la linea' : ''}`, ms: 3200 }); };
+/* ruler gestures come before drawing */
+{ const d2 = Board.down.bind(Board), m2 = Board.move.bind(Board), u2 = Board.up.bind(Board);
+  Board.down = function (e) { const R = this.ruler; if (R && this.b) { const [x, y] = this.toWorld(e), s = this.view.s, Lc = rulerLocal(R, s, x, y), inside = Math.abs(Lc.u) < R.len / 2 && Math.abs(Lc.w) < Lc.T / 2, grip = Math.hypot(Lc.u - (R.len / 2 - 18 / s), Lc.w) < 16 / s;
+      const rd = this.rDrag; if (rd && e.pointerType === 'touch' && rd.touch && !rd.two) { rd.two = { id: e.pointerId, x, y, a0: R.a, ang0: Math.atan2(y - rd.y, x - rd.x) }; this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: 'touch' }); return; }
+      if (grip || (inside && (e.pointerType === 'touch' || e.pointerType === 'mouse'))) { try { this.cv.setPointerCapture(e.pointerId); } catch (_) {} this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType }); this.rDrag = { pid: e.pointerId, x, y, rx: R.x, ry: R.y, rot: grip, touch: e.pointerType === 'touch', a0: R.a, ang0: Math.atan2(y - R.y, x - R.x) }; return; }
+      if (inside) return; /* the pencil on the ruler body does nothing, like a real ruler */
+      if ((this.tool === 'pen' || this.tool === 'hl') && Math.abs(Lc.u) < R.len / 2 && Math.abs(Lc.w) < Lc.T / 2 + 30 / s) { const side = Lc.w < 0 ? -1 : 1, rad = (this.tool === 'hl' ? this.wf * 5 : this.wf) / 2 + .6 / s; this.rLock = { x: R.x, y: R.y, a: R.a, side, off: side * (Lc.T / 2 + rad) }; d2(e); clearTimeout(this.holdT); const D = this.drawing; if (D && D.st) { const [px, py] = rulerProj(this.rLock, x, y); D.st.p[0] = r1(px); D.st.p[1] = r1(py); } return; } }
+    return d2(e); };
+  Board.move = function (e) { const rd = this.rDrag, R = this.ruler; if (rd && R && (e.pointerId === rd.pid || (rd.two && e.pointerId === rd.two.id))) { const [x, y] = this.toWorld(e); if (e.pointerId === rd.pid) { rd.cx = x; rd.cy = y; } else { rd.two.cx = x; rd.two.cy = y; }
+      if (rd.two && rd.two.cx != null && rd.cx != null) { const ang = Math.atan2(rd.two.cy - rd.cy, rd.two.cx - rd.cx); let a = rd.two.a0 + ang - rd.two.ang0; a = snapRuler(a); R.a = a; R.x = rd.rx + ((rd.cx + rd.two.cx) / 2 - (rd.x + rd.two.x) / 2); R.y = rd.ry + ((rd.cy + rd.two.cy) / 2 - (rd.y + rd.two.y) / 2); }
+      else if (rd.rot) { R.a = snapRuler(rd.a0 + Math.atan2(y - R.y, x - R.x) - rd.ang0); }
+      else { R.x = rd.rx + x - rd.x; R.y = rd.ry + y - rd.y; }
+      this.liveDraw(); return; }
+    return m2(e); };
+  Board.up = function (e) { const rd = this.rDrag; if (rd && (e.pointerId === rd.pid || (rd.two && e.pointerId === rd.two.id))) { this.pointers.delete(e.pointerId); if (e.pointerId === rd.pid) this.rDrag = null; else rd.two = null; this.liveDraw(); return; } return u2(e); }; }
+const snapRuler = a => { const st = Math.PI / 12, k = Math.round(a / st); return Math.abs(a - k * st) < .04 ? k * st : a; };
+document.addEventListener('wheel', e => { const B = Board; if (!B.ruler || UI.view !== 'boards' || !e.target.closest || !e.target.closest('#boardWrap')) return; const r = B.cv.getBoundingClientRect(), x = (e.clientX - r.left - B.view.x) / B.view.s, y = (e.clientY - r.top - B.view.y) / B.view.s, L = rulerLocal(B.ruler, B.view.s, x, y); if (Math.abs(L.u) > B.ruler.len / 2 || Math.abs(L.w) > L.T / 2) return; e.preventDefault(); e.stopImmediatePropagation(); B.ruler.a = snapRuler(B.ruler.a + Math.sign(e.deltaY || e.deltaX) * (e.shiftKey ? Math.PI / 12 : Math.PI / 180)); B.liveDraw(); }, { capture: true, passive: false });
+
+/* ---------- quick switch between the last two tools (Apple Pencil double-tap is not available to web apps) ---------- */
+{ const oP = Board.paintPalette.bind(Board); Board.paintPalette = function () { if (this.tool !== this._lt) { if (this._lt && this._lt !== 'laser') this.prevTool2 = this._lt; this._lt = this.tool; } oP(); const q = $('#nbSwap'); if (q) { const pt = this.prevTool2 || 'eraser'; q.innerHTML = ico({ hand: 'hand', pen: 'pen', hl: 'hl', eraser: 'eraser', shape: 'shape', lasso: 'lasso', text: 'text', tape: 'tape', laser: 'laser' }[pt] || 'eraser'); q.title = 'Passa a: ' + ((NBTOOLS.find(t => t[0] === pt) || [, , 'Gomma'])[2]); } const rb = $('[data-act=nbRuler]'); if (rb) rb.setAttribute('aria-pressed', String(!!this.ruler)); }; }
+ACT.nbSwap = () => { const B = Board, t = B.prevTool2 || (B.tool === 'eraser' ? 'pen' : 'eraser'); B.prevTool2 = B.tool; B._lt = t; B.tool = t; B.select(null); B.paintPalette(); B.menu(); };
+document.addEventListener('keydown', e => { if (UI.view !== 'boards' || !Board.b || /INPUT|TEXTAREA|SELECT/.test(document.activeElement && document.activeElement.tagName)) return; if (e.key === ' ' && !e.repeat) { e.preventDefault(); ACT.nbSwap(); } if (e.key.toLowerCase() === 'r' && !e.metaKey && !e.ctrlKey) ACT.nbRuler(); });
+
+/* ---------- toolbar additions and settings ---------- */
+{ const oR = VIEWS.boards.render, oM = VIEWS.boards.mount; VIEWS.boards.render = function () { let h = oR.call(this); h = h.replace('<div class="palette" role="toolbar" aria-label="Strumenti">', `<div class="palette" role="toolbar" aria-label="Strumenti"><button class="tool nb-swap" id="nbSwap" data-act="nbSwap" aria-label="Strumento precedente" title="Strumento precedente (barra spaziatrice)"></button><span class="pdiv"></span>`).replace('<button class="tool" data-act="nbImage"', `<button class="tool" data-act="nbRuler" aria-label="Righello" title="Righello (R)"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 15.5l12-12 5 5-12 12z"/><path d="M7 12l2 2M9.5 9.5l1.5 1.5M12 7l2 2M14.5 4.5l1.5 1.5"/></svg></button><button class="tool" data-act="nbImage"`); return h.replace('due dita: tocca per annullare, tre per ripristinare', 'due dita: tocca per annullare, tre per ripristinare · barra spaziatrice o ⇄: strumento precedente · R: righello'); };
+  VIEWS.boards.mount = function (root) { oM.call(this, root); Board.ensureLive(); Board.paintPalette(); }; }
+{ const oMore = ACT.bMore; ACT.bMore = () => { oMore(); const sh = Sheets[Sheets.length - 1], b = Board.b; if (!sh || !b) return; const host = $('.list.flat', sh.el); if (!host) return;
+  host.insertAdjacentHTML('beforeend', `${NB.is(b) ? `<div class="row"><span class="grow"><div class="t">Scorrimento delle pagine</div><div class="s">Una sotto l'altra o una di fianco all'altra</div></span>${seg('nbDir', [['v', 'Verticale'], ['h', 'Orizzontale']], b.dir || 'v')}</div><div class="row"><span class="grow"><div class="t">Nuova pagina scorrendo oltre la fine</div><div class="s">Come in GoodNotes: arrivi in fondo e la pagina appare</div></span>${toggleBtn('nbAA', b.autoAdd !== false)}</div>` : ''}<div class="row"><span class="grow"><div class="t">Nascondi il righello dopo una linea</div></span>${toggleBtn('nbRA', Board.rulerAuto)}</div>`);
+  wireSeg(sh.el, 'nbDir', v => { const before = b.strokes.slice(), pg = JSON.stringify(b.pages); NB.setDir(b, v); Board.hist.push({ swap: before, after: b.strokes.slice(), pages: pg }); Board.persist(); Board.draw(true); setTimeout(() => goPage(Board.curPage()), 30); });
+  const aa = $('#nbAA', sh.el); if (aa) wireToggle(aa, v => { b.autoAdd = v; Board.persist(); }); wireToggle($('#nbRA', sh.el), v => { Board.rulerAuto = v; try { localStorage.setItem('orbita.rulerAuto', v ? '1' : '0'); } catch (_) {} }); }; }
+/* undo of a page operation also restores the direction */
+{ const oU = Board.undo.bind(Board); Board.undo = function () { oU(); this.draw(true); }; const oR = Board.redo.bind(Board); Board.redo = function () { oR(); this.draw(true); }; }
+/* new notebook: choose how pages scroll (below or beside) right away */
+{ const oNew = ACT.newBoard; ACT.newBoard = (...a) => { oNew(...a); const sh = Sheets[Sheets.length - 1], opt = sh && $('#nbOpt', sh.el); if (!opt) return; NB._newDir = 'v';
+    opt.insertAdjacentHTML('beforeend', `<div class="field"><span class="lbl">Pagine</span>${seg('nbd', [['v', '↕︎ Una sotto l\'altra'], ['h', '↔︎ Una di fianco all\'altra']], 'v')}</div>`); wireSeg(sh.el, 'nbd', v => NB._newDir = v); }; }
+{ const oMk = NB.make; NB.make = function (...a) { const b = oMk.apply(this, a); if (NB._newDir === 'h' && document.querySelector('[data-seg=nbd]')) b.dir = 'h'; NB._newDir = null; return b; }; }
+
+/* =========================================================
    ASSISTANT — "Segretario": Claude with page tools
    ========================================================= */
 const CAT_KEYS = Object.keys(CATS);
