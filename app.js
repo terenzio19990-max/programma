@@ -16205,6 +16205,223 @@ if (typeof Voice !== 'undefined') { const oH = Voice.handle.bind(Voice); Voice.h
 if (typeof TodaySmart !== 'undefined' && TodaySmart.score) { const oS = TodaySmart.score.bind(TodaySmart); TodaySmart.score = function (k, ...a) { if (k === 'brief') return Morning.show() ? 200 : -1; return oS(k, ...a); }; }
 
 /* =========================================================
+   SIDE QUEST — ogni giorno 3 avventure vere fuori dallo schermo
+   (una nascosta da scoprire), con rarità, bottino, una quest
+   epica della settimana, saghe a capitoli, album collezione,
+   serie di giorni. Si adattano a meteo, giorno, trasferte,
+   esami vicini. Alcune si completano da sole (passi, acqua,
+   focus); puoi cambiarne una al giorno e inventarne di tue.
+   ========================================================= */
+const SQ_CAT = {
+  esplora: ['Esplora', '🧭', '#30B0C7'], sociale: ['Sociale', '🤝', '#FF2D55'], mente: ['Mente', '🧠', '#5856D6'], corpo: ['Corpo', '💪', '#34C759'],
+  crea: ['Creatività', '🎨', '#FF9500'], ordine: ['Ordine', '🧹', '#8E8E93'], cucina: ['Cucina', '🍳', '#FF6B35'], folle: ['Folle', '🤪', '#AF52DE'], relax: ['Relax', '🌿', '#64D2FF'],
+};
+const SQ_RAR = [null, ['Comune', '#8E8E93', 15], ['Rara', '#0A84FF', 30], ['Epica', '#AF52DE', 60], ['Leggendaria', '#FFB800', 120]];
+/* [id, cat, rarity, text, opts]  opts: out (fuori), in (al chiuso), eve (sera), we (weekend), wk (feriale), trip (in trasferta, {c} = città), auto {k, n}, ex (esame vicino), late (promemoria in ritardo) */
+const SQ_POOL = [
+  ['e1', 'esplora', 1, 'Torna a casa facendo una strada che non hai mai fatto', { out: 1 }], ['e2', 'esplora', 2, 'Entra in un negozio in cui non sei mai entrato e scopri la cosa più strana che vende', { out: 1 }],
+  ['e3', 'esplora', 2, 'Trova il punto più alto raggiungibile a piedi vicino a te e guarda il panorama', { out: 1, sun: 1 }], ['e4', 'esplora', 1, 'Scopri il nome della pianta o dell\'albero più vicino a casa tua', { out: 1 }],
+  ['e5', 'esplora', 3, 'Vai in un paese a meno di 30 km dove non sei mai stato e prendi un caffè in piazza', { out: 1, we: 1 }], ['e6', 'esplora', 1, 'Leggi una targa o una lapide in centro e scopri la storia di chi ricorda', { out: 1 }],
+  ['e7', 'esplora', 2, 'Fai una foto a 5 porte colorate diverse', { out: 1 }], ['e8', 'esplora', 4, 'Gita a sorpresa: apri la mappa, punta a caso entro 50 km e vacci', { out: 1, we: 1 }],
+  ['e9', 'esplora', 1, 'Siediti 10 minuti in un parco senza telefono e conta i suoni diversi che senti', { out: 1, sun: 1 }], ['e10', 'esplora', 2, 'Trova il bar con il cornetto migliore della zona (servono almeno 2 assaggi)', { out: 1 }],
+  ['t1', 'esplora', 2, 'Assaggia un piatto tipico di {c} che non hai mai mangiato', { trip: 1 }], ['t2', 'esplora', 2, 'Trova la piazza principale di {c} e fatti un selfie da turista', { trip: 1 }],
+  ['t3', 'esplora', 3, 'Chiedi a una persona del posto il suo angolo preferito di {c} e vacci', { trip: 1 }], ['t4', 'esplora', 1, 'Manda una cartolina (anche digitale) da {c} a qualcuno', { trip: 1 }],
+  ['t5', 'esplora', 3, 'Cammina per {c} senza mappa per 20 minuti e poi ritrova la strada', { trip: 1 }],
+  ['s1', 'sociale', 1, 'Scrivi a una persona che non senti da più di un mese', {}], ['s2', 'sociale', 1, 'Fai un complimento sincero e specifico a qualcuno', {}],
+  ['s3', 'sociale', 2, 'Chiama (a voce!) un amico invece di scrivergli', {}], ['s4', 'sociale', 2, 'Offri un caffè a un collega o compagno di corso', { wk: 1 }],
+  ['s5', 'sociale', 3, 'Organizza una serata giochi da tavolo o carte', { we: 1 }], ['s6', 'sociale', 1, 'Ringrazia per iscritto qualcuno che ti ha aiutato di recente', {}],
+  ['s7', 'sociale', 2, 'Chiedi a un tuo familiare una storia di quando era giovane che non conosci', {}], ['s8', 'sociale', 4, 'Rimetti in contatto due amici che non si sentono da anni', {}],
+  ['s9', 'sociale', 1, 'Manda a qualcuno un meme che lo farà ridere di sicuro', {}], ['s10', 'sociale', 2, 'Impara il nome di una persona che vedi spesso ma non conosci (barista, portiere…)', { out: 1 }],
+  ['m1', 'mente', 1, 'Impara 5 parole in una lingua che non parli', {}], ['m2', 'mente', 2, 'Guarda un documentario di almeno 20 minuti su un argomento a caso', { eve: 1 }],
+  ['m3', 'mente', 1, 'Leggi 10 pagine di un libro che non è per lo studio', {}], ['m4', 'mente', 2, 'Spiega ad alta voce un argomento d\'esame come se fossi il professore', { ex: 1 }],
+  ['m5', 'mente', 3, 'Risolvi un esercizio difficile senza guardare la soluzione per 30 minuti', { ex: 1 }], ['m6', 'mente', 1, 'Scopri da dove viene il nome della tua città o del tuo paese', {}],
+  ['m7', 'mente', 2, 'Impara a memoria una poesia breve o una citazione che ti piace', {}], ['m8', 'mente', 2, 'Ascolta un podcast su un tema che non conosci per niente', {}],
+  ['m9', 'mente', 3, 'Impara a fare un nodo nuovo (bolina, nodo savoia…) e insegnalo a qualcuno', {}], ['m10', 'mente', 1, 'Fai 25 minuti di focus vero', { auto: { k: 'focus', n: 25 } }],
+  ['m11', 'mente', 2, 'Fai 90 minuti di focus profondo in giornata', { auto: { k: 'focus', n: 90 } }], ['m12', 'mente', 4, 'Insegna a qualcuno una cosa che sai fare bene, finché sa farla da solo', {}],
+  ['b1', 'corpo', 1, 'Fai 8.000 passi', { auto: { k: 'steps', n: 8000 } }], ['b2', 'corpo', 2, 'Fai 12.000 passi', { auto: { k: 'steps', n: 12000 } }],
+  ['b3', 'corpo', 1, 'Bevi 2 litri d\'acqua', { auto: { k: 'water', n: 2000 } }], ['b4', 'corpo', 1, 'Usa sempre le scale al posto dell\'ascensore, tutto il giorno', {}],
+  ['b5', 'corpo', 2, '10 minuti di stretching prima di dormire', { eve: 1 }], ['b6', 'corpo', 2, 'Passeggiata di 20 minuti dopo pranzo', { out: 1 }],
+  ['b7', 'corpo', 3, 'Corsa o bici di almeno 30 minuti', { out: 1, sun: 1 }], ['b8', 'corpo', 1, 'Fai 20 piegamenti, anche in più serie', {}],
+  ['b9', 'corpo', 2, 'Una giornata intera senza bibite zuccherate', {}], ['b10', 'corpo', 3, 'Sfida: plank per 2 minuti (in totale, anche spezzato)', {}],
+  ['b11', 'corpo', 1, 'Vai a dormire prima di mezzanotte', { eve: 1 }], ['b12', 'corpo', 4, 'Alzati all\'alba e guardala da fuori', { out: 1, sun: 1 }],
+  ['c1', 'crea', 1, 'Disegna in 2 minuti, sulla Lavagna, l\'oggetto più vicino a te', {}], ['c2', 'crea', 2, 'Fai una foto bella a una cosa brutta', {}],
+  ['c3', 'crea', 2, 'Scrivi un haiku (5-7-5 sillabe) sulla tua giornata', { eve: 1 }], ['c4', 'crea', 1, 'Crea una playlist di 5 canzoni per l\'umore di oggi', {}],
+  ['c5', 'crea', 3, 'Scrivi una storia di 100 parole esatte', {}], ['c6', 'crea', 2, 'Fai 3 foto con un unico colore dominante (scegli tu quale)', { out: 1 }],
+  ['c7', 'crea', 1, 'Riprogetta su un foglio il logo di un\'app che usi ogni giorno', {}], ['c8', 'crea', 3, 'Costruisci qualcosa con quello che hai in casa (anche inutile)', { in: 1 }],
+  ['c9', 'crea', 4, 'Scrivi e registra un jingle di 15 secondi per Orbita', {}],
+  ['o1', 'ordine', 1, 'Butta o regala 5 cose che non usi', {}], ['o2', 'ordine', 1, 'Elimina 20 foto inutili dal telefono (screenshot vecchi, doppioni)', {}],
+  ['o3', 'ordine', 2, 'Svuota completamente la scrivania e rimetti solo l\'essenziale', { in: 1 }], ['o4', 'ordine', 2, 'Disiscriviti da 5 newsletter che non leggi mai', {}],
+  ['o5', 'ordine', 1, 'Sistema un cassetto, uno solo, fino in fondo', { in: 1 }], ['o6', 'ordine', 3, 'Inbox zero: archivia o rispondi a tutte le email', {}],
+  ['o7', 'ordine', 2, 'Sconfiggi il promemoria più vecchio che stai rimandando', { late: 1 }], ['o8', 'ordine', 1, 'Ordina la cartella Download del computer', {}],
+  ['k1', 'cucina', 2, 'Cucina una ricetta che non hai mai provato', { in: 1 }], ['k2', 'cucina', 1, 'Assaggia un frutto o una verdura che non mangi mai', {}],
+  ['k3', 'cucina', 3, 'Cucina un piatto di un paese dove non sei mai stato', { in: 1 }], ['k4', 'cucina', 2, 'Prepara il pranzo di domani stasera', { eve: 1 }],
+  ['k5', 'cucina', 1, 'Fai la colazione perfetta, apparecchiata come al bar', {}], ['k6', 'cucina', 4, 'Cena a sorpresa per qualcuno, con menù scritto a mano', { eve: 1, we: 1 }],
+  ['f1', 'folle', 1, 'Fai la telecronaca ad alta voce mentre lavi i piatti', { in: 1 }], ['f2', 'folle', 2, 'Parla per 10 minuti solo con domande', {}],
+  ['f3', 'folle', 2, 'Scrivi un messaggio a un amico interamente in rima', {}], ['f4', 'folle', 1, 'Usa la mano non dominante per lavarti i denti', {}],
+  ['f5', 'folle', 3, 'Dai un nome e una personalità a una pianta di casa e presentala a qualcuno', {}], ['f6', 'folle', 2, 'Mangia un pasto intero con le bacchette', {}],
+  ['f7', 'folle', 1, 'Cammina all\'indietro per 20 passi (in un posto sicuro)', {}], ['f8', 'folle', 3, 'Scegli il film di stasera tirando un dado tra 6 titoli', { eve: 1 }],
+  ['f9', 'folle', 2, 'Inventa una parola nuova e usala 3 volte oggi in una conversazione', {}], ['f10', 'folle', 4, 'Organizza una caccia al tesoro per qualcuno, con almeno 3 indizi', {}],
+  ['f11', 'folle', 1, 'Rispondi al prossimo "come stai?" con un aggettivo mai usato prima', {}], ['f12', 'folle', 2, 'Vesti un colore che non metti mai', {}],
+  ['r1', 'relax', 1, '5 minuti di respiro lento: 4 secondi dentro, 6 fuori', {}], ['r2', 'relax', 1, 'Un\'ora senza telefono, di proposito', {}],
+  ['r3', 'relax', 2, 'Scrivi 3 cose belle successe oggi', { eve: 1 }], ['r4', 'relax', 2, 'Doccia o bagno lungo con la tua musica preferita', { eve: 1 }],
+  ['r5', 'relax', 1, 'Guarda il cielo per 3 minuti e trova una forma nelle nuvole', { out: 1 }], ['r6', 'relax', 3, 'Una mattina intera senza social', { we: 1 }],
+  ['e11', 'esplora', 1, 'Prendi un autobus o un treno regionale per una fermata in più e torna a piedi', { out: 1 }], ['e12', 'esplora', 3, 'Trova un tramonto da un posto nuovo e guardalo fino alla fine', { out: 1, sun: 1, eve: 1 }],
+  ['s11', 'sociale', 2, 'Proponi a qualcuno una passeggiata invece di un messaggio', { out: 1 }], ['s12', 'sociale', 3, 'Scrivi una lettera a mano a una persona a cui tieni', {}],
+  ['m13', 'mente', 1, 'Guarda un video su come funziona un oggetto che usi ogni giorno', {}], ['m14', 'mente', 2, 'Fai 3 flashcard sul capitolo di oggi e ripassale stasera', { ex: 1 }],
+  ['b13', 'corpo', 2, 'Balla per 3 canzoni di fila, da solo o in compagnia', { in: 1 }], ['b14', 'corpo', 1, 'Fai una pausa ogni ora per 2 minuti di movimento, per tutto il pomeriggio', { wk: 1 }],
+  ['c10', 'crea', 2, 'Disegna una mappa immaginaria del tuo quartiere con nomi inventati', {}], ['c11', 'crea', 1, 'Scatta una foto da un\'angolazione impossibile (dal basso, attraverso un oggetto…)', {}],
+  ['o9', 'ordine', 2, 'Libera 5 GB di spazio sul telefono o sul computer', {}], ['k7', 'cucina', 2, 'Prepara una bevanda calda speciale (cioccolata, chai, golden milk)', { rain: 1 }],
+  ['f13', 'folle', 2, 'Racconta a qualcuno la tua giornata come se fosse il trailer di un film', { eve: 1 }], ['f14', 'folle', 3, 'Costruisci la torre più alta possibile con quello che c\'è sulla scrivania e fotografala', { in: 1 }],
+  ['r9', 'relax', 2, 'Spegni tutti gli schermi un\'ora prima di dormire', { eve: 1 }], ['r10', 'relax', 1, 'Fai una pausa caffè vera: seduto, senza telefono, gustandolo', {}],
+  ['r7', 'relax', 1, 'Ascolta un album intero dall\'inizio alla fine, senza saltare', { rain: 1 }], ['r8', 'relax', 2, 'Coperta, tè e un capitolo di un libro mentre piove', { rain: 1, in: 1 }],
+];
+const SQ_EPIC = [
+  ['w1', 'esplora', 'Visita un museo o una mostra in cui non sei mai stato'], ['w2', 'sociale', 'Organizza una cena con almeno 4 persone'], ['w3', 'corpo', 'Fai 70.000 passi in una settimana', { auto: { k: 'steps', n: 70000, week: 1 } }],
+  ['w4', 'mente', 'Finisci un libro (anche corto)'], ['w5', 'crea', 'Realizza un piccolo progetto creativo dall\'inizio alla fine'], ['w6', 'cucina', 'Cucina 3 ricette nuove in una settimana'],
+  ['w7', 'esplora', 'Fai un\'escursione o una gita fuori porta di mezza giornata'], ['w8', 'ordine', 'Sistema da cima a fondo una stanza intera'], ['w9', 'mente', 'Fai 8 ore di focus in una settimana', { auto: { k: 'focus', n: 480, week: 1 } }],
+  ['w10', 'sociale', 'Rivedi di persona un amico che non vedi da mesi'], ['w11', 'relax', 'Una giornata intera dedicata solo a te, senza doveri'], ['w12', 'folle', 'Impara un trucco di magia e fallo a 3 persone'],
+];
+const SQ_SAGA = [
+  { id: 'chef', n: 'Il cuoco errante', e: '👨‍🍳', steps: ['Compra un ingrediente che non hai mai usato', 'Cerca una ricetta che lo usa', 'Cucinala', 'Falla assaggiare a qualcuno e fatti dare un voto sincero'] },
+  { id: 'explorer', n: 'L\'esploratore di casa', e: '🗺️', steps: ['Segna sulla mappa 3 posti vicini dove non sei mai stato', 'Visita il primo', 'Visita il secondo', 'Visita il terzo e scegli il tuo preferito'] },
+  { id: 'bard', n: 'Il bardo', e: '🎸', steps: ['Scegli una canzone che vorresti saper cantare o suonare', 'Impara il ritornello', 'Impara la strofa', 'Esibisciti davanti ad almeno una persona'] },
+  { id: 'polyglot', n: 'Il poliglotta', e: '🗣️', steps: ['Scegli una lingua nuova', 'Impara a salutare e presentarti', 'Impara a ordinare un caffè', 'Fai una conversazione di 2 minuti (anche con l\'IA)'] },
+  { id: 'phoenix', n: 'La fenice', e: '🔥', steps: ['Scegli un\'abitudine che vuoi cambiare', 'Resisti 1 giorno', 'Resisti 3 giorni di fila', 'Resisti 7 giorni e festeggia'] },
+  { id: 'cartographer', n: 'Il fotografo', e: '📷', steps: ['Scegli un tema (ombre, riflessi, vecchie insegne…)', 'Fai 5 foto sul tema', 'Scegli la migliore e modificala', 'Stampala o mettila come sfondo'] },
+];
+const SQ_LOOT_TITLES = ['Esploratore del lunedì', 'Cavaliere del caffè', 'Mago dei promemoria', 'Pirata della domenica', 'Guardiano del focus', 'Bardo dei messaggi', 'Ninja delle scale', 'Druido delle piante', 'Alchimista dei fornelli', 'Re delle side quest', 'Cacciatore di tramonti', 'Viandante curioso'];
+const SQ_FACTS = ['Il miele non scade mai: ne hanno trovato di commestibile nelle tombe egizie.', 'Un polpo ha tre cuori.', 'Le lontre si tengono per mano quando dormono, per non allontanarsi.', 'La Torre Eiffel d\'estate è più alta di circa 15 cm per la dilatazione del ferro.', 'Le banane sono bacche, le fragole no.', 'Un giorno su Venere dura più di un anno su Venere.', 'I fenicotteri sono rosa per quello che mangiano.', 'Il cuore di una balenottera azzurra è grande come un\'auto piccola.', 'Gli squali esistevano prima degli alberi.', 'Le mucche hanno migliori amiche.'];
+
+const Side = {
+  st() { const g = S.game; g.side ||= {}; const s = g.side; s.days ||= {}; s.log ||= []; s.custom ||= []; s.titles ||= []; s.pref ||= {}; s.count ||= {}; return s; },
+  P() { return { on: true, n: 3, mode: 'normale', at: '10:00', notif: true, cats: Object.keys(SQ_CAT), ...(this.st().pref) }; },
+  set(k, v) { this.st().pref = { ...this.P(), [k]: v }; save('game'); },
+  rnd(seed) { let h = 2166136261; for (const c of String(seed)) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return () => { h ^= h << 13; h ^= h >>> 17; h ^= h << 5; return ((h >>> 0) % 1e6) / 1e6; }; },
+  ctx(k = todayK()) { const d = parseD(k), dow = d.getDay(), we = dow === 0 || dow === 6, w = Weather.now, rain = !!(w && (/pioggia|rovesci|temporale|neve|pioviggine/.test(w.label || '') || (w.rain || 0) >= 60)), sun = !!(w && /sereno|poco nuvoloso/.test(w.label || ''));
+    const trip = typeof Morning !== 'undefined' ? Morning.trip(k) : null, ex = S.exams.some(e => e.status === 'planned' && e.date && e.date >= k && dayDiff(k, e.date) <= 21), late = S.tasks.some(t => !t.done && t.due && dayDiff(t.due, k) >= 3);
+    return { k, we, rain, sun, trip, city: trip && trip.place ? trip.place.split(',')[0] : '', ex, late, eve: new Date().getHours() >= 17 }; },
+  fits(q, C) { const o = q[4] || {}; if (o.trip && !C.city) return false; if (o.we && !C.we) return false; if (o.wk && C.we) return false; if (o.out && C.rain) return false; if (o.sun && !C.sun && !o.out) return false; if (o.rain && !C.rain) return false; if (o.ex && !C.ex) return false; if (o.late && !C.late) return false; if (o.auto && o.auto.k === 'steps' && !this.hasHealth()) return false; if (o.auto && o.auto.k === 'water' && !this.hasHealth('water')) return false; return true; },
+  hasHealth(f = 'steps') { const D = (S.health && S.health.days) || {}; return Object.keys(D).slice(-14).some(k => +D[k][f] > 0); },
+  pool() { const P = this.P(); return SQ_POOL.concat(this.st().custom.map(c => [c.id, c.cat || 'folle', c.r || 2, c.t, {}])).filter(q => P.cats.includes(q[1])); },
+  /** today's quests: deterministic (same on every device), context-aware, different categories */
+  pick(k = todayK(), reroll = 0) {
+    const P = this.P(), C = this.ctx(k), R = this.rnd(k + ':' + reroll + ':' + (S.profile.name || '')), recent = new Set(this.st().log.slice(0, 40).map(l => l.id));
+    let L = this.pool().filter(q => this.fits(q, C)); if (L.length < 6) L = this.pool();
+    const w = P.mode === 'folle' ? [0, 35, 33, 22, 10] : P.mode === 'tranquilla' ? [0, 70, 24, 6, 0] : [0, 55, 28, 13, 4], out = [], used = new Set();
+    const trip = C.city ? L.filter(q => q[4] && q[4].trip) : [];
+    for (let i = 0; i < 40 && out.length < P.n; i++) {
+      let cand = (i === 0 && trip.length) ? trip : L; const r = R() * 100; let rar = 1, acc = 0; for (let j = 1; j <= 4; j++) { acc += w[j]; if (r < acc) { rar = j; break; } }
+      let c2 = cand.filter(q => q[2] === rar && !used.has(q[1]) && !out.includes(q[0]) && !recent.has(q[0])); if (!c2.length) c2 = cand.filter(q => !used.has(q[1]) && !out.includes(q[0])); if (!c2.length) c2 = cand.filter(q => !out.includes(q[0])); if (!c2.length) continue;
+      const q = c2[Math.floor(R() * c2.length)]; out.push(q[0]); used.add(q[1]); }
+    return out;
+  },
+  day(k = todayK()) { const s = this.st(); if (!s.days[k]) { s.days[k] = { ids: this.pick(k), done: {}, reroll: 0, seen: [], mystery: 2, notes: {} }; const ks = Object.keys(s.days).sort(); while (ks.length > 45) delete s.days[ks.shift()]; } return s.days[k]; },
+  q(id) { const C = this.ctx(); const q = SQ_POOL.find(x => x[0] === id) || (this.st().custom.find(c => c.id === id) ? (c => [c.id, c.cat || 'folle', c.r || 2, c.t, {}])(this.st().custom.find(c => c.id === id)) : null); if (!q) return null; return { id: q[0], cat: q[1], r: q[2], t: q[3].replace(/\{c\}/g, C.city || 'questa città'), o: q[4] || {}, xp: SQ_RAR[q[2]][2] }; },
+  /** automatic progress (steps, water, focus) */
+  prog(q, k = todayK()) { const a = q.o.auto; if (!a) return null; const H = ((S.health && S.health.days) || {}), days = a.week ? [...Array(7)].map((_, i) => addDK(this.weekStart(k), i)).filter(d => d <= k) : [k];
+    let v = 0; for (const d of days) v += a.k === 'focus' ? ((S.game.days[d] || {}).focus || 0) : +((H[d] || {})[a.k] || 0); return { v, n: a.n, p: Math.min(1, v / a.n) }; },
+  weekStart(k = todayK()) { const d = parseD(k); return addDK(k, -((d.getDay() + 6) % 7)); },
+  /** streak of days with at least one side quest */
+  streak() { const s = this.st(); let n = 0, k = todayK(); if (!Object.keys((s.days[k] || {}).done || {}).length) k = addDK(k, -1); while (s.days[k] && Object.keys(s.days[k].done || {}).length) { n++; k = addDK(k, -1); } return n; },
+  loot(q) { const R = Math.random(), s = this.st();
+    if (q.r >= 4 || R < .04) { const free = SQ_LOOT_TITLES.filter(t => !s.titles.includes(t)); if (free.length) { const t = free[Math.floor(Math.random() * free.length)]; s.titles.push(t); return { em: '👑', t: `Nuovo titolo: “${t}”` }; } }
+    if (R < .1 && (S.game.shields || 0) < 3) { S.game.shields = (S.game.shields || 0) + 1; return { em: '🛡️', t: 'Scudo per la serie: salva un giorno saltato' }; }
+    if (R < .32) { const b = 5 * (2 + Math.floor(Math.random() * 5)); return { em: '🎁', t: `Scrigno: +${b} XP bonus`, xp: b }; }
+    if (R < .5) return { em: '💡', t: SQ_FACTS[Math.floor(Math.random() * SQ_FACTS.length)] };
+    return null; },
+  complete(id, note) { const k = todayK(), D = this.day(k), q = this.q(id); if (!q || D.done[id]) return;
+    D.done[id] = Date.now(); if (note) D.notes[id] = String(note).slice(0, 300); const s = this.st(); s.log.unshift({ id, k, t: q.t, cat: q.cat, r: q.r, at: Date.now(), note: note || '' }); s.log.length = Math.min(s.log.length, 400); s.count[q.cat] = (s.count[q.cat] || 0) + 1;
+    const L = this.loot(q); D.loot ||= {}; if (L) D.loot[id] = L;
+    Game.add(q.xp + (L && L.xp ? L.xp : 0), `Side quest ${SQ_RAR[q.r][0].toLowerCase()}`, { icon: 'star', silent: true }); save('game');
+    Island.toast({ icon: 'star', c: SQ_RAR[q.r][1], t: `${SQ_CAT[q.cat][1]} Quest completata!`, s: L ? `${L.em} ${L.t}` : q.t, end: `+${q.xp + (L && L.xp ? L.xp : 0)} XP`, ms: L ? 4200 : 2600 });
+    try { Sound.xp(); } catch (_) {} if (q.r >= 3) confetti(q.r === 4 ? 160 : 90);
+    if (D.ids.every(x => D.done[x])) setTimeout(() => { Game.add(25, 'Tutte le side quest di oggi', { icon: 'trophy' }); confetti(120); }, 1100);
+    App.refresh(); },
+  undo(id) { const k = todayK(), D = this.day(k); if (!D.done[id]) return; delete D.done[id]; const s = this.st(), i = s.log.findIndex(l => l.id === id && l.k === k); if (i >= 0) { const l = s.log.splice(i, 1)[0]; s.count[l.cat] = Math.max(0, (s.count[l.cat] || 1) - 1); } const lb = (D.loot && D.loot[id] && D.loot[id].xp) || 0; if (D.loot) delete D.loot[id]; Game.add(-((this.q(id) || { xp: 0 }).xp + lb), 'Side quest annullata', { silent: true }); save('game'); App.refresh(); },
+  reroll(id) { const k = todayK(), D = this.day(k); if (D.reroll >= 1 || D.done[id]) return; D.reroll++; const fresh = this.pick(k, D.reroll).filter(x => !D.ids.includes(x)); const nid = fresh[0] || SQ_POOL[Math.floor(Math.random() * SQ_POOL.length)][0]; D.ids = D.ids.map(x => x === id ? nid : x); D.flip = nid; save('game'); App.refresh(); },
+  reveal() { const D = this.day(); if (D.mystery == null) return; D.revealed = 1; save('game'); try { Sound.xp(); } catch (_) {} App.refresh(); },
+  auto() { const k = todayK(), D = this.day(k); for (const id of D.ids) { if (D.done[id]) continue; const q = this.q(id), p = q && this.prog(q); if (p && p.p >= 1) this.complete(id); } const E = this.epic(); if (E && !E.done) { const p = this.prog(E.q, k); if (p && p.p >= 1) this.epicDone(); } },
+  /* ---------- weekly epic ---------- */
+  epic() { const s = this.st(), wk = this.weekStart(); if (!s.epic || s.epic.wk !== wk) { const R = this.rnd('epic' + wk), P = this.P(), L = SQ_EPIC.filter(e => P.cats.includes(e[1])); const e = (L.length ? L : SQ_EPIC)[Math.floor(R() * (L.length || SQ_EPIC.length))]; s.epic = { wk, id: e[0], done: 0 }; }
+    const e = SQ_EPIC.find(x => x[0] === s.epic.id) || SQ_EPIC[0]; return { ...s.epic, q: { id: e[0], cat: e[1], r: 4, t: e[2], o: e[3] || {}, xp: 150 }, left: 7 - dayDiff(s.epic.wk, todayK()) }; },
+  epicDone() { const s = this.st(), E = this.epic(); if (E.done) return; s.epic.done = Date.now(); s.log.unshift({ id: E.id, k: todayK(), t: E.q.t, cat: E.q.cat, r: 4, at: Date.now(), epic: 1 }); s.count[E.q.cat] = (s.count[E.q.cat] || 0) + 1; Game.add(150, 'Quest epica della settimana', { icon: 'trophy', silent: true }); save('game'); Island.toast({ icon: 'trophy', c: '#FFB800', t: '⚔️ Quest epica completata!', s: E.q.t, end: '+150 XP', ms: 3600 }); confetti(180); App.refresh(); },
+  /* ---------- sagas: one chapter a day ---------- */
+  saga() { const s = this.st(); if (!s.saga) return null; const G = SQ_SAGA.find(x => x.id === s.saga.id); if (!G) return null; return { ...s.saga, G, cur: G.steps[s.saga.step], ready: s.saga.last !== todayK(), end: s.saga.step >= G.steps.length }; },
+  sagaStart(id) { const s = this.st(); s.saga = { id, step: 0, last: '' }; save('game'); App.refresh(); },
+  sagaStep() { const s = this.st(), S2 = this.saga(); if (!S2 || !S2.ready || S2.end) return; s.saga.step++; s.saga.last = todayK(); const fin = s.saga.step >= S2.G.steps.length;
+    if (fin) { (s.sagas ||= []).push({ id: S2.id, at: Date.now() }); s.log.unshift({ id: 'saga:' + S2.id, k: todayK(), t: 'Saga completata: ' + S2.G.n, cat: 'crea', r: 4, at: Date.now(), saga: 1 }); s.saga = null; Game.add(200, 'Saga completata: ' + S2.G.n, { icon: 'trophy', silent: true }); Island.toast({ icon: 'trophy', c: '#FFB800', t: `${S2.G.e} Saga completata!`, s: S2.G.n, end: '+200 XP', ms: 4000 }); confetti(200); }
+    else { Game.add(40, `${S2.G.n}: capitolo ${s.saga.step}`, { icon: 'star' }); }
+    save('game'); App.refresh(); },
+  /* ---------- UI ---------- */
+  tile(id, D, i) { const q = this.q(id); if (!q) return ''; const done = !!D.done[id], R = SQ_RAR[q.r], C = SQ_CAT[q.cat], p = this.prog(q), myst = i === D.mystery && !D.revealed && !done;
+    if (myst) return `<button class="sq-tile sq-myst" data-sqrev="1" aria-label="Quest misteriosa: tocca per scoprirla"><span class="sq-q">?</span><b>Quest misteriosa</b><small>Tocca per scoprirla</small></button>`;
+    const L = D.loot && D.loot[id];
+    return `<div class="sq-tile ${done ? 'done' : ''} ${D.flip === id ? 'flip' : ''}" style="--rc:${R[1]};--cc:${C[2]}"><div class="sq-top"><span class="sq-cat">${C[1]} ${C[0]}</span><span class="sq-rar">${R[0]}</span></div><div class="sq-t">${esc(q.t)}</div>
+      ${p ? `<div class="sq-bar"><i style="width:${Math.round(p.p * 100)}%"></i></div><small class="sq-pv tnum">${q.o.auto.k === 'steps' ? Math.round(p.v).toLocaleString('it-IT') + ' / ' + p.n.toLocaleString('it-IT') + ' passi' : q.o.auto.k === 'water' ? (p.v / 1000).toFixed(1).replace('.', ',') + ' / ' + p.n / 1000 + ' l' : p.v + ' / ' + p.n + ' min'}</small>` : ''}
+      ${L && done ? `<small class="sq-loot">${L.em} ${esc(L.t)}</small>` : ''}
+      <div class="sq-act">${done ? `<span class="sq-stamp">✓ Fatta</span><button class="sq-mini" data-squndo="${id}" aria-label="Annulla">↶</button>` : `${p ? '<span class="sq-autot">si completa da sola</span>' : `<button class="btn sm primary" data-sqdo="${id}">Fatta! <b>+${q.xp}</b></button>`}${D.reroll < 1 ? `<button class="sq-mini" data-sqre="${id}" title="Cambiala (1 al giorno)" aria-label="Cambia quest">🎲</button>` : ''}`}</div></div>`; },
+  card() { if (!this.P().on) return ''; this.auto(); const D = this.day(), E = this.epic(), G = this.saga(), st = this.streak(), n = Object.keys(D.done).length;
+    return `<section class="card span-12 sq-card"><div class="card-h"><h3>🎲 Side quest</h3><span class="sq-meta">${st ? `<span class="sq-chip">🔥 ${st} ${st === 1 ? 'giorno' : 'giorni'}</span>` : ''}<span class="sq-chip">${n}/${D.ids.length} oggi</span></span><button class="more" data-act="sideOpen" aria-label="Le tue avventure">Avventure${ico('right', 'sm')}</button></div>
+      <div class="sq-grid">${D.ids.map((id, i) => this.tile(id, D, i)).join('')}</div>
+      <div class="sq-strips"><div class="sq-strip epic ${E.done ? 'done' : ''}"><span class="sq-se">⚔️</span><span class="grow" style="min-width:0"><div class="t">${esc(E.q.t)}</div><div class="s">Quest epica della settimana · ${E.done ? 'completata 🏆' : `${E.left} ${E.left === 1 ? 'giorno' : 'giorni'} rimasti · +150 XP`}${(() => { const p = this.prog(E.q); return p && !E.done ? ` · ${Math.round(p.p * 100)}%` : ''; })()}</div></span>${E.done ? '' : E.q.o.auto ? '' : `<button class="btn sm" data-act="sideEpic">Fatta!</button>`}</div>
+        ${G ? `<div class="sq-strip saga"><span class="sq-se">${G.G.e}</span><span class="grow" style="min-width:0"><div class="t">${esc(G.G.n)} · capitolo ${G.step + 1}/${G.G.steps.length}</div><div class="s">${esc(G.cur)}</div><div class="sq-dots">${G.G.steps.map((_, j) => `<i class="${j < G.step ? 'on' : j === G.step ? 'cur' : ''}"></i>`).join('')}</div></span>${G.ready ? `<button class="btn sm" data-act="sideSaga">Fatto!</button>` : '<span class="s muted" style="font-size:12.5px;white-space:nowrap">prossimo domani</span>'}</div>` : `<button class="sq-strip saga new" data-act="sideSagas"><span class="sq-se">📜</span><span class="grow"><div class="t">Inizia una saga</div><div class="s">Un'avventura a capitoli, uno al giorno · +200 XP alla fine</div></span>${ico('right', 'sm')}</button>`}</div></section>`; },
+  sheet() {
+    const s = this.st(), P = this.P(), tot = s.log.length, leg = s.log.filter(l => l.r === 4).length;
+    const sh = openSheet({ title: 'Le tue avventure', wide: true, left: { label: 'Chiudi' }, body: '<div id="sqB" style="display:flex;flex-direction:column;gap:16px"></div>' }), B = $('#sqB', sh.el);
+    const paint = () => { const P2 = this.P();
+      B.innerHTML = `<div class="sq-stats"><div><b class="tnum">${tot}</b><small>completate</small></div><div><b class="tnum">${this.streak()}</b><small>giorni di fila</small></div><div><b class="tnum" style="color:#FFB800">${leg}</b><small>leggendarie</small></div><div><b class="tnum">${(s.sagas || []).length}</b><small>saghe</small></div></div>
+        ${s.titles.length ? `<div class="field"><span class="lbl">I tuoi titoli (tocca per mostrarlo nel profilo)</span><div class="chips">${s.titles.map(t => `<button class="chip" data-sqtit="${esc(t)}" aria-pressed="${s.title === t}">👑 ${esc(t)}</button>`).join('')}</div></div>` : ''}
+        <div class="field"><span class="lbl">Album</span><div class="sq-album">${Object.entries(SQ_CAT).map(([k, c]) => { const n = s.count[k] || 0, lv = n >= 25 ? 3 : n >= 10 ? 2 : n >= 3 ? 1 : 0; return `<div class="sq-badge lv${lv}" style="--cc:${c[2]}"><span>${c[1]}</span><b>${c[0]}</b><small>${n} · ${['da scoprire', 'bronzo', 'argento', 'oro'][lv]}</small></div>`; }).join('')}</div></div>
+        <div class="field"><span class="lbl">Ultime avventure</span>${s.log.length ? `<div class="list">${s.log.slice(0, 15).map(l => `<div class="row"><span style="font-size:20px">${l.epic ? '⚔️' : l.saga ? '📜' : (SQ_CAT[l.cat] || ['', '⭐'])[1]}</span><span class="grow" style="min-width:0"><div class="t">${esc(l.t)}</div><div class="s">${relDay(l.k)} · <span style="color:${SQ_RAR[l.r][1]}">${SQ_RAR[l.r][0]}</span>${l.note ? ' · ' + esc(l.note) : ''}</div></span></div>`).join('')}</div>` : '<p class="muted" style="margin:0">Ancora nessuna: la prima è nella scheda di Oggi.</p>'}</div>
+        <div class="card" style="background:var(--cell);display:flex;flex-direction:column;gap:10px"><b>Inventa una quest</b><div style="display:flex;gap:8px;flex-wrap:wrap"><input class="input" id="sqNew" placeholder="Es. Prova un ristorante etiope" style="flex:1;min-width:200px"><select class="input" id="sqNewC" style="width:auto">${Object.entries(SQ_CAT).map(([k, c]) => `<option value="${k}">${c[1]} ${c[0]}</option>`).join('')}</select><button class="btn primary" id="sqAdd">Aggiungi</button></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" id="sqAi">✨ Inventala tu per me</button>${s.custom.length ? `<span class="muted" style="font-size:13px;align-self:center">${s.custom.length} tue nel mazzo</span>` : ''}</div>${s.custom.length ? `<div class="chips">${s.custom.map(c => `<button class="chip" data-sqdel="${c.id}" title="Togli">${SQ_CAT[c.cat || 'folle'][1]} ${esc(c.t)} ✕</button>`).join('')}</div>` : ''}</div>
+        <div class="list flat"><div class="row"><span class="grow"><div class="t">Side quest su Oggi</div></span>${toggleBtn('sqOn', P2.on)}</div>
+          <div class="row"><span class="grow"><div class="t">Quante al giorno</div></span>${seg('sqN', [[2, '2'], [3, '3'], [4, '4']], P2.n)}</div>
+          <div class="row"><span class="grow"><div class="t">Livello</div><div class="s">Più folle = più rare ed epiche</div></span>${seg('sqM', [['tranquilla', 'Tranquillo'], ['normale', 'Normale'], ['folle', 'Folle']], P2.mode)}</div>
+          <div class="row"><span class="grow"><div class="t">Notifica con le quest del giorno</div></span><input class="input" id="sqAt" type="time" value="${P2.at}" style="width:110px">${toggleBtn('sqNt', P2.notif)}</div>
+          <div class="row" style="flex-wrap:wrap"><span class="grow"><div class="t">Categorie</div></span><div class="chips">${Object.entries(SQ_CAT).map(([k, c]) => `<button class="chip" data-sqc="${k}" aria-pressed="${P2.cats.includes(k)}">${c[1]} ${c[0]}</button>`).join('')}</div></div></div>`;
+      $$('[data-sqtit]', B).forEach(b => b.onclick = () => { s.title = s.title === b.dataset.sqtit ? '' : b.dataset.sqtit; save('game'); paint(); App.refreshChrome && App.refreshChrome(); });
+      $('#sqAdd', B).onclick = () => { const t = $('#sqNew', B).value.trim(); if (!t) return; s.custom.push({ id: 'u' + uid(), t: t.slice(0, 140), cat: $('#sqNewC', B).value, r: 2 }); save('game'); paint(); Island.toast({ icon: 'star', c: 'var(--green)', t: 'Aggiunta al mazzo', s: 'Potrà uscire nei prossimi giorni', ms: 2000 }); };
+      $$('[data-sqdel]', B).forEach(b => b.onclick = () => { s.custom = s.custom.filter(c => c.id !== b.dataset.sqdel); save('game'); paint(); });
+      $('#sqAi', B).onclick = async () => { const sample = await Cap.get('sample').catch(() => null); if (!sample) { typeof aiUnavailable === 'function' ? aiUnavailable() : Island.toast({ icon: 'spark', c: 'var(--orange)', t: 'Serve l\'IA', s: 'Configurala in Account', ms: 2600 }); return; }
+        const C = this.ctx(); Island.toast({ icon: 'spark', c: 'var(--purple)', t: 'Invento una quest…', ms: 2400 });
+        try { const r = await sample.json(`Inventa UNA side quest divertente, originale, sicura e fattibile oggi in vita reale per uno studente universitario italiano (stile videogioco, max 110 caratteri, tono giocoso, niente spese alte né rischi). Contesto: ${C.we ? 'weekend' : 'giorno feriale'}${C.rain ? ', piove' : C.sun ? ', c\'è il sole' : ''}${C.city ? ', è in trasferta a ' + C.city : ''}${C.ex ? ', ha un esame tra poco' : ''}. Categorie possibili: ${Object.keys(SQ_CAT).join(', ')}. Rispondi solo con JSON {"t": testo, "cat": categoria}.`, { cache: false });
+          if (r && r.t) { s.custom.push({ id: 'u' + uid(), t: String(r.t).slice(0, 140), cat: SQ_CAT[r.cat] ? r.cat : 'folle', r: 3 }); save('game'); paint(); Island.toast({ icon: 'spark', c: 'var(--purple)', t: 'Nuova quest nel mazzo (rara)', s: String(r.t).slice(0, 90), ms: 3600 }); } } catch (e) { typeof aiError === 'function' && aiError(e); } };
+      wireToggle($('#sqOn', B), v => { this.set('on', v); App.refresh(); }); wireToggle($('#sqNt', B), v => { this.set('notif', v); Alerts.sync && Alerts.sync(); });
+      wireSeg(B, 'sqN', v => { this.set('n', +v); this.rebuild(); }); wireSeg(B, 'sqM', v => { this.set('mode', v); this.rebuild(); }); $('#sqAt', B).onchange = e => { this.set('at', e.target.value || '10:00'); Alerts.sync && Alerts.sync(); };
+      $$('[data-sqc]', B).forEach(b => b.onclick = () => { const c = this.P().cats, k = b.dataset.sqc; const n2 = c.includes(k) ? c.filter(x => x !== k) : [...c, k]; if (!n2.length) return; this.set('cats', n2); this.rebuild(); paint(); }); };
+    paint(); },
+  /** settings changed: rebuild today's quests that are not done yet */
+  rebuild() { const k = todayK(), D = this.day(k), keep = D.ids.filter(id => D.done[id]), fresh = this.pick(k, 10 + (D.reroll || 0)).filter(id => !keep.includes(id)); D.ids = keep.concat(fresh).slice(0, Math.max(this.P().n, keep.length)); save('game'); App.refresh(); },
+  sagas() { const s = this.st(), doneIds = (s.sagas || []).map(x => x.id);
+    openSheet({ title: 'Scegli una saga', wide: true, left: { label: 'Chiudi' }, body: `<p class="muted" style="margin:0;font-size:14px">Un'avventura a capitoli: ne sblocchi uno al giorno. Ogni capitolo vale 40 XP, la fine 200 XP.</p><div class="sq-sagas">${SQ_SAGA.map(G => `<button class="sq-sg" data-sg="${G.id}"><span class="sq-se">${G.e}</span><b>${esc(G.n)}${doneIds.includes(G.id) ? ' ✓' : ''}</b><small>${G.steps.length} capitoli · ${esc(G.steps[0])}…</small></button>`).join('')}</div>`, onMount: el => $$('[data-sg]', el).forEach(b => b.onclick = () => { Sheets[Sheets.length - 1].close(); this.sagaStart(b.dataset.sg); Island.toast({ icon: 'star', c: 'var(--orange)', t: 'Saga iniziata', s: SQ_SAGA.find(g => g.id === b.dataset.sg).steps[0], ms: 2800 }); }) }); },
+};
+ACT.sideOpen = () => Side.sheet();
+ACT.sideEpic = () => Side.epicDone();
+ACT.sideSaga = () => Side.sagaStep();
+ACT.sideSagas = () => Side.sagas();
+document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('[data-sqdo],[data-sqre],[data-squndo],[data-sqrev]'); if (!b) return; e.stopPropagation();
+  if (b.dataset.sqrev) { b.classList.add('reveal'); setTimeout(() => Side.reveal(), 380); return; }
+  if (b.dataset.sqre) return Side.reroll(b.dataset.sqre); if (b.dataset.squndo) return Side.undo(b.dataset.squndo);
+  const tile = b.closest('.sq-tile'); if (tile) tile.classList.add('pop'); setTimeout(() => Side.complete(b.dataset.sqdo), 220); });
+TODAY_CARDS.side = 'Side quest'; if (!TODAY_DEFAULT.includes('side')) TODAY_DEFAULT.splice(Math.max(1, TODAY_DEFAULT.indexOf('quests')), 0, 'side');
+TODAY_EXTRA.side = () => Side.card();
+if (typeof TodaySmart !== 'undefined' && TodaySmart.score) { const oS = TodaySmart.score.bind(TodaySmart); TodaySmart.score = function (k, ...a) { if (k === 'side') { const D = Side.day(); return Side.P().on && D.ids.some(id => !D.done[id]) ? 60 : 0; } return oS(k, ...a); }; }
+/* the notification of the day */
+{ const old = Alerts.list.bind(Alerts); Alerts.list = function (hours = 48) { const out = old(hours), P = Side.P(), now = Date.now(); if (!P.on || !P.notif) return out;
+  for (let d = 0; d <= Math.ceil(hours / 24); d++) { const k = addDK(todayK(), d), at = this.at(k, P.at), key = 'sq:' + k; if (this.fired[key] || at < now - 10 * 60e3 || at > now + hours * 36e5) continue; const ids = Side.day(k).ids, Q = ids.map(id => Side.q(id)).filter(Boolean);
+    out.push({ key, at, title: '🎲 Le side quest di oggi', body: Q.map((q, i) => i === Side.day(k).mystery ? '❓ una quest misteriosa' : `${SQ_CAT[q.cat][1]} ${q.t}`).join(' · '), view: 'today' }); }
+  return out.sort((a, b) => a.at - b.at); }; }
+/* badges */
+Game.BADGES.push({ id: 'side10', n: 'Avventuriero', d: '10 side quest completate', c: '#30B0C7', i: 'star', ok: () => ((S.game.side || {}).log || []).length >= 10 }, { id: 'side50', n: 'Eroe del quotidiano', d: '50 side quest completate', c: '#AF52DE', i: 'trophy', ok: () => ((S.game.side || {}).log || []).length >= 50 }, { id: 'sideLeg', n: 'Leggenda', d: 'Una side quest leggendaria', c: '#FFB800', i: 'star', ok: () => ((S.game.side || {}).log || []).some(l => l.r === 4) });
+/* auto quests complete themselves while you use the app */
+setInterval(() => { try { if (Side.P().on) { const D = Side.day(), before = Object.keys(D.done).length; Side.auto(); if (Object.keys(D.done).length !== before && UI.view === 'today') App.refresh(); } } catch (_) {} }, 60e3);
+CMD_ACT.push(['Side quest: le mie avventure', 'star', () => Side.sheet()], ['Side quest: inizia una saga', 'star', () => Side.sagas()]);
+if (typeof Voice !== 'undefined') { const oH = Voice.handle.bind(Voice); Voice.handle = async function (raw) { const l = String(raw || '').toLowerCase(); if (/side ?quest|missioni? divertent|avventur/.test(l)) { const D = Side.day(); const t = D.ids.map(id => Side.q(id)).filter(Boolean).map(q => q.t).join('. '); try { Voice.say('Le tue side quest di oggi: ' + t); } catch (_) {} go('today'); return { ok: true, msg: 'Ecco le side quest' }; } return oH(raw); }; }
+/* the title you choose in the album is shown on your level card */
+{ const oI = Game.info.bind(Game); Game.info = function (...a) { const r = oI(...a), t = S.game.side && S.game.side.title; return t ? { ...r, title: t } : r; }; }
+
+/* =========================================================
    ASSISTANT — "Segretario": Claude with page tools
    ========================================================= */
 const CAT_KEYS = Object.keys(CATS);
