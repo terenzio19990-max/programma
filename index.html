@@ -1,4 +1,4 @@
-<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610131748"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610181010"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Orbita">
@@ -1628,6 +1628,40 @@ body:has(.sheet-wrap) .vc-fab,body:has(.wr) .vc-fab,body:has(.cmd) .vc-fab{opaci
 .sq-sagas{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}.sq-sg{display:flex;flex-direction:column;gap:4px;padding:14px;border-radius:16px;border:0;background:var(--cell);font:inherit;color:inherit;text-align:left;cursor:pointer}.sq-sg small{color:var(--label-2);font-size:12.5px}
 @media (max-width:640px){.sq-meta{display:none}.sq-grid{grid-template-columns:1fr}.sq-tile{min-height:0}.sq-stats{grid-template-columns:repeat(2,1fr)}}
 @media (prefers-reduced-motion:reduce){.sq-tile,.sq-myst .sq-q,.sq-tile[style*="#FFB800"]{animation:none!important}}
+
+/* social */
+.soc-empty{display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center;padding:36px 20px}.soc-empty b{font-size:19px}.soc-empty p{margin:0}
+.soc-accs{display:flex;gap:10px;overflow-x:auto;padding:4px 2px 10px;scrollbar-width:none;scroll-snap-type:x proximity}
+.soc-all{flex:none;align-self:stretch;border:0;border-radius:18px;padding:0 16px;background:var(--surface);box-shadow:var(--shadow-sm);font:inherit;font-weight:600;color:var(--label-2);cursor:pointer}.soc-all.on{background:var(--accent);color:#fff}
+.soc-acc{flex:none;width:250px;display:flex;flex-direction:column;gap:8px;padding:14px;border-radius:20px;border:0;background:var(--surface);box-shadow:var(--shadow-sm);font:inherit;color:inherit;text-align:left;cursor:pointer;scroll-snap-align:start;border-top:3px solid var(--nc);transition:transform .2s}
+.soc-acc:active{transform:scale(.98)}.soc-acc.on{box-shadow:0 0 0 2px var(--nc),var(--shadow-sm)}
+.soc-acc-h{display:flex;align-items:center;gap:10px}.soc-ne{font-size:24px}.soc-acc-h b{display:block;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.soc-acc-h small{color:var(--label-2);font-size:12px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.soc-ed{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:var(--label-2);background:var(--fill)}
+.soc-acc-n{display:flex;align-items:flex-end;justify-content:space-between;gap:8px}.soc-acc-n b{font-size:24px;display:block;line-height:1.1}.soc-acc-n small{font-size:12px;color:var(--label-2)}.soc-spark{width:110px;height:34px;flex:none}
+.soc-goal{height:5px;border-radius:3px;background:var(--fill);overflow:hidden}.soc-goal i{display:block;height:100%;background:var(--nc);border-radius:3px}
+.soc-newacc{width:120px;align-items:center;justify-content:center;color:var(--accent);border-top-color:transparent;border:1.5px dashed var(--sep)}
+.soc-tools{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin:6px 0 4px}
+.soc-tool{display:flex;flex-direction:column;gap:2px;padding:14px;border-radius:18px;border:0;background:linear-gradient(150deg,color-mix(in srgb,var(--purple) 9%,var(--surface)),var(--surface));box-shadow:var(--shadow-sm);font:inherit;color:inherit;text-align:left;cursor:pointer;transition:transform .2s}.soc-tool:active{transform:scale(.97)}
+.soc-tool span{font-size:24px}.soc-tool b{font-size:15px}.soc-tool small{font-size:12.5px;color:var(--label-2)}
+.soc-week{display:grid;grid-template-columns:repeat(7,minmax(118px,1fr));gap:8px;overflow-x:auto;padding-bottom:4px}
+.soc-day{display:flex;flex-direction:column;gap:6px;padding:10px;border-radius:16px;background:var(--surface);box-shadow:var(--shadow-sm);min-height:150px}.soc-day.today{box-shadow:0 0 0 2px var(--accent),var(--shadow-sm)}
+.soc-dh{display:flex;justify-content:space-between;align-items:baseline}.soc-dh b{font-size:14px}.soc-dh small{color:var(--label-3);font-size:13px}
+.soc-pc{display:flex;flex-direction:column;gap:2px;padding:7px 9px;border-radius:11px;border:0;border-left:3px solid var(--nc);background:var(--cell);font:inherit;color:inherit;text-align:left;cursor:pointer}.soc-pc small{font-size:11.5px;color:var(--label-2)}.soc-pc span{font-size:13px;font-weight:600;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.soc-pc.pub{opacity:.6}.soc-pc.pub span::before{content:'✓ ';color:var(--green)}
+.soc-add{margin-top:auto;border:1.5px dashed var(--sep);background:transparent;border-radius:10px;color:var(--label-3);font-size:18px;height:30px;cursor:pointer}.soc-add:hover{color:var(--accent);border-color:var(--accent)}
+.soc-rate{margin-top:14px;background:color-mix(in srgb,var(--green) 9%,var(--surface))}
+.soc-best{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}.soc-bs{padding:5px 11px;border-radius:999px;background:var(--fill);font-size:13.5px}.soc-bs.top{background:var(--accent);color:#fff}
+.soc-heat{display:grid;grid-template-columns:34px repeat(6,1fr);gap:4px;align-items:center}.soc-heat small{font-size:11px;color:var(--label-2);text-align:center}.soc-heat i{display:block;height:20px;border-radius:5px}
+.soc-cap{font-size:15px;line-height:1.45;min-height:150px}
+.soc-ai{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.soc-tip{margin:-2px 0 0;font-size:13.5px;color:var(--label-2);background:color-mix(in srgb,var(--yellow,#FFCC00) 14%,var(--cell));padding:8px 11px;border-radius:12px}
+.soc-vars{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}.soc-var{display:flex;flex-direction:column;gap:4px;padding:12px;border-radius:14px;border:0;background:var(--cell);font:inherit;color:inherit;text-align:left;cursor:pointer;white-space:pre-wrap}.soc-var b{text-transform:capitalize;color:var(--accent);font-size:13px}.soc-var span{font-size:13.5px;line-height:1.4}.soc-var small{color:var(--label-3);font-size:11.5px}
+#rpR{display:flex;flex-direction:column;gap:8px}
+.soc-perf{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px}.soc-perf label{display:flex;flex-direction:column;gap:3px}.soc-perf small{font-size:12px;color:var(--label-2)}
+.soc-ideas{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}.soc-idea{display:flex;flex-direction:column;gap:6px;padding:14px;border-radius:16px;background:var(--cell)}.soc-idea b{font-size:15.5px}.soc-idea p{margin:0;font-size:13.5px}.soc-idea small{color:var(--label-2);font-size:12.5px;flex:1}
+.soc-ifmt{align-self:flex-start;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--purple);background:color-mix(in srgb,var(--purple) 12%,transparent);padding:2px 8px;border-radius:999px}
+.soc-prev{white-space:pre-wrap;margin-top:4px}.soc-ul{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.soc-behind{display:flex;flex-direction:column;gap:6px;margin-top:8px;padding-top:10px;border-top:.5px solid var(--sep);font-size:13.5px;color:var(--label-2)}.soc-behind .btn{align-self:flex-start}
+@media (max-width:640px){.soc-acc{width:220px}.soc-tools{grid-template-columns:1fr 1fr}.soc-week{grid-template-columns:repeat(7,128px)}}
 </style>
 <div class="app" id="app">
   <aside class="sidebar" id="sidebar" aria-label="Navigazione"></aside>
@@ -1729,7 +1763,7 @@ body:has(.sheet-wrap) .vc-fab,body:has(.wr) .vc-fab,body:has(.cmd) .vc-fab{opaci
     <symbol id="i-bank" viewBox="0 0 24 24"><path d="M3.5 9.5L12 4l8.5 5.5zM5.5 10v7M10 10v7M14 10v7M18.5 10v7M3.5 20h17"/></symbol>
   </defs>
 </svg>
-<script src="app.js?v=202610131748"></script>
+<script src="app.js?v=202610181010"></script>
 <script id="orbita-motion">
 (()=>{
 const RM=matchMedia('(prefers-reduced-motion: reduce)'), FINE=matchMedia('(hover:hover) and (pointer:fine)');
