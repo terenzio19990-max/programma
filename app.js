@@ -19804,8 +19804,16 @@ const Here = {
     if (st === 'prompt') { this.P().gpsAsked = 1; save('profile'); }
     try { const g = await Promise.race([geoHere(), new Promise((_, ko) => setTimeout(() => ko(new Error('timeout')), 16000))]); return { lat: g.lat, lng: g.lng, acc: g.acc, src: 'gps' }; } catch (_) { return null; }
   },
+  /** approximate position from the connection, from whichever service answers */
   async ip() {
-    try { const r = await (await fetch('https://ipwho.is/?fields=success,city,region,latitude,longitude')).json(); if (r && r.success !== false && r.latitude != null) return { lat: r.latitude, lng: r.longitude, acc: 15000, src: 'ip', name: r.city || '' }; } catch (_) {}
+    const J = async (u, ms = 7000) => { const c = new AbortController(), t = setTimeout(() => c.abort(), ms); try { return await (await fetch(u, { signal: c.signal })).json(); } finally { clearTimeout(t); } };
+    const T = [
+      async () => { const r = await J('https://ipwho.is/?fields=success,city,region,latitude,longitude'); return r && r.success !== false && r.latitude != null ? { lat: r.latitude, lng: r.longitude, name: r.city } : null; },
+      async () => { const r = await J('https://get.geojs.io/v1/ip/geo.json'); return r && r.latitude ? { lat: +r.latitude, lng: +r.longitude, name: r.city } : null; },
+      async () => { const r = await J('https://ipapi.co/json/'); return r && r.latitude != null ? { lat: r.latitude, lng: r.longitude, name: r.city } : null; },
+      async () => { const r = await J('https://freeipapi.com/api/json'); return r && r.latitude != null ? { lat: r.latitude, lng: r.longitude, name: r.cityName } : null; },
+    ];
+    for (const f of T) { try { const g = await f(); if (g) return { ...g, acc: 15000, src: 'ip', name: g.name || '' }; } catch (_) {} }
     return null;
   },
   /** coordinates → "Cassino", "Roma · Trastevere"… */
@@ -19840,7 +19848,28 @@ const Here = {
     const addr = await this.addr(c.lat, c.lng);
     Island.toast({ icon: 'pin', c: 'var(--accent)', t: 'È qui che abiti?', s: (addr || 'Questa posizione') + ' · la uso per dirti quando partire', action: { label: 'Sì, è casa', fn: () => { S.profile.home = { addr: addr || 'Casa', lat: +c.lat.toFixed(6), lng: +c.lng.toFixed(6), auto: true }; save('profile'); Island.toast({ icon: 'pin', c: 'var(--green)', t: 'Casa salvata', s: 'La cambi quando vuoi in Impostazioni › Posizione', ms: 2400 }); } }, ms: 9000 });
   },
-  async setHomeHere() { const g = await this.gps(true); if (!g) { Island.toast({ icon: 'pin', c: 'var(--orange)', t: 'Posizione non disponibile', s: 'Permetti la posizione a Orbita nelle impostazioni del dispositivo', ms: 3200 }); return false; } const addr = await this.addr(g.lat, g.lng); S.profile.home = { addr: addr || 'Casa', lat: g.lat, lng: g.lng, auto: true }; save('profile'); Island.toast({ icon: 'pin', c: 'var(--green)', t: 'Casa salvata', s: addr || '', ms: 2200 }); return true; },
+  async setHomeHere() { const g = await this.gps(true); if (!g) return this.homeSheet(); const addr = await this.addr(g.lat, g.lng); S.profile.home = { addr: addr || 'Casa', lat: g.lat, lng: g.lng, auto: true }; save('profile'); Island.toast({ icon: 'pin', c: 'var(--green)', t: 'Casa salvata', s: addr || '', ms: 2200 }); return true; },
+  /** type the address, pick it from the map results (works everywhere, also on the computer) */
+  homeSheet() { return new Promise(done => { const H = S.profile.home || {}; let L = [];
+    const sh = openSheet({ title: 'Indirizzo di casa', left: { label: 'Annulla', act: s => { s.close(); done(false); } },
+      body: `<p class="muted" style="margin:0;font-size:14px">Lo uso per dirti quando partire per i tuoi impegni e per i percorsi. Resta solo nel tuo account.</p>
+        <div style="display:flex;gap:8px"><input class="input" id="hmQ" placeholder="Via, numero, città" value="${esc(H.addr || '')}" style="flex:1" enterkeyhint="search"><button class="btn primary" id="hmGo">${ico('search', 'sm')}Cerca</button></div>
+        <div class="list" id="hmR"></div>${navigator.geolocation && !window.orbitaDesktop ? `<button class="btn plain" id="hmHere" style="align-self:flex-start">${ico('pin', 'sm')}Usa dove sono adesso</button>` : ''}`,
+      onMount: el => {
+        const R = $('#hmR', el), q = $('#hmQ', el);
+        const pick = x => { S.profile.home = { addr: x.addr, lat: x.lat, lng: x.lng }; save('profile'); sh.close(); Island.toast({ icon: 'pin', c: 'var(--green)', t: 'Casa salvata', s: x.addr, ms: 2200 }); done(true); App.refresh(); };
+        const go = async () => { const t = q.value.trim(); if (!t) return q.focus(); R.innerHTML = '<div class="row"><span class="muted">Cerco…</span></div>';
+          try { const r = await (await fetch('https://nominatim.openstreetmap.org/search?' + new URLSearchParams({ q: t, format: 'jsonv2', addressdetails: 1, limit: 5, 'accept-language': 'it', countrycodes: 'it' }))).json(); let A = Array.isArray(r) ? r : [];
+            if (!A.length) A = await (await fetch('https://nominatim.openstreetmap.org/search?' + new URLSearchParams({ q: t, format: 'jsonv2', addressdetails: 1, limit: 5, 'accept-language': 'it' }))).json();
+            L = (A || []).map(x => { const a = x.address || {}, street = [a.road || a.pedestrian || a.square, a.house_number].filter(Boolean).join(' '), town = a.city || a.town || a.village || a.municipality || ''; return { addr: [street, town].filter(Boolean).join(', ') || x.display_name, full: x.display_name, lat: +(+x.lat).toFixed(6), lng: +(+x.lon).toFixed(6) }; });
+            R.innerHTML = L.length ? L.map((x, i) => `<button class="row" data-hm="${i}"><span class="tile-ico" style="background:#A2845E">${ico('pin')}</span><span class="grow" style="min-width:0"><div class="t">${esc(x.addr)}</div><div class="s" style="white-space:normal">${esc(x.full)}</div></span></button>`).join('') : '<div class="row"><span class="muted">Non lo trovo: prova con via, numero e città</span></div>';
+            $$('[data-hm]', R).forEach(b => b.onclick = () => pick(L[+b.dataset.hm]));
+          } catch (_) { R.innerHTML = '<div class="row"><span class="muted">Ricerca non raggiungibile: controlla la connessione</span></div>'; } };
+        $('#hmGo', el).onclick = go; q.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
+        const hb = $('#hmHere', el); if (hb) hb.onclick = async () => { const g = await Here.gps(true); if (!g) { Island.toast({ icon: 'pin', c: 'var(--orange)', t: 'Posizione non permessa', s: 'Scrivi l\'indirizzo qui sopra', ms: 2600 }); return; } pick({ addr: await Here.addr(g.lat, g.lng) || 'Casa', lat: g.lat, lng: g.lng }); };
+        if (q.value) go(); else q.focus();
+      } });
+  }); },
 };
 /* metres between two {lat,lng|lon} */
 function dist(a, b) { const R = 6371e3, r = x => x * Math.PI / 180, la1 = r(a.lat), la2 = r(b.lat), dl = r((b.lng ?? b.lon) - (a.lng ?? a.lon)), dp = la2 - la1; const h = Math.sin(dp / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dl / 2) ** 2; return 2 * R * Math.asin(Math.min(1, Math.sqrt(h))); }
@@ -19863,10 +19892,10 @@ Promise.resolve().then(() => { const V = VIEWS.settings; if (V) {
   V.render = function () { let h = oR.apply(this, arguments); if (IN_CLAUDE) return h;
     const P = S.profile, L = Here.last(), man = Here.mode() === 'manual', H = P.home;
     const sec = `<div class="section-h">Posizione</div><div class="list flat" id="plcBox">
-      <div class="row"><span class="tile-ico" style="background:var(--accent)">${ico('pin')}</span><span class="grow" style="min-width:0"><div class="t">Meteo e luoghi</div><div class="s">${man ? 'Città fissa: ' + esc(P.city || '—') : L ? `Automatica · ${esc(L.name || 'la tua zona')}${L.src === 'gps' ? ' (posizione precisa)' : ' (dalla connessione, approssimativa)'}` : 'Automatica'}</div></span>${seg('plcM', [['auto', 'Automatica'], ['manual', 'Città fissa']], man ? 'manual' : 'auto')}</div>
+      <div class="row"><span class="tile-ico" style="background:var(--accent)">${ico('pin')}</span><span class="grow" style="min-width:0"><div class="t">Meteo e luoghi</div><div class="s">${man ? 'Città fissa: ' + esc(P.city || '—') : L ? `Automatica · ${esc(L.name || 'la tua zona')}${L.src === 'gps' ? ' (posizione precisa)' : window.orbitaDesktop ? ' (dalla connessione)' : ' (dalla connessione, approssimativa)'}` : Weather.now && Weather.now.city ? 'Automatica · ' + esc(Weather.now.city) : Weather.err ? esc(Weather.err) : 'Automatica · cerco dove sei…'}</div></span>${seg('plcM', [['auto', 'Automatica'], ['manual', 'Città fissa']], man ? 'manual' : 'auto')}</div>
       <div class="row" id="plcCityRow" ${man ? '' : 'hidden'}><span class="t" style="width:120px">Città</span><input class="input" id="plcCity" value="${esc(P.city || '')}" placeholder="Es. Cassino" style="flex:1"></div>
       ${!man && (!L || L.src !== 'gps') && !window.orbitaDesktop ? `<button class="row" id="plcGps"><span class="tile-ico" style="background:var(--green)">${ico('pin')}</span><span class="grow"><div class="t">Usa la posizione precisa</div><div class="s">Il meteo del posto esatto in cui sei, anche in trasferta</div></span>${ico('right', 'sm chev')}</button>` : ''}
-      <div class="row"><span class="tile-ico" style="background:#A2845E">${ico('grid')}</span><span class="grow" style="min-width:0"><div class="t">Casa</div><div class="s">${H && (H.addr || H.lat != null) ? esc(H.addr || 'Posizione salvata') + (H.auto ? ' · riconosciuta in automatico' : '') : 'La riconosco da sola dopo qualche notte, oppure impostala adesso'}</div></span><button class="btn sm" id="plcHome">${ico('pin', 'sm')}Sono a casa</button></div></div>`;
+      <div class="row"><span class="tile-ico" style="background:#A2845E">${ico('grid')}</span><span class="grow" style="min-width:0"><div class="t">Casa</div><div class="s">${H && (H.addr || H.lat != null) ? esc(H.addr || 'Posizione salvata') + (H.auto ? ' · riconosciuta in automatico' : '') : (window.orbitaDesktop ? 'Scrivi il tuo indirizzo: lo uso per dirti quando partire' : 'La riconosco da sola dopo qualche notte, oppure impostala adesso')}</div></span><button class="btn sm" id="plcHome">${ico('pin', 'sm')}${window.orbitaDesktop || !navigator.geolocation ? (H && (H.addr || H.lat != null) ? 'Cambia' : 'Imposta') : 'Sono a casa'}</button></div></div>`;
     h = h.replace(/<div class="section-h">Meteo<\/div><div class="list flat">[\s\S]*?<\/div><\/div>/, sec);
     if (!h.includes('id="plcBox"')) h = h.replace('<div class="section-h">Università</div>', sec + '<div class="section-h">Università</div>');
     return h; };
@@ -19874,7 +19903,7 @@ Promise.resolve().then(() => { const V = VIEWS.settings; if (V) {
     wireSeg(box, 'plcM', v => { S.profile.wxMode = v; save('profile'); $('#plcCityRow', box).hidden = v !== 'manual'; if (v === 'manual') $('#plcCity', box).focus(); else { Weather.now = null; Weather.load(true).then(() => App.render()); } });
     const c = $('#plcCity', box); if (c) c.onchange = () => { S.profile.city = c.value.trim(); S.profile.cityGeo = null; save('profile'); Weather.now = null; Weather.load(true).then(() => App.render()); };
     const gp = $('#plcGps', box); if (gp) gp.onclick = async () => { gp.disabled = true; const g = await Here.gps(true); if (g) { S.profile.here = null; await Here.get({ force: true }); Weather.now = null; await Weather.load(true); App.render(); Island.toast({ icon: 'pin', c: 'var(--green)', t: 'Posizione precisa attiva', s: (Here.last() || {}).name || '', ms: 2000 }); } else { gp.disabled = false; Island.toast({ icon: 'pin', c: 'var(--orange)', t: 'Posizione non permessa', s: 'Attivala per Orbita nelle impostazioni del browser o del dispositivo', ms: 3400 }); } };
-    $('#plcHome', box).onclick = async () => { if (await Here.setHomeHere()) App.render(); };
+    $('#plcHome', box).onclick = async () => { if (await (window.orbitaDesktop || !navigator.geolocation ? Here.homeSheet() : Here.setHomeHere())) App.render(); };
     return r; };
   if (UI.view === 'settings') App.render();
 } });
