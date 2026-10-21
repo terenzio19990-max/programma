@@ -77,6 +77,12 @@ let S = Object.assign(defaults(), { notes: {}, boards: {}, anns: {}, dtx: {} });
 const UI = { view: 'today', cal: { mode: innerWidth < 640 ? 'day' : 'week', cursor: todayK() }, tasks: 'today', note: null, board: null, docFilter: 'all', notesQ: '' };
 
 /* ---------- Persistence: local cache + private per-user cloud store ---------- */
+const LDB = {
+  p: null,
+  open() { return this.p ||= new Promise(res => { try { const r = indexedDB.open('orbita-local', 1); r.onupgradeneeded = () => r.result.createObjectStore('d'); r.onsuccess = () => res(r.result); r.onerror = r.onblocked = () => res(null); } catch (_) { res(null); } }); },
+  async all() { const db = await this.open(); if (!db) return null; return new Promise(res => { try { const out = {}, rq = db.transaction('d').objectStore('d').openCursor(); rq.onsuccess = () => { const c = rq.result; if (c) { out[c.key] = c.value; c.continue(); } else res(out); }; rq.onerror = () => res(null); } catch (_) { res(null); } }); },
+  async put(m) { const db = await this.open(); if (!db) return false; return new Promise(res => { try { const tx = db.transaction('d', 'readwrite'), st = tx.objectStore('d'); for (const [k, v] of Object.entries(m)) { if (v == null) st.delete(k); else st.put(v, k); } tx.oncomplete = () => res(true); tx.onerror = tx.onabort = () => res(false); } catch (_) { res(false); } }); },
+};
 const Store = {
   db: null, col: null, mode: 'local', stamps: {}, pend: new Set(), inflight: {}, again: {}, timers: {}, first: true, unsub: null,
   docIdsLocal() {
@@ -90,23 +96,42 @@ const Store = {
     return CORE.includes(id) ? S[id] : null;
   },
   apply(id, v) {
+    if (this.isHeavy(id)) this.dirty.add(id);
     if (id.startsWith('note-')) { if (v) S.notes[id.slice(5)] = v; else delete S.notes[id.slice(5)]; return; }
     if (id.startsWith('board-')) { if (v) S.boards[id.slice(6)] = v; else delete S.boards[id.slice(6)]; return; }
     if (id.startsWith('ann-')) { if (v) S.anns[id.slice(4)] = v; else delete S.anns[id.slice(4)]; return; }
     if (id.startsWith('dtx-')) { if (v) S.dtx[id.slice(4)] = v; else delete S.dtx[id.slice(4)]; return; }
     if (CORE.includes(id) && v != null) S[id] = ['profile', 'game', 'music', 'money', 'journal'].includes(id) ? Object.assign(defaults()[id], v) : v;
   },
+  /* boards, PDF annotations and document texts are the heavy part (handwriting!): they live in
+     IndexedDB one record each, so a save writes only what changed and the start-up only reads the
+     small part. localStorage keeps the rest for an instant first screen. Old installs migrate once. */
+  idb: false, dirty: new Set(), heavyReady: Promise.resolve(), heavyIn: false,
+  isHeavy(id) { return /^(board|ann|dtx)-/.test(id); },
+  heavyMap(id) { return id.startsWith('board-') ? [S.boards, id.slice(6)] : id.startsWith('ann-') ? [S.anns, id.slice(4)] : [S.dtx, id.slice(4)]; },
   loadLocal() {
-    try {
-      const raw = localStorage.getItem(LS_KEY); if (!raw) return;
-      const j = JSON.parse(raw);
-      for (const k of CORE) if (j[k] != null) this.apply(k, j[k]);
-      S.notes = j.notes || {}; S.boards = j.boards || {}; S.anns = j.anns || {}; S.dtx = j.dtx || {};
-      this.stamps = j.__stamps || {};
-    } catch (e) { /* storage unavailable: start clean */ }
+    let j = null;
+    try { const raw = localStorage.getItem(LS_KEY); if (raw) j = JSON.parse(raw); } catch (e) { /* storage unavailable: start clean */ }
+    if (j) { for (const k of CORE) if (j[k] != null) this.apply(k, j[k]); S.notes = j.notes || {}; this.stamps = j.__stamps || {}; }
+    if (j && j.__idb) {
+      this.idb = true; S.boards = {}; S.anns = {}; S.dtx = {};
+      this.heavyReady = LDB.all().then(m => { if (!m) { this.idb = false; return; } let n = 0; for (const [id, v] of Object.entries(m)) { if (!this.isHeavy(id) || v == null) continue; const [o, k] = this.heavyMap(id); if (!(k in o)) { o[k] = v; n++; } } this.heavyIn = true; return n; });
+    } else {
+      S.boards = (j && j.boards) || {}; S.anns = (j && j.anns) || {}; S.dtx = (j && j.dtx) || {}; this.heavyIn = true;
+      /* move the heavy part out of localStorage (once) */
+      const all = {}; for (const id of this.docIdsLocal()) if (this.isHeavy(id)) all[id] = this.valueOf(id);
+      this.heavyReady = LDB.put(all).then(ok => { if (ok) { this.idb = true; this.saveLocal(); } });
+    }
   },
+  /** everything, as one JSON (desktop backup file) */
+  fullJSON() { const o = { __stamps: this.stamps, notes: S.notes, boards: S.boards, anns: S.anns, dtx: S.dtx }; for (const k of CORE) o[k] = S[k]; return JSON.stringify(o); },
   saveLocalSoon() { clearTimeout(this.timers.__local); this.timers.__local = setTimeout(() => this.saveLocal(), 300); },
   saveLocal() {
+    if (this.idb) {
+      if (this.dirty.size && this.heavyIn) { const m = {}; for (const id of this.dirty) m[id] = this.valueOf(id); this.dirty.clear(); LDB.put(m).then(ok => { if (!ok) { for (const id of Object.keys(m)) this.dirty.add(id); } }); }
+      try { const o = { __idb: 1, __stamps: this.stamps, notes: S.notes }; for (const k of CORE) o[k] = S[k]; localStorage.setItem(LS_KEY, JSON.stringify(o)); } catch (e) { /* full: the cloud and the backup still have it */ }
+      return;
+    }
     try {
       const o = { __stamps: this.stamps, notes: S.notes, boards: S.boards, anns: S.anns, dtx: S.dtx };
       for (const k of CORE) o[k] = S[k];
@@ -116,7 +141,7 @@ const Store = {
     }
   },
   touch(id, delay = 700) {
-    this.stamps[id] = Date.now();
+    this.stamps[id] = Date.now(); if (this.isHeavy(id)) this.dirty.add(id);
     this.saveLocalSoon();
     if (!this.col) return;
     this.pend.add(id); setSync('busy');
@@ -809,6 +834,7 @@ function applyTheme() {
   else if (HOST_THEME) root.setAttribute('data-theme', HOST_THEME); else root.removeAttribute('data-theme');
   const a = (LOCKED_ACCENT[p.accent] && !unlocked(LOCKED_ACCENT[p.accent])) ? ACCENTS.blue : (ACCENTS[p.accent] || ACCENTS.blue);
   root.style.setProperty('--accent-l', a[0]); root.style.setProperty('--accent-d', a[1]);
+  try { localStorage.setItem('orbita.sp', JSON.stringify({ n: p.name || '', t: p.theme || 'auto' })); } catch (_) {}
 }
 
 /* ---------- Quick add (sheet) ---------- */
@@ -3544,7 +3570,7 @@ const icsEsc = s => String(s || '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n')
 const icsFold = l => { const out = []; while (l.length > 73) { out.push(l.slice(0, 73)); l = ' ' + l.slice(73); } out.push(l); return out.join('\r\n'); };
 const icsD = k => k.replace(/-/g, '');
 const icsDT = (k, hm) => `${icsD(k)}T${hm.replace(':', '')}00`;
-function buildICS() {
+function buildICS(only) {
   const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Orbita//Planner//IT', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:Orbita'];
   const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
   const ev = (uidv, sum, k, s, e, o = {}) => {
@@ -3559,13 +3585,13 @@ function buildICS() {
     L.push('END:VEVENT');
   };
   const RR = { daily: 'FREQ=DAILY', weekdays: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', weekly: 'FREQ=WEEKLY', biweekly: 'FREQ=WEEKLY;INTERVAL=2', monthly: 'FREQ=MONTHLY' };
-  for (const e of S.events) {
+  for (const e of only ? only.events || [] : S.events) {
     const r = RR[e.rec]; const rrule = r ? r + (e.until ? `;UNTIL=${icsD(e.until)}T235959` : '') : null;
     ev(e.id, e.title, e.date, e.allDay ? null : e.start, e.end, { endK: e.endDate, loc: e.loc, desc: e.notes, rrule, ex: e.skip, alarm: e.allDay ? null : '-PT10M' });
   }
-  for (const x of S.exams) if (x.date && x.status === 'planned') ev('exam-' + x.id, 'Esame: ' + x.name, x.date, x.time, x.time ? m2hm(hm2m(x.time) + 120) : null, { loc: x.room, desc: `${x.cfu} CFU`, alarm: '-P1D' });
-  for (const t of S.tasks) if (t.due && !t.done) ev('task-' + t.id, 'Scadenza: ' + t.title, t.due, null, null, { desc: t.notes, alarm: '-PT15H' });
-  for (const p of S.projects || []) for (const m of p.milestones || []) if (m.date && !m.done) ev('ms-' + m.id, `${p.name}: ${m.t}`, m.date, null, null, { alarm: '-PT15H' });
+  if (!only) for (const x of S.exams) if (x.date && x.status === 'planned') ev('exam-' + x.id, 'Esame: ' + x.name, x.date, x.time, x.time ? m2hm(hm2m(x.time) + 120) : null, { loc: x.room, desc: `${x.cfu} CFU`, alarm: '-P1D' });
+  if (!only) for (const t of S.tasks) if (t.due && !t.done) ev('task-' + t.id, 'Scadenza: ' + t.title, t.due, null, null, { desc: t.notes, alarm: '-PT15H' });
+  if (!only) for (const p of S.projects || []) for (const m of p.milestones || []) if (m.date && !m.done) ev('ms-' + m.id, `${p.name}: ${m.t}`, m.date, null, null, { alarm: '-PT15H' });
   L.push('END:VCALENDAR');
   return L.join('\r\n');
 }
@@ -4278,11 +4304,11 @@ const Weather = {
   card() {
     if (!this.ok()) return '';
     const w = this.now;
-    if (!w) return `<section class="card span-4 wx-card"><div class="card-h"><h3>Meteo</h3></div><p class="muted" style="margin:0;font-size:14px">${esc(this.err || 'Carico il meteo…')}</p>${this.err ? `<button class="btn sm" data-go="settings" style="margin-top:10px">Imposta la città</button>` : ''}</section>`;
+    if (!w) return `<section class="card span-4 wx-card"><div class="card-h"><h3>Meteo</h3></div><p class="muted" style="margin:0;font-size:14px">${esc(this.err || 'Carico il meteo…')}</p>${this.err ? `<button class="btn sm" data-go="settings" style="margin-top:10px">Posizione</button>` : ''}</section>`;
     const wd = ['Dom', 'Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab'];
     return `<section class="card span-12 wx-card">
       <div class="wx-top"><span class="wx-ico">${w.icon}</span><div><div class="wx-t">${Math.round(w.t)}°</div><div class="muted" style="font-size:14px">${esc(cap(w.label))} · percepiti ${Math.round(w.feels)}°</div></div>
-        <div class="wx-meta"><b>${esc(w.city)}</b>${w.auto ? ' <span class="muted" style="font-size:12px">· automatica</span>' : ''}<div class="muted" style="font-size:13px">Max ${Math.round(w.max)}° · Min ${Math.round(w.min)}° · pioggia ${w.rain ?? 0}%</div><div class="muted" style="font-size:13px">🌅 ${w.sunrise} · 🌇 ${w.sunset} · vento ${Math.round(w.wind)} km/h</div></div></div>
+        <div class="wx-meta"><b>${esc(w.city)}</b>${w.auto ? ' <span class="muted" style="font-size:12px">· 📍 qui</span>' : ''}<div class="muted" style="font-size:13px">Max ${Math.round(w.max)}° · Min ${Math.round(w.min)}° · pioggia ${w.rain ?? 0}%</div><div class="muted" style="font-size:13px">🌅 ${w.sunrise} · 🌇 ${w.sunset} · vento ${Math.round(w.wind)} km/h</div></div></div>
       <div class="wx-hours">${w.hours.map((h, i) => `<div><small>${i ? h.h : 'Ora'}</small><span>${h.icon}</span><b>${Math.round(h.t)}°</b>${h.p >= 20 ? `<small class="wx-p">${h.p}%</small>` : '<small>&nbsp;</small>'}</div>`).join('')}</div>
       <div class="wx-days">${w.days.slice(1, 7).map(d => `<div><small>${wd[new Date(d.d + 'T12:00').getDay()]}</small><span>${d.icon}</span><b>${Math.round(d.max)}°</b><small>${Math.round(d.min)}°</small></div>`).join('')}</div>
     </section>`;
@@ -4859,9 +4885,9 @@ if (DESK) {
     if (txt && !cur) { try { localStorage.setItem(LS_KEY, txt); location.reload(); } catch (_) {} }
   }).catch(() => {});
   { const old = Store.saveLocal.bind(Store); let t = null;
-    Store.saveLocal = function () { old(); clearTimeout(t); t = setTimeout(() => { try { const s = localStorage.getItem(LS_KEY); if (s) DESK.backup.write(s); } catch (_) {} }, 1500); };
+    Store.saveLocal = function () { old(); clearTimeout(t); t = setTimeout(() => Store.heavyReady.then(() => { try { if (Store.heavyIn) DESK.backup.write(Store.fullJSON()); } catch (_) {} }), 4000); };
   }
-  window.addEventListener('beforeunload', () => { try { const s = localStorage.getItem(LS_KEY); if (s) DESK.backup.write(s); } catch (_) {} });
+  window.addEventListener('beforeunload', () => { try { if (Store.heavyIn) DESK.backup.write(Store.fullJSON()); } catch (_) {} });
 }
 
 /* ---------- AI providers ---------- */
@@ -7113,7 +7139,7 @@ function printNote(n) {
    Senza server, li manda Orbita stesso (es. il programma sul PC
    che resta nella barra) all'ora dell'avviso.
    ========================================================= */
-const PUSH_FN = "// Orbita \u00b7 notifiche push \u2014 Supabase Edge Function \"orbita-push\"\n// Ogni minuto (pg_cron) legge gli avvisi in coda di ogni utente e li invia:\n// notifiche web (iPad/iPhone/computer con Orbita installato), ntfy, Telegram, WhatsApp.\n// Inoltre: calendario da abbonare (?ics=chiave), dati per il widget (?w=chiave)\n// e aggiunta rapida da Siri / Comandi rapidi (?w=chiave&add=testo).\n// Nessuna libreria esterna: Web Push (VAPID + aes128gcm) fatto con WebCrypto.\nconst SB_URL = Deno.env.get('SUPABASE_URL');\nconst SB_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');\nconst VERSION = 10;\nconst CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };\nconst te = new TextEncoder();\n\nconst b64u = buf => { let s = ''; const u = new Uint8Array(buf); for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, ''); };\nconst ub64 = s => { s = String(s).replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; };\nconst cat = (...a) => { const n = a.reduce((s, x) => s + x.length, 0), o = new Uint8Array(n); let i = 0; for (const x of a) { o.set(x, i); i += x.length; } return o; };\nconst hmac = async (key, data) => new Uint8Array(await crypto.subtle.sign('HMAC', await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']), data));\n\n/** RFC 8291 payload encryption (aes128gcm) */\nasync function encrypt(sub, payload) {\n  const ua = ub64(sub.keys.p256dh), auth = ub64(sub.keys.auth);\n  const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);\n  const as = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));\n  const uaKey = await crypto.subtle.importKey('raw', ua, { name: 'ECDH', namedCurve: 'P-256' }, false, []);\n  const ecdh = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey }, kp.privateKey, 256));\n  const prkKey = await hmac(auth, ecdh);\n  const ikm = await hmac(prkKey, cat(te.encode('WebPush: info\\0'), ua, as, new Uint8Array([1])));\n  const salt = crypto.getRandomValues(new Uint8Array(16));\n  const prk = await hmac(salt, ikm);\n  const cek = (await hmac(prk, cat(te.encode('Content-Encoding: aes128gcm\\0'), new Uint8Array([1])))).slice(0, 16);\n  const nonce = (await hmac(prk, cat(te.encode('Content-Encoding: nonce\\0'), new Uint8Array([1])))).slice(0, 12);\n  const key = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);\n  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, cat(te.encode(payload), new Uint8Array([2]))));\n  const head = new Uint8Array(21); head.set(salt, 0); new DataView(head.buffer).setUint32(16, 4096); head[20] = 65;\n  return cat(head, as, ct);\n}\n/** VAPID (RFC 8292) authorization header */\nasync function vapid(endpoint, keys) {\n  const aud = new URL(endpoint).origin, exp = Math.floor(Date.now() / 1000) + 12 * 3600;\n  const unsigned = b64u(te.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' }))) + '.' + b64u(te.encode(JSON.stringify({ aud, exp, sub: keys.sub || 'mailto:orbita@users.noreply.github.com' })));\n  const pk = await crypto.subtle.importKey('jwk', { ...keys.jwk, key_ops: ['sign'], ext: true }, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);\n  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pk, te.encode(unsigned));\n  return `vapid t=${unsigned}.${b64u(sig)}, k=${keys.pub}`;\n}\nasync function webpush(sub, msg, keys) {\n  const body = await encrypt(sub, JSON.stringify(msg));\n  const r = await fetch(sub.endpoint, { method: 'POST', headers: { Authorization: await vapid(sub.endpoint, keys), 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '86400', Urgency: 'high', Topic: String(msg.tag || 'orbita').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'orbita' }, body });\n  return r.status;\n}\n\n/* ---------- other channels ---------- */\nasync function channels(ch, a) {\n  const out = [], text = a.title + (a.body ? '\\n' + a.body : '');\n  if (ch && ch.ntfy) out.push(fetch('https://ntfy.sh/', { method: 'POST', body: JSON.stringify({ topic: ch.ntfy, title: a.title, message: a.body || ' ', tags: ['bell'], priority: 4, ...(ch.url ? { click: ch.url } : {}) }) }).then(r => r.status).catch(() => 0));\n  if (ch && ch.tg && ch.tg.token && ch.tg.chat) out.push(fetch(`https://api.telegram.org/bot${ch.tg.token}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: ch.tg.chat, text: '\ud83d\udd14 ' + text, disable_web_page_preview: true }) }).then(r => r.status).catch(() => 0));\n  if (ch && ch.wa && ch.wa.phone && ch.wa.key) out.push(fetch(`https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(ch.wa.phone)}&text=${encodeURIComponent('\ud83d\udd14 ' + text)}&apikey=${encodeURIComponent(ch.wa.key)}`).then(r => r.status).catch(() => 0));\n  return Promise.all(out);\n}\n\n/* ---------- database (service role, bypasses row-level security) ---------- */\nconst db = (path, opt = {}) => fetch(`${SB_URL}/rest/v1/${path}`, { ...opt, headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', ...(opt.headers || {}) } });\nconst rows = async path => { const r = await db(path); if (!r.ok) throw new Error('db ' + r.status + ' ' + (await r.text()).slice(0, 200)); return r.json(); };\n\nasync function deliver(uid, items, q) {\n  const docs = await rows(`pitwall_docs?user_id=eq.${uid}&or=(id.eq.push-vapid,id.like.push-sub-*)&select=id,v`);\n  const keys = (docs.find(d => d.id === 'push-vapid') || {}).v, subs = docs.filter(d => d.id.startsWith('push-sub-') && d.v && d.v.sub && d.v.sub.endpoint);\n  let sent = 0;\n  for (const a of items) {\n    const msg = { title: a.title, body: a.body || '', tag: a.key, data: { ...(a.data || {}), key: a.key } };\n    if (keys && keys.jwk) for (const s of subs) {\n      try { const st = await webpush(s.v.sub, msg, keys); if (st === 404 || st === 410) await db(`pitwall_docs?user_id=eq.${uid}&id=eq.${encodeURIComponent(s.id)}`, { method: 'DELETE' }); else if (st < 300) sent++; } catch (_) {}\n    }\n    try { const r = await channels(q.ch, a); sent += r.filter(x => x && x < 300).length; } catch (_) {}\n  }\n  return sent;\n}\n\nasync function tick() {\n  const now = Date.now(), Q = await rows('pitwall_docs?id=eq.push-q&select=user_id,v');\n  let n = 0;\n  for (const { user_id, v } of Q) {\n    if (!v || v.off) continue;\n    const due = (v.list || []).filter(a => a && a.key && a.at <= now + 30e3 && a.at >= now - 10 * 60e3);\n    if (!due.length) continue;\n    // claim each alert once (works even if two runs overlap)\n    const r = await db('orbita_push_sent', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=representation' }, body: JSON.stringify(due.map(a => ({ user_id, key: String(a.key).slice(0, 300) }))) });\n    if (!r.ok) throw new Error('orbita_push_sent ' + r.status + ': ' + (await r.text()).slice(0, 200));\n    const won = new Set((await r.json()).map(x => x.key));\n    const mine = due.filter(a => won.has(String(a.key).slice(0, 300)));\n    if (mine.length) n += await deliver(user_id, mine, v);\n  }\n  if (Math.random() < .02) await db(`orbita_push_sent?at=lt.${new Date(now - 7 * 864e5).toISOString()}`, { method: 'DELETE' });\n  return n;\n}\n\n/* ---------- calendar feed, widget, Siri ---------- */\nconst owner = async key => { if (!key || String(key).length < 16) return null; const r = await rows(`pitwall_docs?id=eq.push-feed&v->>key=eq.${encodeURIComponent(key)}&select=user_id,v`); return r[0] || null; };\nconst icsEsc = s => String(s || '').replace(/\\\\/g, '\\\\\\\\').replace(/;/g, '\\\\;').replace(/,/g, '\\\\,').replace(/\\r?\\n/g, '\\\\n');\nconst fold = l => { const out = []; let cur = ''; for (const ch of l) { if (te.encode(cur + ch).length > 73) { out.push(cur); cur = ' ' + ch; } else cur += ch; } out.push(cur); return out.join('\\r\\n'); };\nfunction ics(feed) {\n  const d = s => s.replace(/-/g, ''), t = s => s.replace(':', '') + '00', stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';\n  const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Orbita//IT', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:' + icsEsc(feed.name || 'Orbita'), 'X-WR-TIMEZONE:Europe/Rome', 'REFRESH-INTERVAL;VALUE=DURATION:PT15M', 'X-PUBLISHED-TTL:PT15M'];\n  for (const it of feed.items || []) {\n    L.push('BEGIN:VEVENT', 'UID:' + icsEsc(it.id) + '@orbita', 'DTSTAMP:' + stamp, 'SUMMARY:' + icsEsc(it.t));\n    if (it.allDay || !it.s) { const n = new Date(it.d + 'T12:00:00Z'); n.setUTCDate(n.getUTCDate() + 1); L.push('DTSTART;VALUE=DATE:' + d(it.d), 'DTEND;VALUE=DATE:' + d(n.toISOString().slice(0, 10))); }\n    else L.push('DTSTART:' + d(it.d) + 'T' + t(it.s), 'DTEND:' + d(it.d) + 'T' + t(it.e && it.e > it.s ? it.e : it.s));\n    if (it.loc) L.push('LOCATION:' + icsEsc(it.loc)); if (it.c) L.push('CATEGORIES:' + icsEsc(it.c)); if (it.n) L.push('DESCRIPTION:' + icsEsc(it.n));\n    L.push('END:VEVENT');\n  }\n  L.push('END:VCALENDAR'); return L.map(fold).join('\\r\\n') + '\\r\\n';\n}\n\n/* spoken answers for Siri (\"cosa ho domani?\") */\nconst GG = ['domenica', 'luned\u00ec', 'marted\u00ec', 'mercoled\u00ec', 'gioved\u00ec', 'venerd\u00ec', 'sabato'];\nfunction romeDay(off = 0) { const d = new Date(Date.now() + off * 864e5); return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Rome', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d); }\nfunction answer(v, ask) {\n  const items = v.items || [], tasks = v.tasks || [];\n  const say = (k, label) => { const L = items.filter(x => x.d === k).sort((a, b) => (a.s || '').localeCompare(b.s || '')), T = tasks.filter(x => x.due === k);\n    if (!L.length && !T.length) return `${label} non hai impegni.`;\n    let out = L.length ? `${label} hai ${L.length === 1 ? 'un impegno' : L.length + ' impegni'}: ` + L.map(x => (x.s ? `alle ${x.s.replace(':00', '')} ` : '') + x.t).join('; ') + '.' : `${label} non hai appuntamenti.`;\n    if (T.length) out += ` Da fare: ${T.slice(0, 5).map(x => x.t).join(', ')}${T.length > 5 ? ` e altre ${T.length - 5}` : ''}.`; return out; };\n  if (/doman/.test(ask)) return say(romeDay(1), 'Domani');\n  if (/settiman/.test(ask)) { const out = []; for (let i = 0; i < 7; i++) { const k = romeDay(i), L = items.filter(x => x.d === k); if (L.length) out.push(`${i === 0 ? 'oggi' : i === 1 ? 'domani' : GG[new Date(k + 'T12:00:00Z').getUTCDay()]}: ${L.map(x => (x.s ? x.s.replace(':00', '') + ' ' : '') + x.t).join(', ')}`); } return out.length ? 'Questa settimana: ' + out.join('. ') + '.' : 'Questa settimana non hai impegni in agenda.'; }\n  if (/^(luogo|arrivo|qui)/.test(ask)) { const name = ask.replace(/^(luogo|arrivo|qui)\\s*[:=]?\\s*/, '').trim(), P = v.places || {}, key = Object.keys(P).find(k => k.toLowerCase() === name) || Object.keys(P).find(k => name && (k.toLowerCase().includes(name) || name.includes(k.toLowerCase()))); const L = key ? P[key] : []; return L.length ? `${key}: ${L.slice(0, 8).join(', ')}${L.length > 8 ? '\u2026' : ''}` : ''; }\n  if (/spes/.test(ask)) return (v.shop || []).length ? 'Nella lista della spesa: ' + v.shop.join(', ') + '.' : 'La lista della spesa \u00e8 vuota.';\n  if (/scaden/.test(ask)) return (v.dues || []).length ? 'Prossime scadenze: ' + v.dues.slice(0, 5).map(x => `${x.n} il ${x.d.slice(8)}/${x.d.slice(5, 7)}`).join('; ') + '.' : 'Nessuna scadenza in arrivo.';\n  const late = tasks.filter(x => x.due < romeDay(0)).length;\n  return say(romeDay(0), 'Oggi') + (late ? ` Hai anche ${late} promemoria scadut${late === 1 ? 'o' : 'i'}.` : '');\n}\n\n/* ---- Treni in tempo reale (ViaggiaTreno, RFI): ritardo, binario, ultimo rilevamento ----\n   Solo treni della rete RFI (Trenitalia, Frecce, Regionali, Intercity). Italo non \u00e8 incluso. */\nconst VT = 'www.viaggiatreno.it/infomobilita/resteasy/viaggiatreno/';\nasync function vt(path) { for (const p of ['https://', 'http://']) { try { const r = await fetch(p + VT + path, { headers: { 'User-Agent': 'Mozilla/5.0 Orbita' } }); if (r.ok) return await r.text(); } catch (_) {} } return ''; }\nfunction msDay(ms) { return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Rome' }).format(new Date(ms)); }\nfunction romeMidnight(day) { const g = Date.parse(day + 'T12:00:00Z'); const off = (new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Rome', timeZoneName: 'shortOffset' }).formatToParts(new Date(g)).find(x => x.type === 'timeZoneName') || {}).value || 'GMT+1'; const h = parseInt(off.replace('GMT', '')) || 1; return Date.parse(day + 'T00:00:00Z') - h * 3600e3; }\nasync function treno(num, day, da, to) {\n  num = String(num).replace(/\\D/g, ''); if (!num) return { ok: false, error: 'numero mancante' };\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(day)) day = msDay(Date.now());\n  const txt = await vt('cercaNumeroTrenoTrenoAutocomplete/' + num);\n  const opts = txt.split('\\n').map(x => x.trim()).filter(Boolean).map(x => { const [lab, key] = x.split('|'); const [n, cod, ms] = String(key || '').split('-'); return { lab, n, cod, ms: +ms || 0 }; }).filter(o => o.cod);\n  if (!opts.length) return { ok: false, error: 'treno non trovato (solo rete RFI: Trenitalia, Frecce, Regionali)' };\n  const norm = x => String(x || '').toUpperCase().normalize('NFD').replace(/[^A-Z]/g, '');\n  const want = norm(da).replace(/STAZIONE|CENTRALE|CLE/g, ''); let best = null;\n  for (const o of opts.slice(0, 4)) {\n    const ms = o.ms && msDay(o.ms) === day ? o.ms : romeMidnight(day);\n    let j = null; try { j = JSON.parse(await vt(`andamentoTreno/${o.cod}/${o.n}/${ms}`) || 'null'); } catch (_) { j = null; }\n    if (!j || !j.fermate) continue;\n    const F = j.fermate || [], f = (want && F.find(x => norm(x.stazione).includes(want))) || F[0];\n    const score = (want && f && norm(f.stazione).includes(want) ? 2 : 0) + (o.ms && msDay(o.ms) === day ? 1 : 0);\n    if (!best || score > best.score) best = { score, j, f };\n  }\n  if (!best) return { ok: false, error: 'nessuna informazione per questa data (di solito il treno compare il giorno della partenza)' };\n  const { j, f } = best, sop = j.provvedimento === 1 || /soppress/i.test(String(j.subTitle || '') + String(j.compProvvedimento || ''));\n  const hm = t => t ? new Intl.DateTimeFormat('it-IT', { timeZone: 'Europe/Rome', hour: '2-digit', minute: '2-digit' }).format(new Date(t)) : '';\n  const bE = f && (f.binarioEffettivoPartenzaDescrizione || f.binarioEffettivoArrivoDescrizione), bP = f && (f.binarioProgrammatoPartenzaDescrizione || f.binarioProgrammatoArrivoDescrizione);\n  return { ok: true, numero: num, cat: j.compNumeroTreno || j.categoria || '', da: j.origine, a: j.destinazione,\n    ritardo: Math.round(+j.ritardo || 0), cancellato: sop, partito: !j.nonPartito, arrivato: !!j.arrivato,\n    ultimo: j.stazioneUltimoRilevamento && j.stazioneUltimoRilevamento !== '--' ? j.stazioneUltimoRilevamento : '', ora: hm(j.oraUltimoRilevamento),\n    fermata: f ? f.stazione : '', binario: String(bE || bP || '').trim(), binCambiato: !!(bE && bP && String(bE).trim() !== String(bP).trim()),\n    previsto: f ? hm(f.partenza_teorica || f.arrivo_teorico) : '', info: String(j.subTitle || '').slice(0, 200), at: Date.now(),\n    ...(() => { const wa = norm(to).replace(/STAZIONE|CENTRALE|CLE/g, ''); const F = j.fermate || [], fa = wa ? F.find(x => norm(x.stazione).includes(wa)) : F[F.length - 1]; if (!fa) return {};\n      const aE = fa.binarioEffettivoArrivoDescrizione, aP = fa.binarioProgrammatoArrivoDescrizione, rit = fa.ritardoArrivo != null ? +fa.ritardoArrivo : Math.round(+j.ritardo || 0), teo = fa.arrivo_teorico || fa.programmata || 0;\n      return { arrFermata: fa.stazione, binArr: String(aE || aP || '').trim(), binArrCambiato: !!(aE && aP && String(aE).trim() !== String(aP).trim()), arrivo: hm(teo), arrStima: teo ? hm(teo + Math.max(0, rit) * 60e3) : '', ritArr: rit, arrivato: !!(fa.arrivoReale || fa.effettiva) || !!j.arrivato }; })() };\n}\n/* ---- Soluzioni di viaggio in treno (rete Trenitalia): lefrecce.it, poi ViaggiaTreno ---- */\nconst LF = 'https://www.lefrecce.it/Channels.Website.BFF.WEB/website';\nconst UAH = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Orbita', Accept: 'application/json', 'Content-Type': 'application/json', 'Accept-Language': 'it-IT,it;q=0.9' };\nconst t16 = v => String(v || '').slice(0, 16);\nasync function lfLoc(name) { try { const r = await fetch(`${LF}/locations/search?name=${encodeURIComponent(name)}&limit=5`, { headers: UAH }); if (!r.ok) return null; const j = await r.json(); const x = Array.isArray(j) ? j[0] : null; return x ? { id: x.id, name: x.displayName || x.name } : null; } catch (_) { return null; } }\nasync function vtCode(name) { const t = await vt('autocompletaStazione/' + encodeURIComponent(String(name).toUpperCase())); const L = t.split('\\n').map(x => x.trim()).filter(Boolean).map(x => x.split('|')); const up = String(name).toUpperCase(); const m = L.find(x => x[0] === up) || L.find(x => x[0].startsWith(up)) || L[0]; return m && m[1] ? { code: String(parseInt(m[1].replace(/^S/, ''), 10)), name: m[0] } : null; }\nasync function soluzioni(da, a, quando) {\n  if (!/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}/.test(quando)) quando = new Date().toISOString().slice(0, 16);\n  const [o, d] = await Promise.all([lfLoc(da), lfLoc(a)]);\n  if (o && d) { try { const r = await fetch(`${LF}/ticket/solutions`, { method: 'POST', headers: UAH, body: JSON.stringify({ departureLocationId: o.id, arrivalLocationId: d.id, departureTime: quando.slice(0, 16) + ':00.000', adults: 1, children: 0, criteria: { frecceOnly: false, regionalOnly: false, noChanges: false, order: 'DEPARTURE_DATE', limit: 10, offset: 0 }, advancedSearchRequest: { bestFare: false } }) });\n      if (r.ok) { const j = await r.json(); const list = (j.solutions || []).map(x => { const s = x.solution || x; const N = s.nodes || [];\n          return { dep: t16(s.departureTime), arr: t16(s.arrivalTime), dur: s.duration || '', from: s.origin || o.name, to: s.destination || d.name, changes: Math.max(0, N.length - 1), price: (s.price && s.price.amount) || null, status: s.status || '',\n            legs: N.map(n => ({ from: n.origin, to: n.destination, dep: t16(n.departureTime), arr: t16(n.arrivalTime), train: [n.train && (n.train.acronym || n.train.denomination), n.train && (n.train.name || n.train.number)].filter(Boolean).join(' ') })) }; }).filter(x => x.dep);\n        if (list.length) return { ok: true, via: 'lefrecce', da: o.name, a: d.name, list }; } } catch (_) {} }\n  const [vo, vd] = await Promise.all([vtCode(da), vtCode(a)]);\n  if (vo && vd) { try { const j = JSON.parse(await vt(`soluzioniViaggioNew/${vo.code}/${vd.code}/${quando.slice(0, 16)}:00`) || 'null');\n      const list = ((j && j.soluzioni) || []).map(s => { const V = s.vehicles || []; return { dep: t16(V[0] && V[0].orarioPartenza), arr: t16(V.length && V[V.length - 1].orarioArrivo), dur: s.durata || '', from: vo.name, to: vd.name, changes: Math.max(0, V.length - 1), price: null, legs: V.map(v => ({ from: v.origine, to: v.destinazione, dep: t16(v.orarioPartenza), arr: t16(v.orarioArrivo), train: [v.categoriaDescrizione, v.numeroTreno].filter(Boolean).join(' ') })) }; }).filter(x => x.dep);\n      if (list.length) return { ok: true, via: 'viaggiatreno', da: vo.name, a: vd.name, list }; } catch (_) {} }\n  return { ok: false, error: o || vo ? 'nessuna soluzione trovata' : 'stazione non trovata', da, a };\n}\n/* ---- Italo (servizio pubblico \"Italo in viaggio\"; formato non documentato) ---- */\nasync function italo(num) {\n  try { const r = await fetch('https://italoinviaggio.italotreno.it/api/RicercaTrenoService?&TrainNumber=' + encodeURIComponent(num), { headers: UAH }); const j = await r.json();\n    if (!j || j.IsEmpty) return { ok: false, error: 'treno Italo non trovato (compare il giorno della partenza)' };\n    const t = j.TrainSchedule || {}, d = t.Distruption || {}, F = t.StazioniFerme || [], last = F.filter(x => x.ActualArrivalTime || x.ActualDepartureTime).pop();\n    return { ok: true, cat: 'Italo ' + num, ritardo: Math.round(+d.DelayAmount || 0), cancellato: /cancell|soppress/i.test(String(d.Warning || '')), info: String(d.Warning || '').slice(0, 200), partito: !!last, ultimo: last ? last.LocationDescription || '' : '', ora: last ? String(last.ActualDepartureTime || last.ActualArrivalTime || '').slice(0, 5) : '', binario: '', at: Date.now(), via: 'italo' };\n  } catch (_) { return { ok: false, error: 'servizio Italo non raggiungibile' }; }\n}\nDeno.serve(async req => {\n  if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });\n  const J = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { ...CORS, 'Content-Type': 'application/json' } });\n  try {\n    const body = req.method === 'POST' ? await req.json().catch(() => ({})) : {}, q = new URL(req.url).searchParams;\n    if (q.get('ics')) { const o = await owner(q.get('ics')); if (!o) return new Response('not found', { status: 404 }); return new Response(ics(o.v), { headers: { ...CORS, 'Content-Type': 'text/calendar; charset=utf-8', 'Cache-Control': 'no-cache' } }); }\n    const wk = q.get('w') || body.w;\n    if (wk) {\n      const o = await owner(wk); if (!o) return J({ ok: false, error: 'chiave non valida' }, 404);\n      if (body.ai && typeof body.ai === 'object') { const a = body.ai, u = String(a.url || '');\n        if (!/^https:\\/\\/(generativelanguage\\.googleapis\\.com|api\\.groq\\.com|openrouter\\.ai|api\\.anthropic\\.com|aerodatabox\\.p\\.rapidapi\\.com)\\//.test(u)) return J({ proxy: 1, status: 400, text: JSON.stringify({ error: { message: 'servizio non ammesso' } }) });\n        try { const r = await fetch(u, { method: a.method === 'POST' ? 'POST' : 'GET', headers: a.headers || {}, body: a.method === 'POST' ? a.body : undefined }); return J({ proxy: 1, status: r.status, text: await r.text() }); }\n        catch (e) { return J({ proxy: 1, status: 502, text: JSON.stringify({ error: { message: 'servizio IA non raggiungibile dal server' } }) }); } }\n      /* calendario Apple (iCloud): CalDAV non \u00e8 raggiungibile dal browser (CORS), quindi passa da qui.\n         Solo server Apple; le credenziali arrivano dall'app a ogni richiesta e qui non vengono salvate. */\n      if (body.dav && typeof body.dav === 'object') { const d = body.dav; let u = String(d.url || ''); const okHost = x => /^https:\\/\\/([a-z0-9-]+\\.)*icloud\\.com(:443)?\\//i.test(x);\n        if (!okHost(u)) return J({ proxy: 1, status: 400, text: 'servizio non ammesso' });\n        const M = String(d.method || 'GET').toUpperCase(); if (!['GET', 'PUT', 'DELETE', 'PROPFIND', 'REPORT'].includes(M)) return J({ proxy: 1, status: 400, text: 'metodo non ammesso' });\n        const H = {}; for (const [k, v] of Object.entries(d.headers || {})) if (/^(authorization|depth|content-type|if-match|if-none-match|prefer)$/i.test(k)) H[k] = String(v);\n        try { let r, hops = 0; for (;;) { r = await fetch(u, { method: M, headers: H, body: ['PUT', 'PROPFIND', 'REPORT'].includes(M) && d.body ? String(d.body) : undefined, redirect: 'manual' });\n            const loc = r.headers.get('location'); if (r.status >= 300 && r.status < 400 && loc && hops++ < 4) { const nu = new URL(loc, u).toString(); if (!okHost(nu)) break; u = nu; continue; } break; }\n          return J({ proxy: 1, status: r.status, url: u, etag: r.headers.get('etag') || '', text: (await r.text()).slice(0, 4e6) }); }\n        catch (e) { return J({ proxy: 1, status: 502, text: 'iCloud non raggiungibile dal server' }); } }\n      if (q.get('soluzioni') || body.soluzioni) return J(await soluzioni(String(q.get('da') || body.da || ''), String(q.get('a') || body.a || ''), String(q.get('quando') || body.quando || '')));\n      if (q.get('italo') || body.italo) { const n = String(q.get('treno') || body.treno || '').replace(/\\D/g, ''); const r = await treno(n, String(q.get('data') || body.data || ''), String(q.get('da') || body.da || ''), String(q.get('a') || body.a || '')); return J(r.ok ? r : await italo(n)); }\n      if (q.get('treno') || body.treno) return J(await treno(String(q.get('treno') || body.treno), String(q.get('data') || body.data || ''), String(q.get('da') || body.da || ''), String(q.get('a') || body.a || '')));\n      const add = String(q.get('add') || body.add || '').trim(), num = k => { const v = q.get(k) ?? body[k]; if (v == null || v === '') return null; const n = parseFloat(String(v).replace(',', '.').replace(/[^\\d.]/g, '')); return isNaN(n) ? null : n; };\n      const msg = String(q.get('msg') || body.msg || '').trim(), steps = num('steps'), active = num('active'), weight = num('weight'), sleep = num('sleep');\n      if (msg || steps != null || active != null || weight != null || sleep != null) {\n        const v = msg ? { kind: 'msg', app: String(q.get('app') || body.app || 'sms').slice(0, 20), from: String(q.get('from') || body.from || '').slice(0, 120), text: msg.slice(0, 2000), at: Date.now() }\n          : { kind: 'health', steps, active, weight, sleep, date: String(q.get('date') || body.date || '').slice(0, 10), at: Date.now() };\n        const id = 'push-in-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);\n        const r = await db('pitwall_docs', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify([{ user_id: o.user_id, id, v, u: Date.now() }]) });\n        if (!r.ok) return J({ ok: false, error: 'db ' + r.status }, 500);\n        return new Response(msg ? '\u2713 Inoltrato a Orbita' : '\u2713 Salute aggiornata in Orbita', { headers: { ...CORS, 'Content-Type': 'text/plain; charset=utf-8' } });\n      }\n      if (add) {\n        const id = 'push-in-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);\n        const r = await db('pitwall_docs', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify([{ user_id: o.user_id, id, v: { text: add.slice(0, 500), at: Date.now(), via: q.get('via') || 'siri' }, u: Date.now() }]) });\n        if (!r.ok) return J({ ok: false, error: 'db ' + r.status }, 500);\n        return new Response('\u2713 Aggiunto a Orbita: ' + add.slice(0, 120), { headers: { ...CORS, 'Content-Type': 'text/plain; charset=utf-8' } });\n      }\n      const ask = String(q.get('ask') || body.ask || '').toLowerCase();\n      if (ask) return new Response(answer(o.v || {}, ask), { headers: { ...CORS, 'Content-Type': 'text/plain; charset=utf-8' } });\n      const v = o.v || {}; return J({ ok: true, name: v.name || '', u: v.u || 0, items: v.items || [], tasks: v.tasks || [], stats: v.stats || {} });\n    }\n    if (req.method === 'GET' || body.ping) {\n      const t = await db('orbita_push_sent?select=key&limit=1');\n      return J({ ok: true, version: VERSION, table: t.ok });\n    }\n    if (body.test) { // test from the app: the caller's own login decides the user\n      const u = await fetch(`${SB_URL}/auth/v1/user`, { headers: { apikey: SB_KEY, Authorization: req.headers.get('Authorization') || '' } });\n      if (!u.ok) return J({ ok: false, error: 'login' }, 401);\n      const uid = (await u.json()).id, q = (await rows(`pitwall_docs?user_id=eq.${uid}&id=eq.push-q&select=v`))[0];\n      const sent = await deliver(uid, [{ key: 'test:' + Date.now(), title: 'Orbita \u00b7 prova dal server', body: 'Le notifiche arrivano anche con l\\'app chiusa \ud83c\udf89', data: { view: 'settings' } }], (q && q.v) || {});\n      return J({ ok: true, sent });\n    }\n    return J({ ok: true, sent: await tick() });\n  } catch (e) { return J({ ok: false, error: String(e && e.message || e) }, 500); }\n});\n";
+const PUSH_FN = "// Orbita \u00b7 notifiche push \u2014 Supabase Edge Function \"orbita-push\"\n// Ogni minuto (pg_cron) legge gli avvisi in coda di ogni utente e li invia:\n// notifiche web (iPad/iPhone/computer con Orbita installato), ntfy, Telegram, WhatsApp.\n// Inoltre: calendario da abbonare (?ics=chiave), dati per il widget (?w=chiave)\n// e aggiunta rapida da Siri / Comandi rapidi (?w=chiave&add=testo).\n// Nessuna libreria esterna: Web Push (VAPID + aes128gcm) fatto con WebCrypto.\nconst SB_URL = Deno.env.get('SUPABASE_URL');\nconst SB_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');\nconst VERSION = 11;\nconst CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };\nconst te = new TextEncoder();\n\nconst b64u = buf => { let s = ''; const u = new Uint8Array(buf); for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, ''); };\nconst ub64 = s => { s = String(s).replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; };\nconst cat = (...a) => { const n = a.reduce((s, x) => s + x.length, 0), o = new Uint8Array(n); let i = 0; for (const x of a) { o.set(x, i); i += x.length; } return o; };\nconst hmac = async (key, data) => new Uint8Array(await crypto.subtle.sign('HMAC', await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']), data));\n\n/** RFC 8291 payload encryption (aes128gcm) */\nasync function encrypt(sub, payload) {\n  const ua = ub64(sub.keys.p256dh), auth = ub64(sub.keys.auth);\n  const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);\n  const as = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));\n  const uaKey = await crypto.subtle.importKey('raw', ua, { name: 'ECDH', namedCurve: 'P-256' }, false, []);\n  const ecdh = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey }, kp.privateKey, 256));\n  const prkKey = await hmac(auth, ecdh);\n  const ikm = await hmac(prkKey, cat(te.encode('WebPush: info\\0'), ua, as, new Uint8Array([1])));\n  const salt = crypto.getRandomValues(new Uint8Array(16));\n  const prk = await hmac(salt, ikm);\n  const cek = (await hmac(prk, cat(te.encode('Content-Encoding: aes128gcm\\0'), new Uint8Array([1])))).slice(0, 16);\n  const nonce = (await hmac(prk, cat(te.encode('Content-Encoding: nonce\\0'), new Uint8Array([1])))).slice(0, 12);\n  const key = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);\n  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, cat(te.encode(payload), new Uint8Array([2]))));\n  const head = new Uint8Array(21); head.set(salt, 0); new DataView(head.buffer).setUint32(16, 4096); head[20] = 65;\n  return cat(head, as, ct);\n}\n/** VAPID (RFC 8292) authorization header */\nasync function vapid(endpoint, keys) {\n  const aud = new URL(endpoint).origin, exp = Math.floor(Date.now() / 1000) + 12 * 3600;\n  const unsigned = b64u(te.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' }))) + '.' + b64u(te.encode(JSON.stringify({ aud, exp, sub: keys.sub || 'mailto:orbita@users.noreply.github.com' })));\n  const pk = await crypto.subtle.importKey('jwk', { ...keys.jwk, key_ops: ['sign'], ext: true }, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);\n  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pk, te.encode(unsigned));\n  return `vapid t=${unsigned}.${b64u(sig)}, k=${keys.pub}`;\n}\nasync function webpush(sub, msg, keys) {\n  const body = await encrypt(sub, JSON.stringify(msg));\n  const r = await fetch(sub.endpoint, { method: 'POST', headers: { Authorization: await vapid(sub.endpoint, keys), 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '86400', Urgency: 'high', Topic: String(msg.tag || 'orbita').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'orbita' }, body });\n  return r.status;\n}\n\n/* ---------- other channels ---------- */\nasync function channels(ch, a) {\n  const out = [], text = a.title + (a.body ? '\\n' + a.body : '');\n  if (ch && ch.ntfy) out.push(fetch('https://ntfy.sh/', { method: 'POST', body: JSON.stringify({ topic: ch.ntfy, title: a.title, message: a.body || ' ', tags: ['bell'], priority: 4, ...(ch.url ? { click: ch.url } : {}) }) }).then(r => r.status).catch(() => 0));\n  if (ch && ch.tg && ch.tg.token && ch.tg.chat) out.push(fetch(`https://api.telegram.org/bot${ch.tg.token}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: ch.tg.chat, text: '\ud83d\udd14 ' + text, disable_web_page_preview: true }) }).then(r => r.status).catch(() => 0));\n  if (ch && ch.wa && ch.wa.phone && ch.wa.key) out.push(fetch(`https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(ch.wa.phone)}&text=${encodeURIComponent('\ud83d\udd14 ' + text)}&apikey=${encodeURIComponent(ch.wa.key)}`).then(r => r.status).catch(() => 0));\n  return Promise.all(out);\n}\n\n/* ---------- database (service role, bypasses row-level security) ---------- */\nconst db = (path, opt = {}) => fetch(`${SB_URL}/rest/v1/${path}`, { ...opt, headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', ...(opt.headers || {}) } });\nconst rows = async path => { const r = await db(path); if (!r.ok) throw new Error('db ' + r.status + ' ' + (await r.text()).slice(0, 200)); return r.json(); };\n\nasync function deliver(uid, items, q) {\n  const docs = await rows(`pitwall_docs?user_id=eq.${uid}&or=(id.eq.push-vapid,id.like.push-sub-*)&select=id,v`);\n  const keys = (docs.find(d => d.id === 'push-vapid') || {}).v, subs = docs.filter(d => d.id.startsWith('push-sub-') && d.v && d.v.sub && d.v.sub.endpoint);\n  let sent = 0;\n  for (const a of items) {\n    const msg = { title: a.title, body: a.body || '', tag: a.key, data: { ...(a.data || {}), key: a.key } };\n    if (keys && keys.jwk) for (const s of subs) {\n      try { const st = await webpush(s.v.sub, msg, keys); if (st === 404 || st === 410) await db(`pitwall_docs?user_id=eq.${uid}&id=eq.${encodeURIComponent(s.id)}`, { method: 'DELETE' }); else if (st < 300) sent++; } catch (_) {}\n    }\n    try { const r = await channels(q.ch, a); sent += r.filter(x => x && x < 300).length; } catch (_) {}\n  }\n  return sent;\n}\n\nasync function tick() {\n  const now = Date.now(), Q = await rows('pitwall_docs?id=eq.push-q&select=user_id,v');\n  let n = 0;\n  for (const { user_id, v } of Q) {\n    if (!v || v.off) continue;\n    const due = (v.list || []).filter(a => a && a.key && a.at <= now + 30e3 && a.at >= now - 10 * 60e3);\n    if (!due.length) continue;\n    // claim each alert once (works even if two runs overlap)\n    const r = await db('orbita_push_sent', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=representation' }, body: JSON.stringify(due.map(a => ({ user_id, key: String(a.key).slice(0, 300) }))) });\n    if (!r.ok) throw new Error('orbita_push_sent ' + r.status + ': ' + (await r.text()).slice(0, 200));\n    const won = new Set((await r.json()).map(x => x.key));\n    const mine = due.filter(a => won.has(String(a.key).slice(0, 300)));\n    if (mine.length) n += await deliver(user_id, mine, v);\n  }\n  if (Math.random() < .02) await db(`orbita_push_sent?at=lt.${new Date(now - 7 * 864e5).toISOString()}`, { method: 'DELETE' });\n  return n;\n}\n\n/* ---------- calendar feed, widget, Siri ---------- */\nconst owner = async key => { if (!key || String(key).length < 16) return null; const r = await rows(`pitwall_docs?id=eq.push-feed&v->>key=eq.${encodeURIComponent(key)}&select=user_id,v`); return r[0] || null; };\nconst icsEsc = s => String(s || '').replace(/\\\\/g, '\\\\\\\\').replace(/;/g, '\\\\;').replace(/,/g, '\\\\,').replace(/\\r?\\n/g, '\\\\n');\nconst fold = l => { const out = []; let cur = ''; for (const ch of l) { if (te.encode(cur + ch).length > 73) { out.push(cur); cur = ' ' + ch; } else cur += ch; } out.push(cur); return out.join('\\r\\n'); };\nfunction ics(feed) {\n  const d = s => s.replace(/-/g, ''), t = s => s.replace(':', '') + '00', stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';\n  const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Orbita//IT', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:' + icsEsc(feed.name || 'Orbita'), 'X-WR-TIMEZONE:Europe/Rome', 'REFRESH-INTERVAL;VALUE=DURATION:PT15M', 'X-PUBLISHED-TTL:PT15M'];\n  for (const it of feed.items || []) {\n    L.push('BEGIN:VEVENT', 'UID:' + icsEsc(it.id) + '@orbita', 'DTSTAMP:' + stamp, 'SUMMARY:' + icsEsc(it.t));\n    if (it.allDay || !it.s) { const n = new Date(it.d + 'T12:00:00Z'); n.setUTCDate(n.getUTCDate() + 1); L.push('DTSTART;VALUE=DATE:' + d(it.d), 'DTEND;VALUE=DATE:' + d(n.toISOString().slice(0, 10))); }\n    else L.push('DTSTART:' + d(it.d) + 'T' + t(it.s), 'DTEND:' + d(it.d) + 'T' + t(it.e && it.e > it.s ? it.e : it.s));\n    if (it.loc) L.push('LOCATION:' + icsEsc(it.loc)); if (it.c) L.push('CATEGORIES:' + icsEsc(it.c)); if (it.n) L.push('DESCRIPTION:' + icsEsc(it.n));\n    L.push('END:VEVENT');\n  }\n  L.push('END:VCALENDAR'); return L.map(fold).join('\\r\\n') + '\\r\\n';\n}\n\n/* spoken answers for Siri (\"cosa ho domani?\") */\nconst GG = ['domenica', 'luned\u00ec', 'marted\u00ec', 'mercoled\u00ec', 'gioved\u00ec', 'venerd\u00ec', 'sabato'];\nfunction romeDay(off = 0) { const d = new Date(Date.now() + off * 864e5); return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Rome', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d); }\nfunction answer(v, ask) {\n  const items = v.items || [], tasks = v.tasks || [];\n  const say = (k, label) => { const L = items.filter(x => x.d === k).sort((a, b) => (a.s || '').localeCompare(b.s || '')), T = tasks.filter(x => x.due === k);\n    if (!L.length && !T.length) return `${label} non hai impegni.`;\n    let out = L.length ? `${label} hai ${L.length === 1 ? 'un impegno' : L.length + ' impegni'}: ` + L.map(x => (x.s ? `alle ${x.s.replace(':00', '')} ` : '') + x.t).join('; ') + '.' : `${label} non hai appuntamenti.`;\n    if (T.length) out += ` Da fare: ${T.slice(0, 5).map(x => x.t).join(', ')}${T.length > 5 ? ` e altre ${T.length - 5}` : ''}.`; return out; };\n  if (/doman/.test(ask)) return say(romeDay(1), 'Domani');\n  if (/settiman/.test(ask)) { const out = []; for (let i = 0; i < 7; i++) { const k = romeDay(i), L = items.filter(x => x.d === k); if (L.length) out.push(`${i === 0 ? 'oggi' : i === 1 ? 'domani' : GG[new Date(k + 'T12:00:00Z').getUTCDay()]}: ${L.map(x => (x.s ? x.s.replace(':00', '') + ' ' : '') + x.t).join(', ')}`); } return out.length ? 'Questa settimana: ' + out.join('. ') + '.' : 'Questa settimana non hai impegni in agenda.'; }\n  if (/^(luogo|arrivo|qui)/.test(ask)) { const name = ask.replace(/^(luogo|arrivo|qui)\\s*[:=]?\\s*/, '').trim(), P = v.places || {}, key = Object.keys(P).find(k => k.toLowerCase() === name) || Object.keys(P).find(k => name && (k.toLowerCase().includes(name) || name.includes(k.toLowerCase()))); const L = key ? P[key] : []; return L.length ? `${key}: ${L.slice(0, 8).join(', ')}${L.length > 8 ? '\u2026' : ''}` : ''; }\n  if (/spes/.test(ask)) return (v.shop || []).length ? 'Nella lista della spesa: ' + v.shop.join(', ') + '.' : 'La lista della spesa \u00e8 vuota.';\n  if (/scaden/.test(ask)) return (v.dues || []).length ? 'Prossime scadenze: ' + v.dues.slice(0, 5).map(x => `${x.n} il ${x.d.slice(8)}/${x.d.slice(5, 7)}`).join('; ') + '.' : 'Nessuna scadenza in arrivo.';\n  const late = tasks.filter(x => x.due < romeDay(0)).length;\n  return say(romeDay(0), 'Oggi') + (late ? ` Hai anche ${late} promemoria scadut${late === 1 ? 'o' : 'i'}.` : '');\n}\n\n/* ---- Treni in tempo reale (ViaggiaTreno, RFI): ritardo, binario, ultimo rilevamento ----\n   Solo treni della rete RFI (Trenitalia, Frecce, Regionali, Intercity). Italo non \u00e8 incluso. */\nconst VT = 'www.viaggiatreno.it/infomobilita/resteasy/viaggiatreno/';\nasync function vt(path) { for (const p of ['https://', 'http://']) { try { const r = await fetch(p + VT + path, { headers: { 'User-Agent': 'Mozilla/5.0 Orbita' } }); if (r.ok) return await r.text(); } catch (_) {} } return ''; }\n/** numbers written by an Italian iPhone: \"8.432\", \"12.000\", \"8 432 passi\", \"72,5 kg\", \"1.234,5\" */\nfunction itNum(v) { let t = String(v).replace(/[^\\d.,-]/g, ''); if (!t) return null;\n  if (/^\\d{1,3}(\\.\\d{3})+(,\\d+)?$/.test(t)) t = t.replace(/\\./g, '').replace(',', '.');\n  else if (/^\\d{1,3}(,\\d{3})+(\\.\\d+)?$/.test(t)) t = t.replace(/,/g, '');\n  else t = t.replace(',', '.');\n  const n = parseFloat(t); return isNaN(n) ? null : n; }\nfunction msDay(ms) { return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Rome' }).format(new Date(ms)); }\nfunction romeMidnight(day) { const g = Date.parse(day + 'T12:00:00Z'); const off = (new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Rome', timeZoneName: 'shortOffset' }).formatToParts(new Date(g)).find(x => x.type === 'timeZoneName') || {}).value || 'GMT+1'; const h = parseInt(off.replace('GMT', '')) || 1; return Date.parse(day + 'T00:00:00Z') - h * 3600e3; }\nasync function treno(num, day, da, to) {\n  num = String(num).replace(/\\D/g, ''); if (!num) return { ok: false, error: 'numero mancante' };\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(day)) day = msDay(Date.now());\n  const txt = await vt('cercaNumeroTrenoTrenoAutocomplete/' + num);\n  const opts = txt.split('\\n').map(x => x.trim()).filter(Boolean).map(x => { const [lab, key] = x.split('|'); const [n, cod, ms] = String(key || '').split('-'); return { lab, n, cod, ms: +ms || 0 }; }).filter(o => o.cod);\n  if (!opts.length) return { ok: false, error: 'treno non trovato (solo rete RFI: Trenitalia, Frecce, Regionali)' };\n  const norm = x => String(x || '').toUpperCase().normalize('NFD').replace(/[^A-Z]/g, '');\n  const want = norm(da).replace(/STAZIONE|CENTRALE|CLE/g, ''); let best = null;\n  for (const o of opts.slice(0, 4)) {\n    const ms = o.ms && msDay(o.ms) === day ? o.ms : romeMidnight(day);\n    let j = null; try { j = JSON.parse(await vt(`andamentoTreno/${o.cod}/${o.n}/${ms}`) || 'null'); } catch (_) { j = null; }\n    if (!j || !j.fermate) continue;\n    const F = j.fermate || [], f = (want && F.find(x => norm(x.stazione).includes(want))) || F[0];\n    const score = (want && f && norm(f.stazione).includes(want) ? 2 : 0) + (o.ms && msDay(o.ms) === day ? 1 : 0);\n    if (!best || score > best.score) best = { score, j, f };\n  }\n  if (!best) return { ok: false, error: 'nessuna informazione per questa data (di solito il treno compare il giorno della partenza)' };\n  const { j, f } = best, sop = j.provvedimento === 1 || /soppress/i.test(String(j.subTitle || '') + String(j.compProvvedimento || ''));\n  const hm = t => t ? new Intl.DateTimeFormat('it-IT', { timeZone: 'Europe/Rome', hour: '2-digit', minute: '2-digit' }).format(new Date(t)) : '';\n  const bE = f && (f.binarioEffettivoPartenzaDescrizione || f.binarioEffettivoArrivoDescrizione), bP = f && (f.binarioProgrammatoPartenzaDescrizione || f.binarioProgrammatoArrivoDescrizione);\n  return { ok: true, numero: num, cat: j.compNumeroTreno || j.categoria || '', da: j.origine, a: j.destinazione,\n    ritardo: Math.round(+j.ritardo || 0), cancellato: sop, partito: !j.nonPartito, arrivato: !!j.arrivato,\n    ultimo: j.stazioneUltimoRilevamento && j.stazioneUltimoRilevamento !== '--' ? j.stazioneUltimoRilevamento : '', ora: hm(j.oraUltimoRilevamento),\n    fermata: f ? f.stazione : '', binario: String(bE || bP || '').trim(), binCambiato: !!(bE && bP && String(bE).trim() !== String(bP).trim()),\n    previsto: f ? hm(f.partenza_teorica || f.arrivo_teorico) : '', info: String(j.subTitle || '').slice(0, 200), at: Date.now(),\n    ...(() => { const wa = norm(to).replace(/STAZIONE|CENTRALE|CLE/g, ''); const F = j.fermate || [], fa = wa ? F.find(x => norm(x.stazione).includes(wa)) : F[F.length - 1]; if (!fa) return {};\n      const aE = fa.binarioEffettivoArrivoDescrizione, aP = fa.binarioProgrammatoArrivoDescrizione, rit = fa.ritardoArrivo != null ? +fa.ritardoArrivo : Math.round(+j.ritardo || 0), teo = fa.arrivo_teorico || fa.programmata || 0;\n      return { arrFermata: fa.stazione, binArr: String(aE || aP || '').trim(), binArrCambiato: !!(aE && aP && String(aE).trim() !== String(aP).trim()), arrivo: hm(teo), arrStima: teo ? hm(teo + Math.max(0, rit) * 60e3) : '', ritArr: rit, arrivato: !!(fa.arrivoReale || fa.effettiva) || !!j.arrivato }; })() };\n}\n/* ---- Soluzioni di viaggio in treno (rete Trenitalia): lefrecce.it, poi ViaggiaTreno ---- */\nconst LF = 'https://www.lefrecce.it/Channels.Website.BFF.WEB/website';\nconst UAH = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Orbita', Accept: 'application/json', 'Content-Type': 'application/json', 'Accept-Language': 'it-IT,it;q=0.9' };\nconst t16 = v => String(v || '').slice(0, 16);\nasync function lfLoc(name) { try { const r = await fetch(`${LF}/locations/search?name=${encodeURIComponent(name)}&limit=5`, { headers: UAH }); if (!r.ok) return null; const j = await r.json(); const x = Array.isArray(j) ? j[0] : null; return x ? { id: x.id, name: x.displayName || x.name } : null; } catch (_) { return null; } }\nasync function vtCode(name) { const t = await vt('autocompletaStazione/' + encodeURIComponent(String(name).toUpperCase())); const L = t.split('\\n').map(x => x.trim()).filter(Boolean).map(x => x.split('|')); const up = String(name).toUpperCase(); const m = L.find(x => x[0] === up) || L.find(x => x[0].startsWith(up)) || L[0]; return m && m[1] ? { code: String(parseInt(m[1].replace(/^S/, ''), 10)), name: m[0] } : null; }\nasync function soluzioni(da, a, quando) {\n  if (!/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}/.test(quando)) quando = new Date().toISOString().slice(0, 16);\n  const [o, d] = await Promise.all([lfLoc(da), lfLoc(a)]);\n  if (o && d) { try { const r = await fetch(`${LF}/ticket/solutions`, { method: 'POST', headers: UAH, body: JSON.stringify({ departureLocationId: o.id, arrivalLocationId: d.id, departureTime: quando.slice(0, 16) + ':00.000', adults: 1, children: 0, criteria: { frecceOnly: false, regionalOnly: false, noChanges: false, order: 'DEPARTURE_DATE', limit: 10, offset: 0 }, advancedSearchRequest: { bestFare: false } }) });\n      if (r.ok) { const j = await r.json(); const list = (j.solutions || []).map(x => { const s = x.solution || x; const N = s.nodes || [];\n          return { dep: t16(s.departureTime), arr: t16(s.arrivalTime), dur: s.duration || '', from: s.origin || o.name, to: s.destination || d.name, changes: Math.max(0, N.length - 1), price: (s.price && s.price.amount) || null, status: s.status || '',\n            legs: N.map(n => ({ from: n.origin, to: n.destination, dep: t16(n.departureTime), arr: t16(n.arrivalTime), train: [n.train && (n.train.acronym || n.train.denomination), n.train && (n.train.name || n.train.number)].filter(Boolean).join(' ') })) }; }).filter(x => x.dep);\n        if (list.length) return { ok: true, via: 'lefrecce', da: o.name, a: d.name, list }; } } catch (_) {} }\n  const [vo, vd] = await Promise.all([vtCode(da), vtCode(a)]);\n  if (vo && vd) { try { const j = JSON.parse(await vt(`soluzioniViaggioNew/${vo.code}/${vd.code}/${quando.slice(0, 16)}:00`) || 'null');\n      const list = ((j && j.soluzioni) || []).map(s => { const V = s.vehicles || []; return { dep: t16(V[0] && V[0].orarioPartenza), arr: t16(V.length && V[V.length - 1].orarioArrivo), dur: s.durata || '', from: vo.name, to: vd.name, changes: Math.max(0, V.length - 1), price: null, legs: V.map(v => ({ from: v.origine, to: v.destinazione, dep: t16(v.orarioPartenza), arr: t16(v.orarioArrivo), train: [v.categoriaDescrizione, v.numeroTreno].filter(Boolean).join(' ') })) }; }).filter(x => x.dep);\n      if (list.length) return { ok: true, via: 'viaggiatreno', da: vo.name, a: vd.name, list }; } catch (_) {} }\n  return { ok: false, error: o || vo ? 'nessuna soluzione trovata' : 'stazione non trovata', da, a };\n}\n/* ---- Italo (servizio pubblico \"Italo in viaggio\"; formato non documentato) ---- */\nasync function italo(num) {\n  try { const r = await fetch('https://italoinviaggio.italotreno.it/api/RicercaTrenoService?&TrainNumber=' + encodeURIComponent(num), { headers: UAH }); const j = await r.json();\n    if (!j || j.IsEmpty) return { ok: false, error: 'treno Italo non trovato (compare il giorno della partenza)' };\n    const t = j.TrainSchedule || {}, d = t.Distruption || {}, F = t.StazioniFerme || [], last = F.filter(x => x.ActualArrivalTime || x.ActualDepartureTime).pop();\n    return { ok: true, cat: 'Italo ' + num, ritardo: Math.round(+d.DelayAmount || 0), cancellato: /cancell|soppress/i.test(String(d.Warning || '')), info: String(d.Warning || '').slice(0, 200), partito: !!last, ultimo: last ? last.LocationDescription || '' : '', ora: last ? String(last.ActualDepartureTime || last.ActualArrivalTime || '').slice(0, 5) : '', binario: '', at: Date.now(), via: 'italo' };\n  } catch (_) { return { ok: false, error: 'servizio Italo non raggiungibile' }; }\n}\nDeno.serve(async req => {\n  if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });\n  const J = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { ...CORS, 'Content-Type': 'application/json' } });\n  try {\n    const body = req.method === 'POST' ? await req.json().catch(() => ({})) : {}, q = new URL(req.url).searchParams;\n    if (q.get('ics')) { const o = await owner(q.get('ics')); if (!o) return new Response('not found', { status: 404 }); return new Response(ics(o.v), { headers: { ...CORS, 'Content-Type': 'text/calendar; charset=utf-8', 'Cache-Control': 'no-cache' } }); }\n    const wk = q.get('w') || body.w;\n    if (wk) {\n      const o = await owner(wk); if (!o) return J({ ok: false, error: 'chiave non valida' }, 404);\n      if (body.ai && typeof body.ai === 'object') { const a = body.ai, u = String(a.url || '');\n        if (!/^https:\\/\\/(generativelanguage\\.googleapis\\.com|api\\.groq\\.com|openrouter\\.ai|api\\.anthropic\\.com|aerodatabox\\.p\\.rapidapi\\.com)\\//.test(u)) return J({ proxy: 1, status: 400, text: JSON.stringify({ error: { message: 'servizio non ammesso' } }) });\n        try { const r = await fetch(u, { method: a.method === 'POST' ? 'POST' : 'GET', headers: a.headers || {}, body: a.method === 'POST' ? a.body : undefined }); return J({ proxy: 1, status: r.status, text: await r.text() }); }\n        catch (e) { return J({ proxy: 1, status: 502, text: JSON.stringify({ error: { message: 'servizio IA non raggiungibile dal server' } }) }); } }\n      /* calendario Apple (iCloud): CalDAV non \u00e8 raggiungibile dal browser (CORS), quindi passa da qui.\n         Solo server Apple; le credenziali arrivano dall'app a ogni richiesta e qui non vengono salvate. */\n      if (body.dav && typeof body.dav === 'object') { const d = body.dav; let u = String(d.url || ''); const okHost = x => /^https:\\/\\/([a-z0-9-]+\\.)*icloud\\.com(:443)?\\//i.test(x);\n        if (!okHost(u)) return J({ proxy: 1, status: 400, text: 'servizio non ammesso' });\n        const M = String(d.method || 'GET').toUpperCase(); if (!['GET', 'PUT', 'DELETE', 'PROPFIND', 'REPORT'].includes(M)) return J({ proxy: 1, status: 400, text: 'metodo non ammesso' });\n        const H = {}; for (const [k, v] of Object.entries(d.headers || {})) if (/^(authorization|depth|content-type|if-match|if-none-match|prefer)$/i.test(k)) H[k] = String(v);\n        try { let r, hops = 0; for (;;) { r = await fetch(u, { method: M, headers: H, body: ['PUT', 'PROPFIND', 'REPORT'].includes(M) && d.body ? String(d.body) : undefined, redirect: 'manual' });\n            const loc = r.headers.get('location'); if (r.status >= 300 && r.status < 400 && loc && hops++ < 4) { const nu = new URL(loc, u).toString(); if (!okHost(nu)) break; u = nu; continue; } break; }\n          return J({ proxy: 1, status: r.status, url: u, etag: r.headers.get('etag') || '', text: (await r.text()).slice(0, 4e6) }); }\n        catch (e) { return J({ proxy: 1, status: 502, text: 'iCloud non raggiungibile dal server' }); } }\n      if (q.get('soluzioni') || body.soluzioni) return J(await soluzioni(String(q.get('da') || body.da || ''), String(q.get('a') || body.a || ''), String(q.get('quando') || body.quando || '')));\n      if (q.get('italo') || body.italo) { const n = String(q.get('treno') || body.treno || '').replace(/\\D/g, ''); const r = await treno(n, String(q.get('data') || body.data || ''), String(q.get('da') || body.da || ''), String(q.get('a') || body.a || '')); return J(r.ok ? r : await italo(n)); }\n      if (q.get('treno') || body.treno) return J(await treno(String(q.get('treno') || body.treno), String(q.get('data') || body.data || ''), String(q.get('da') || body.da || ''), String(q.get('a') || body.a || '')));\n      const add = String(q.get('add') || body.add || '').trim(), num = k => { const v = q.get(k) ?? body[k]; if (v == null || v === '') return null; return itNum(v); };\n      const msg = String(q.get('msg') || body.msg || '').trim(), steps = num('steps'), active = num('active'), weight = num('weight'), sleep = num('sleep');\n      if (msg || steps != null || active != null || weight != null || sleep != null) {\n        const v = msg ? { kind: 'msg', app: String(q.get('app') || body.app || 'sms').slice(0, 20), from: String(q.get('from') || body.from || '').slice(0, 120), text: msg.slice(0, 2000), at: Date.now() }\n          : { kind: 'health', steps, active, weight, sleep, date: (d => /^\\d{4}-\\d{2}-\\d{2}$/.test(d) ? d : msDay(Date.now()))(String(q.get('date') || body.date || '').slice(0, 10)), at: Date.now(), raw: Object.fromEntries(['steps', 'active', 'weight', 'sleep'].map(k => [k, String(q.get(k) ?? body[k] ?? '').slice(0, 40)])) };\n        const id = 'push-in-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);\n        const r = await db('pitwall_docs', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify([{ user_id: o.user_id, id, v, u: Date.now() }]) });\n        if (!r.ok) return J({ ok: false, error: 'db ' + r.status }, 500);\n        return new Response(msg ? '\u2713 Inoltrato a Orbita' : '\u2713 Salute aggiornata in Orbita', { headers: { ...CORS, 'Content-Type': 'text/plain; charset=utf-8' } });\n      }\n      if (add) {\n        const id = 'push-in-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);\n        const r = await db('pitwall_docs', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify([{ user_id: o.user_id, id, v: { text: add.slice(0, 500), at: Date.now(), via: q.get('via') || 'siri' }, u: Date.now() }]) });\n        if (!r.ok) return J({ ok: false, error: 'db ' + r.status }, 500);\n        return new Response('\u2713 Aggiunto a Orbita: ' + add.slice(0, 120), { headers: { ...CORS, 'Content-Type': 'text/plain; charset=utf-8' } });\n      }\n      const ask = String(q.get('ask') || body.ask || '').toLowerCase();\n      if (ask) return new Response(answer(o.v || {}, ask), { headers: { ...CORS, 'Content-Type': 'text/plain; charset=utf-8' } });\n      const v = o.v || {}; return J({ ok: true, name: v.name || '', u: v.u || 0, items: v.items || [], tasks: v.tasks || [], stats: v.stats || {} });\n    }\n    if (req.method === 'GET' || body.ping) {\n      const t = await db('orbita_push_sent?select=key&limit=1');\n      return J({ ok: true, version: VERSION, table: t.ok });\n    }\n    if (body.test) { // test from the app: the caller's own login decides the user\n      const u = await fetch(`${SB_URL}/auth/v1/user`, { headers: { apikey: SB_KEY, Authorization: req.headers.get('Authorization') || '' } });\n      if (!u.ok) return J({ ok: false, error: 'login' }, 401);\n      const uid = (await u.json()).id, q = (await rows(`pitwall_docs?user_id=eq.${uid}&id=eq.push-q&select=v`))[0];\n      const sent = await deliver(uid, [{ key: 'test:' + Date.now(), title: 'Orbita \u00b7 prova dal server', body: 'Le notifiche arrivano anche con l\\'app chiusa \ud83c\udf89', data: { view: 'settings' } }], (q && q.v) || {});\n      return J({ ok: true, sent });\n    }\n    return J({ ok: true, sent: await tick() });\n  } catch (e) { return J({ ok: false, error: String(e && e.message || e) }, 500); }\n});\n";
 const Phone = {
   b64u(buf) { let s = ''; const u = new Uint8Array(buf); for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); },
   ub64(s) { s = String(s).replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; },
@@ -8238,13 +8264,14 @@ function foodSheet(meal) {
     onMount(el, api) {
       wireSeg(el, 'hm', v => meal = v);
       const R = $('#fRes', el), inp = $('#fQ', el);
-      const row = (f, i, sec) => `<button class="row" data-f="${sec}:${i}"><span class="grow" style="min-width:0"><div class="t">${esc(f.name)}</div><div class="s">${f.kcal} kcal/100 g · ${f.por || 100} g${f.unit ? ' (1 ' + esc(f.unit) + ')' : ''} = <b>${Math.round(f.kcal * (f.lastG || f.por || 100) / 100)} kcal</b>${f.src === 'off' ? ' · Open Food Facts' : f.src === 'mio' ? ' · tuo' : ''}</div></span><span class="icon-btn" style="width:30px;height:30px;background:var(--accent);color:#fff">${ico('plus', 'sm')}</span></button>`;
+      const row = (f, i, sec) => `<button class="row" data-f="${sec}:${i}"><span class="grow" style="min-width:0"><div class="t">${esc(f.name)}</div><div class="s">${f.kcal} kcal/100 g · ${f.por || 100} g${f.unit ? ' (1 ' + esc(f.unit) + ')' : ''} = <b>${Math.round(f.kcal * (f.lastG || f.por || 100) / 100)} kcal</b>${f.src === 'off' ? ' · Open Food Facts' : f.src === 'mio' ? ' · tuo' : f.cu && f.cu !== 'xx' && typeof CUISINES !== 'undefined' ? ' · ' + esc(CUISINES[f.cu][0]) : f.src === 'usda' ? ' · USDA' : ''}</div></span><span class="icon-btn" style="width:30px;height:30px;background:var(--accent);color:#fff">${ico('plus', 'sm')}</span></button>`;
       let lists = {};
       const paint = () => {
         const loc = q ? Health.search(q) : [], rec = q ? [] : S.health.recent.slice(0, 12);
         lists = { l: loc, r: rec, o: online };
         R.innerHTML = (rec.length ? `<div class="section-h" style="margin:4px 4px 6px">Recenti</div><div class="list">${rec.map((f, i) => row(f, i, 'r')).join('')}</div>` : '')
-          + (q ? (loc.length ? `<div class="list">${loc.map((f, i) => row(f, i, 'l')).join('')}</div>` : '') + `<div class="section-h" style="margin:14px 4px 6px">Prodotti confezionati ${busy ? '· cerco…' : ''}</div>${online.length ? `<div class="list">${online.map((f, i) => row(f, i, 'o')).join('')}</div>` : busy ? '' : `<p class="muted" style="font-size:13px;margin:0 4px">Nessun prodotto trovato online. Prova “Descrivi a parole”.</p>`}` : (!rec.length ? `<p class="muted" style="font-size:14px;margin:4px">Cerca un alimento: ci sono ${FOOD_IDX.length} cibi italiani già pronti più milioni di prodotti confezionati (Open Food Facts).</p>` : ''));
+          + (q ? (loc.length ? `<div class="list">${loc.map((f, i) => row(f, i, 'l')).join('')}</div>` : '') + `<div class="section-h" style="margin:14px 4px 6px">Prodotti confezionati ${busy ? '· cerco…' : ''}</div>${online.length ? `<div class="list">${online.map((f, i) => row(f, i, 'o')).join('')}</div>` : busy ? '' : `<p class="muted" style="font-size:13px;margin:0 4px">Nessun prodotto trovato online. Prova “Descrivi a parole”.</p>`}` : (!rec.length ? `<p class="muted" style="font-size:14px;margin:4px">Cerca un alimento: ci sono ${FOOD_IDX.length.toLocaleString('it-IT')} cibi italiani e dal mondo già pronti, più milioni di prodotti confezionati (Open Food Facts).</p>` : '') + (typeof CUISINES !== 'undefined' ? `<div class="section-h" style="margin:14px 4px 6px">Cucine dal mondo</div><div class="chips wc-chips">${Object.entries(CUISINES).filter(([k]) => k !== 'xx').map(([k, [n]]) => `<button class="chip" data-wcu="${k}">${esc(n)}</button>`).join('')}</div>` : ''));
+        $$('[data-wcu]', R).forEach(b => b.onclick = () => { inp.value = CUISINES[b.dataset.wcu][0]; inp.oninput(); });
         $$('[data-f]', R).forEach(b => b.onclick = () => { const [s, i] = b.dataset.f.split(':'); portionSheet(lists[s][+i], meal, () => { if (UI.view === 'health') App.refresh(); inp.focus(); }); });
       };
       inp.oninput = () => { q = inp.value; online = []; paint(); clearTimeout(t); if (q.trim().length >= 3) t = setTimeout(async () => { busy = true; paint(); try { online = await Health.off(q); } catch (_) { online = []; } busy = false; if (inp.value === q) paint(); }, 450); };
@@ -9250,7 +9277,7 @@ ACT.receiptScan = () => {
       Island.toast({ icon: 'spark', c: 'var(--purple)', t: 'Leggo lo scontrino…', ms: 3000 });
       try {
         let images = [f], text = ''; if (f.type === 'application/pdf') { const p = await readPdf(f, true); text = p.text; images = p.images; }
-        const out = await sample.json(`Leggi questo scontrino o fattura (Italia). Oggi è ${todayK()}. Rispondi solo con un oggetto JSON {"store": negozio, "date": "YYYY-MM-DD", "total": numero in euro, "category": uno tra ${Object.keys(MCAT).join(', ')}, "items": [{"name": string, "price": numero}] (max 15), "warranty_months": 24 se c'è un prodotto con garanzia (elettronica, elettrodomestici, abbigliamento tecnico, mobili…) altrimenti 0, "product": il prodotto principale coperto da garanzia o ""}.${text ? '\n\n' + text.slice(0, 8000) : ''}`, images.length ? { images: images.slice(0, 2), cache: false } : { cache: false });
+        const out = await sample.json(`Leggi questo scontrino o fattura (Italia). Oggi è ${todayK()}. Rispondi solo con un oggetto JSON {"store": negozio, "date": "YYYY-MM-DD", "total": numero in euro, "category": uno tra ${Object.keys(MCAT).join(', ')}, "items": [{"name": string, "price": numero}] (max 40), "warranty_months": 24 se c'è un prodotto con garanzia (elettronica, elettrodomestici, abbigliamento tecnico, mobili…) altrimenti 0, "product": il prodotto principale coperto da garanzia o ""}.${typeof Rcpt !== 'undefined' ? Rcpt.ASK : ''}${text ? '\n\n' + text.slice(0, 8000) : ''}`, images.length ? { images: images.slice(0, 2), cache: false } : { cache: false });
         r = { ...r, ...out };
       } catch (e) { aiError(e); }
     }
@@ -10418,7 +10445,39 @@ ACT.hIphone = () => {
 };
 { const oA = VIEWS.health.actions; VIEWS.health.actions = () => `<button class="btn sm" data-act="hIphone" title="Passi e peso dall'iPhone">${ico('phone', 'sm')}<span class="hide-narrow">iPhone</span></button>` + oA(); }
 /* numbers written by an Italian iPhone may use the dot as thousands separator ("8.432" passi) */
-{ const oAp = HealthIn.apply.bind(HealthIn); HealthIn.apply = function (v) { v = { ...v }; for (const k of ['steps', 'active']) if (v[k] != null && +v[k] % 1 && +v[k] < 1000) v[k] = Math.round(+v[k] * 1000); const r = oAp(v); const k = /^\d{4}-\d{2}-\d{2}$/.test(v.date || '') ? v.date : todayK(); try { Health.dayW(k).fromPhone = Date.now(); save('health'); } catch (_) {} return r; }; }
+const itNum = v => { let t = String(v == null ? '' : v).replace(/[^\d.,-]/g, ''); if (!t) return null; if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(t)) t = t.replace(/\./g, '').replace(',', '.'); else if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) t = t.replace(/,/g, ''); else t = t.replace(',', '.'); const n = parseFloat(t); return isNaN(n) ? null : n; };
+{ const oAp = HealthIn.apply.bind(HealthIn); HealthIn.apply = function (v) { v = { ...v };
+    /* the server now also sends what the iPhone wrote, untouched: read it the Italian way ("12.000" are twelve thousand steps) */
+    if (v.raw) for (const k of ['steps', 'active', 'weight', 'sleep']) { const n = itNum(v.raw[k]); if (n != null) v[k] = n; }
+    else for (const k of ['steps', 'active']) if (v[k] != null && +v[k] % 1 && +v[k] < 1000) v[k] = Math.round(+v[k] * 1000);
+    /* no date from the iPhone: it's the day it was sent, not the day Orbita picks it up */
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v.date || '') && v.at) v.date = dkey(new Date(v.at)); const r = oAp(v); const k = /^\d{4}-\d{2}-\d{2}$/.test(v.date || '') ? v.date : todayK(); try { Health.dayW(k).fromPhone = Date.now(); save('health'); } catch (_) {} return r; }; }
+/* ---------- "the steps don't arrive": check the bridge exactly like the iPhone does ---------- */
+const HiDiag = {
+  async run(box) {
+    const L = [], line = (ok, t, s) => L.push(`<div class="hd-r"><span>${ok === true ? '✅' : ok === false ? '❌' : 'ℹ️'}</span><div><div class="t">${t}</div>${s ? `<div class="s">${s}</div>` : ''}</div></div>`), paint = () => { box.innerHTML = L.join('') || '<p class="muted" style="margin:0">Controllo…</p>'; };
+    paint();
+    /* 1 · the iPhone calls the address without any key: the function must accept it */
+    let open = null; try { const r = await fetch(`${Phone.fnUrl()}?w=${encodeURIComponent(Phone.feedKey())}`, { cache: 'no-store' }); const tx = r.ok ? '' : await r.text().catch(() => ''); open = r.ok ? 'ok' : /NOT_FOUND|function was not found/i.test(tx) ? 'missing' : r.status; } catch (_) { open = 'blocked'; }
+    if (open === 'ok') line(true, 'L\'iPhone raggiunge il server', 'L\'indirizzo risponde anche senza chiavi, come serve all\'automazione.');
+    else if (open === 'missing') line(false, 'La funzione “orbita-push” non esiste più su Supabase', `Supabase risponde “function not found”: forse è stata ripubblicata con un altro nome o cancellata. Apri Supabase › <b>Edge Functions</b>: se c'è una funzione con un nome diverso, eliminala; poi <b>Deploy a new function › Via Editor</b>, nome esattamente <code>orbita-push</code>, incolla il codice (Impostazioni › Notifiche su iPad e telefono › Copia) e Deploy. Infine in Settings disattiva <b>Verify JWT</b>.`);
+    else line(false, 'Il server rifiuta le richieste dell\'iPhone', `Succede quando la funzione viene ripubblicata: Supabase riattiva da solo <b>Verify JWT</b>. Apri Supabase › Edge Functions › <b>orbita-push</b> › Settings (o Details), disattiva <b>Verify JWT with legacy secret</b> / <b>Enforce JWT verification</b> e salva. Poi rilancia l'automazione.${typeof open === 'number' ? ` (risposta ${open})` : ''}`);
+    paint();
+    /* 2 · server version */
+    try { const r = await fetch(Phone.fnUrl(), { headers: { apikey: Cloud.cfg.key, Authorization: 'Bearer ' + Cloud.cfg.key } }); const j = await r.json(); if (j && j.version) j.version >= 11 ? line(true, `Server aggiornato (versione ${j.version})`, '') : line(null, `Server alla versione ${j.version}`, 'Funziona, ma con la versione 11 i numeri tipo “12.000 passi” e il giorno di invio vengono letti meglio. Ricopia la funzione da Impostazioni › Notifiche su iPad e telefono.'); } catch (_) { line(null, 'Versione del server non leggibile', ''); }
+    paint();
+    /* 3 · anything waiting? */
+    try { const P = await Cloud.rest('pitwall_docs?id=like.push-in-*&select=id,v&order=id') || [], H = P.filter(r => r.v && r.v.kind === 'health');
+      if (H.length) { line(true, `${H.length} ${H.length === 1 ? 'invio arrivato' : 'invii arrivati'} dall'iPhone`, 'Li registro adesso.'); paint(); await Phone.inbox(); }
+      else line(null, 'Nessun invio in attesa', open === 'ok' ? 'Tocca ▶︎ sull\'automazione nell\'iPhone e poi di nuovo “Verifica”: se arriva, lo vedi qui.' : ''); } catch (_) { line(false, 'Non riesco a leggere gli invii', 'Controlla di essere collegato al tuo account Orbita.'); }
+    const last = Object.entries(S.health.days || {}).filter(([, d]) => d.fromPhone).sort((a, b) => b[1].fromPhone - a[1].fromPhone)[0];
+    line(last ? true : null, last ? `Ultimi passi ricevuti: ${(+last[1].steps || 0).toLocaleString('it-IT')} (${relDay(last[0], true).toLowerCase()})` : 'Ancora nessun dato ricevuto dall\'iPhone', last ? `arrivati ${new Date(last[1].fromPhone).toLocaleString('it-IT', { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : '');
+    paint(); App.refresh();
+  },
+};
+{ const oI = ACT.hIphone; ACT.hIphone = (...a) => { oI(...a); const sh = Sheets[Sheets.length - 1]; if (!sh || typeof Phone === 'undefined' || !Phone.srv()) return; const host = $('.sheet-b', sh.el) || sh.el;
+    host.insertAdjacentHTML('beforeend', `<div class="card" style="display:flex;flex-direction:column;gap:10px"><b>Non arrivano i passi?</b><span class="muted" style="font-size:14px">Controllo il collegamento come fa l'iPhone e ti dico cosa sistemare.</span><button class="btn primary" id="hdGo" style="align-self:flex-start">${ico('refresh', 'sm')}Verifica il collegamento</button><div id="hdBox" class="hd-box"></div></div>`);
+    $('#hdGo', host).onclick = async e => { e.target.disabled = true; try { await HiDiag.run($('#hdBox', host)); } finally { e.target.disabled = false; } }; }; }
 
 /* =========================================================
    RATE DA PAGARE — finanziamenti, acquisti a rate (Klarna,
@@ -15859,14 +15918,17 @@ const Dav = {
   BASE: 'https://caldav.icloud.com/',
   conf() { return S.profile.icloud || null; },
   connected() { return !!(this.conf() && AIK.has('icloud')); },
-  ok() { return !IN_CLAUDE && typeof Net !== 'undefined' && Net.ok(); },
+  /** the desktop app (1.7+) talks to iCloud by itself; elsewhere the request goes through your Orbita server */
+  native() { return !!(window.orbitaDesktop && window.orbitaDesktop.dav && window.orbitaDesktop.dav.req); },
+  ok() { return !IN_CLAUDE && (this.native() || (typeof Net !== 'undefined' && Net.ok())); },
   async creds() { try { const v = await AIK.get('icloud'); return v ? JSON.parse(v) : null; } catch (_) { return null; } },
   async req(url, method, o = {}) {
     if (!this.ok()) throw davErr('nosrv'); const c = o.cred || await this.creds(); if (!c) throw davErr('nocred');
     const H = { Authorization: 'Basic ' + btoa(unescape(encodeURIComponent(c.u + ':' + c.p))) };
     if (o.depth != null) H.Depth = String(o.depth); if (o.body) H['Content-Type'] = o.ct || 'application/xml; charset=utf-8'; if (o.match) H['If-Match'] = o.match; if (o.none) H['If-None-Match'] = '*';
     const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), o.ms || 30000); let j;
-    try { const r = await fetch(Phone.fnUrl(), { method: 'POST', signal: ctl.signal, headers: { apikey: Cloud.cfg.key, Authorization: 'Bearer ' + Cloud.cfg.key, 'Content-Type': 'application/json' }, body: JSON.stringify({ w: Phone.feedKey(), dav: { url, method, headers: H, body: o.body || null } }) }); j = await r.json().catch(() => null); }
+    if (this.native()) { try { j = await window.orbitaDesktop.dav.req({ url, method, headers: H, body: o.body || null }); } catch (_) { throw davErr('net'); } finally { clearTimeout(tm); } }
+    else try { const r = await fetch(Phone.fnUrl(), { method: 'POST', signal: ctl.signal, headers: { apikey: Cloud.cfg.key, Authorization: 'Bearer ' + Cloud.cfg.key, 'Content-Type': 'application/json' }, body: JSON.stringify({ w: Phone.feedKey(), dav: { url, method, headers: H, body: o.body || null } }) }); j = await r.json().catch(() => null); }
     catch (_) { throw davErr('net'); } finally { clearTimeout(tm); }
     if (!j || !j.proxy) throw davErr('oldsrv'); if (j.status === 401 || j.status === 403) throw davErr('auth'); if (j.status === 502) throw davErr('net');
     return j;
@@ -16084,7 +16146,10 @@ const ExtEdit = {
 /* ---------- Account: connect Apple Calendar ---------- */
 const APPLE_HELP = `<ol class="ap-steps"><li>Apri <a href="https://account.apple.com/account/manage" target="_blank" rel="noopener">account.apple.com</a> e accedi.</li><li>Vai in <b>Accesso e sicurezza → Password specifiche per le app</b>.</li><li>Crea una password (nome: “Orbita”) e copiala qui sotto.</li></ol><p class="muted" style="margin:0;font-size:13px">Serve una password specifica per le app, non quella del tuo ID Apple. La puoi revocare quando vuoi da lì. In Orbita viene cifrata e segue il tuo account.</p>`;
 function appleConnect() {
-  if (!Dav.ok()) { Island.toast({ icon: 'cal', c: 'var(--orange)', t: 'Prima attiva il server di Orbita', s: 'Apple non permette ai siti di leggere il calendario direttamente: passa dal tuo server Orbita (lo stesso delle notifiche)', ms: 5200 }); return; }
+  if (!Dav.ok()) { openSheet({ title: 'Calendario Apple', left: { label: 'Chiudi' }, body: `<p style="margin:0">Apple non lascia leggere il calendario direttamente da un sito. Hai tre strade:</p>
+      <div class="list"><div class="row"><span class="tile-ico" style="background:var(--accent)">${ico('grid')}</span><span class="grow"><div class="t">Dal programma Orbita per computer</div><div class="s">Dalla versione 1.7 si collega a iCloud da solo, senza server: gli eventi di Orbita vanno nel Calendario di Apple e li ritrovi anche su iPhone e iPad.</div></span></div>
+      <div class="row"><span class="tile-ico" style="background:var(--green)">${ico('bolt')}</span><span class="grow"><div class="t">Con il tuo server Orbita</div><div class="s">Quello delle notifiche: attivalo in Impostazioni → Notifiche e torna qui.</div></span></div>
+      <div class="row"><span class="tile-ico" style="background:var(--orange)">${ico('cal')}</span><span class="grow"><div class="t">Un evento alla volta</div><div class="s">Apri un evento e tocca “Aggiungi al Calendario di Apple”: su iPhone e iPad finisce nel Calendario con un tocco.</div></span></div></div>` }); return; }
   const c0 = Dav.conf();
   openSheet({ title: 'Calendario Apple', left: { label: 'Annulla' }, right: { label: 'Collega', act: async s => { const u = $('#apU', s.el).value.trim(), p = (v => { const z = v.replace(/[\s-]+/g, '').toLowerCase(); return /^[a-z]{16}$/.test(z) ? z.match(/.{4}/g).join('-') : v.trim(); })($('#apP', s.el).value); if (!u || !p) { (u ? $('#apP', s.el) : $('#apU', s.el)).focus(); return; }
       const msg = $('#apMsg', s.el); msg.textContent = 'Mi collego a iCloud…'; msg.style.color = '';
@@ -16669,6 +16734,3180 @@ CMD_SRC.push(q => q.length < 3 ? [] : Soc.P().filter(p => ((p.title || '') + ' '
 Promise.resolve().then(() => { if (typeof Assistant === 'undefined') return; const old = Assistant.tools.bind(Assistant); Assistant.tools = function () { return old().concat([{ name: 'social_posts', description: 'Elenca le pagine social e i post programmati, le idee e i risultati recenti.', inputSchema: { type: 'object', properties: {} }, execute() { return { pagine: Soc.A().map(a => ({ nome: a.name, social: Soc.net(a).n, follower: Soc.followers(a), crescita_30g: Soc.growth(a), post_settimana: Soc.week(a), obiettivo_settimana: a.per })), post: Soc.P().filter(p => p.st !== 'pub' || dayDiff(p.date || todayK(), todayK()) < 14).map(p => ({ titolo: p.title, stato: PST_ST[p.st][0], data: p.date, ora: p.time, pagina: (Soc.acct(p.acct) || {}).name })) }; } }]); }; });
 
 /* =========================================================
+   ALIMENTI — database ampliato (valori per 100 g, tabelle CREA /
+   USDA arrotondate; porzione tipica in g e, se c'è, la sua unità).
+   Si somma ai 200 alimenti di base e alla ricerca online su Open
+   Food Facts (milioni di prodotti confezionati e codici a barre).
+   Formato: [nome, kcal, proteine, carboidrati, grassi, porzione g, unità]
+   ========================================================= */
+const FOODS_X = [
+  /* ---------- cereali, farine, riso ---------- */
+  ['Farina 00', 340, 11, 72, 1, 50], ['Farina 0', 341, 11.5, 71, 1.2, 50], ['Farina integrale', 319, 12, 62, 2, 50], ['Farina di farro', 335, 14, 67, 2.4, 50], ['Farina di mais (polenta, cruda)', 358, 8.7, 76, 2.7, 70], ['Polenta cotta', 70, 1.6, 15, 0.4, 250], ['Polenta fritta', 280, 4, 33, 15, 120],
+  ['Farina di riso', 366, 6, 80, 1.4, 50], ['Farina di ceci', 387, 22, 58, 6.7, 50], ['Farina di mandorle', 590, 21, 10, 50, 30], ['Farina di grano saraceno', 335, 12.6, 70, 3.1, 50], ['Semola di grano duro', 360, 12.7, 73, 1.1, 50], ['Amido di mais (maizena)', 381, 0.3, 91, 0.1, 10, 'cucchiaio'],
+  ['Farro (crudo)', 335, 15, 67, 2.5, 80], ['Farro cotto', 140, 5.5, 28, 1, 180], ['Orzo perlato (crudo)', 352, 10, 73, 1.4, 80], ['Orzo cotto', 123, 2.3, 28, 0.4, 180], ['Quinoa (cruda)', 368, 14, 64, 6, 80], ['Quinoa cotta', 120, 4.4, 21, 1.9, 180],
+  ['Cous cous (crudo)', 376, 12.8, 77, 0.6, 80], ['Cous cous cotto', 112, 3.8, 23, 0.2, 180], ['Bulgur (crudo)', 342, 12.3, 76, 1.3, 80], ['Bulgur cotto', 83, 3.1, 19, 0.2, 180], ['Miglio (crudo)', 356, 11, 73, 4, 80], ['Grano saraceno (crudo)', 343, 13, 72, 3.4, 80],
+  ['Amaranto (crudo)', 371, 13.6, 65, 7, 80], ['Avena in fiocchi', 372, 13, 60, 7, 40], ['Crusca di frumento', 216, 15.5, 27, 4.3, 15], ['Germe di grano', 382, 23, 52, 9.7, 10],
+  ['Riso arborio (crudo)', 350, 7, 79, 0.6, 80], ['Riso carnaroli (crudo)', 352, 7, 79, 0.6, 80], ['Riso venere (crudo)', 357, 8, 76, 2.5, 80], ['Riso parboiled (crudo)', 357, 7.3, 80, 0.5, 80], ['Riso rosso (crudo)', 355, 7.5, 76, 2.7, 80], ['Riso soffiato', 383, 6, 86, 1, 30], ['Riso integrale cotto', 112, 2.6, 23, 0.9, 180], ['Riso basmati cotto', 121, 3, 25, 0.4, 180],
+  ['Gallette di mais', 380, 8, 81, 2.5, 8, 'galletta'], ['Gallette di farro', 375, 13, 74, 2.5, 8, 'galletta'],
+  /* ---------- pasta ---------- */
+  ['Spaghetti (crudi)', 353, 12.5, 72, 1.5, 80], ['Penne (crude)', 353, 12.5, 72, 1.5, 80], ['Fusilli (crudi)', 353, 12.5, 72, 1.5, 80], ['Rigatoni (crudi)', 353, 12.5, 72, 1.5, 80], ['Farfalle (crude)', 353, 12.5, 72, 1.5, 80], ['Linguine (crude)', 353, 12.5, 72, 1.5, 80], ['Mezze maniche (crude)', 353, 12.5, 72, 1.5, 80], ['Paccheri (crudi)', 353, 12.5, 72, 1.5, 80],
+  ['Spaghetti integrali (crudi)', 340, 13.4, 66, 2.5, 80], ['Pasta di legumi (cruda)', 345, 22, 54, 2.5, 80], ['Pasta di lenticchie rosse (cruda)', 340, 25, 50, 2.5, 80], ['Pasta senza glutine (cruda)', 355, 7, 79, 1.5, 80], ['Pasta di farro (cruda)', 345, 14, 68, 2.3, 80], ['Pasta proteica (cruda)', 350, 28, 46, 3.5, 80],
+  ['Tagliatelle all\'uovo (crude)', 366, 13, 69, 3.5, 80], ['Fettuccine fresche', 285, 11, 54, 3, 100], ['Pappardelle all\'uovo (crude)', 366, 13, 69, 3.5, 80], ['Lasagne (sfoglia cruda)', 366, 13, 69, 3.5, 80], ['Pasta fresca all\'uovo', 280, 11, 52, 3, 120],
+  ['Gnocchi di patate', 160, 4, 34, 0.5, 200], ['Tortellini (crudi)', 300, 13, 45, 7.5, 125], ['Ravioli ricotta e spinaci (freschi)', 260, 10, 38, 7, 125], ['Cappelletti (freschi)', 290, 12, 44, 7, 125], ['Agnolotti (freschi)', 270, 11, 40, 7.5, 125], ['Orecchiette (crude)', 353, 12.5, 72, 1.5, 80], ['Trofie fresche', 275, 9, 55, 1.8, 120],
+  ['Pastina (cruda)', 353, 12.5, 72, 1.5, 40], ['Noodles di riso (crudi)', 364, 6, 80, 0.6, 80], ['Spaghetti di soia', 330, 0.2, 82, 0.1, 50], ['Noodles all\'uovo (crudi)', 384, 14, 71, 4.4, 80], ['Ramen istantaneo (secco)', 450, 9, 60, 19, 85, 'confezione'],
+  /* ---------- pane e prodotti da forno ---------- */
+  ['Pane bianco', 275, 8.6, 58, 0.5, 50, 'fetta'], ['Pane comune (rosetta)', 290, 9, 60, 1, 60, 'panino'], ['Pane casereccio', 260, 8, 54, 1.2, 50, 'fetta'], ['Pane di semola', 270, 9, 56, 1, 50, 'fetta'], ['Pane ai cereali', 255, 10, 45, 4, 50, 'fetta'], ['Pane di segale', 250, 8.5, 48, 3.3, 40, 'fetta'],
+  ['Pane in cassetta', 270, 8, 49, 4, 25, 'fetta'], ['Pane in cassetta integrale', 250, 9.5, 42, 4, 25, 'fetta'], ['Pane per hamburger', 270, 9, 49, 4.3, 60, 'panino'], ['Pane per hot dog', 270, 9, 48, 4.5, 55, 'panino'], ['Baguette', 270, 9, 56, 1.2, 60], ['Ciabatta', 270, 9, 53, 2.5, 80, 'ciabatta'],
+  ['Pane arabo (pita)', 275, 9, 56, 1.2, 60, 'pita'], ['Tortilla di frumento', 310, 8, 51, 8, 45, 'tortilla'], ['Tortilla di mais', 218, 5.7, 45, 2.9, 30, 'tortilla'], ['Pane senza glutine', 250, 3, 48, 5, 40, 'fetta'], ['Pane carasau', 380, 12, 79, 1.5, 30], ['Taralli', 450, 10, 66, 16, 30], ['Friselle', 360, 11, 72, 2, 40, 'frisella'],
+  ['Grissini integrali', 410, 13, 66, 9, 10, 'grissino'], ['Crackers integrali', 430, 11, 66, 12, 25, 'pacchetto'], ['Crackers di riso', 400, 8, 82, 3, 25, 'pacchetto'], ['Fette biscottate integrali', 380, 12, 67, 6, 10, 'fetta'], ['Pangrattato', 395, 13, 72, 5, 10, 'cucchiaio'],
+  ['Focaccia genovese', 330, 7, 43, 14, 100], ['Focaccia farcita', 300, 11, 33, 13, 150], ['Pizza bianca', 290, 7.5, 45, 8, 100], ['Piadina con crudo e squacquerone', 330, 13, 32, 16, 250, 'piadina'], ['Schiacciata', 320, 8, 46, 11, 100], ['Panino al latte', 330, 9, 54, 8, 40, 'panino'],
+  ['Cornetto vuoto', 410, 8, 46, 21, 50, 'cornetto'], ['Cornetto alla crema', 380, 7, 48, 17, 70, 'cornetto'], ['Cornetto alla marmellata', 370, 6, 54, 14, 70, 'cornetto'], ['Cornetto al cioccolato', 420, 7, 48, 22, 70, 'cornetto'], ['Cornetto integrale al miele', 390, 7.5, 50, 17, 65, 'cornetto'],
+  ['Brioche', 370, 8, 50, 15, 50, 'brioche'], ['Pain au chocolat', 420, 7, 46, 23, 60, 'pezzo'], ['Bombolone', 380, 6.5, 46, 19, 80, 'bombolone'], ['Krapfen alla crema', 360, 6, 43, 18, 80, 'krapfen'], ['Ciambella fritta', 410, 6, 45, 23, 70, 'ciambella'], ['Muffin al cioccolato', 420, 6, 52, 21, 90, 'muffin'], ['Muffin ai mirtilli', 380, 5.5, 52, 17, 90, 'muffin'],
+  ['Plumcake', 410, 6, 52, 19, 35, 'merendina'], ['Merendina al cioccolato', 440, 6, 55, 22, 35, 'merendina'], ['Pan di Spagna', 290, 7, 53, 5, 60], ['Pandoro', 410, 8, 50, 20, 80, 'fetta'], ['Panettone', 365, 7, 52, 14, 80, 'fetta'], ['Colomba', 400, 7, 52, 18, 80, 'fetta'],
+  /* ---------- colazione, biscotti, cereali ---------- */
+  ['Muesli', 365, 9.5, 66, 6, 40], ['Muesli croccante (granola)', 450, 9, 64, 17, 40], ['Corn flakes integrali', 360, 10, 74, 3, 30], ['Cereali al cioccolato', 385, 8, 78, 4, 30], ['Cereali soffiati al miele', 380, 7, 84, 1.5, 30], ['Fiocchi d\'avena integrali', 372, 13, 60, 7, 40],
+  ['Porridge (con latte)', 105, 4.5, 14, 3.2, 250, 'ciotola'], ['Pancake', 230, 6.5, 32, 8.5, 40, 'pancake'], ['Waffle', 290, 7, 33, 14, 75, 'waffle'], ['Crêpe dolce (vuota)', 220, 6.5, 28, 9, 50, 'crêpe'],
+  ['Biscotti secchi', 420, 7, 75, 10, 6, 'biscotto'], ['Biscotti frollini', 480, 6.5, 68, 20, 10, 'biscotto'], ['Biscotti al cioccolato', 490, 6.5, 65, 22, 10, 'biscotto'], ['Biscotti integrali', 450, 8, 66, 16, 9, 'biscotto'], ['Biscotti con gocce di cioccolato', 495, 6.5, 66, 22, 10, 'biscotto'], ['Biscotti al cacao con zucchero', 485, 6.5, 69, 19, 10, 'biscotto'],
+  ['Biscotti per l\'infanzia', 420, 11, 75, 8, 6, 'biscotto'], ['Wafer', 520, 6, 63, 27, 10, 'wafer'], ['Savoiardi', 390, 8.5, 80, 4, 6, 'savoiardo'], ['Amaretti', 450, 7, 82, 11, 7, 'amaretto'], ['Cantucci', 440, 10, 66, 15, 10, 'cantuccio'], ['Biscotti digestive', 480, 7, 63, 21, 15, 'biscotto'],
+  ['Marmellata di albicocche', 230, 0.4, 58, 0.1, 20, 'cucchiaio'], ['Confettura extra', 220, 0.4, 54, 0.1, 20, 'cucchiaio'], ['Marmellata senza zuccheri aggiunti', 140, 0.5, 34, 0.2, 20, 'cucchiaio'], ['Crema spalmabile nocciole e cacao', 540, 6.3, 57, 31, 15, 'cucchiaino'], ['Crema di pistacchio spalmabile', 560, 8, 50, 36, 15, 'cucchiaino'],
+  ['Burro di arachidi', 590, 25, 16, 50, 15, 'cucchiaio'], ['Burro di mandorle', 615, 21, 19, 55, 15, 'cucchiaio'], ['Crema di nocciole 100%', 650, 14, 7, 62, 15, 'cucchiaio'], ['Miele millefiori', 304, 0.3, 82, 0, 10, 'cucchiaino'], ['Sciroppo d\'acero', 260, 0, 67, 0.1, 15, 'cucchiaio'], ['Zucchero di canna', 380, 0, 98, 0, 5, 'cucchiaino'], ['Dolcificante (stevia)', 0, 0, 0, 0, 1, 'bustina'],
+  ['Cacao amaro in polvere', 355, 20, 11, 25, 5, 'cucchiaino'], ['Orzo solubile', 360, 9, 77, 1, 3, 'cucchiaino'], ['Cioccolata calda (in tazza)', 120, 3.5, 19, 3.5, 200, 'tazza'],
+  /* ---------- legumi ---------- */
+  ['Ceci secchi', 334, 21, 47, 6.3, 50], ['Ceci in scatola (sgocciolati)', 120, 7, 16, 2.5, 120, 'scatola'], ['Fagioli borlotti secchi', 335, 23, 48, 2, 50], ['Fagioli borlotti in scatola', 95, 6.5, 14, 0.6, 120, 'scatola'], ['Fagioli cannellini secchi', 335, 23, 46, 1.6, 50], ['Fagioli cannellini in scatola', 90, 6.5, 13, 0.5, 120, 'scatola'],
+  ['Fagioli neri (cotti)', 132, 8.9, 24, 0.5, 150], ['Fagioli rossi (cotti)', 127, 8.7, 22, 0.5, 150], ['Fagioli dall\'occhio (cotti)', 116, 7.7, 21, 0.5, 150], ['Fagioli azuki (cotti)', 128, 7.5, 25, 0.1, 150],
+  ['Lenticchie secche', 325, 23, 51, 1, 50], ['Lenticchie cotte', 116, 9, 20, 0.4, 150], ['Lenticchie rosse decorticate (secche)', 335, 24, 54, 1.5, 50], ['Lenticchie in scatola', 90, 6.5, 13, 0.5, 120], ['Piselli secchi', 340, 22, 53, 2, 50], ['Piselli freschi', 70, 5.5, 6.5, 0.6, 150], ['Piselli surgelati', 72, 5.5, 8, 0.4, 150], ['Piselli in scatola', 60, 4.5, 8, 0.3, 120],
+  ['Fave fresche', 72, 5.5, 8, 0.4, 150], ['Fave secche decorticate', 340, 27, 53, 3, 50], ['Cicerchie secche', 330, 25, 52, 2.5, 50], ['Lupini (in salamoia)', 115, 16, 7, 2.4, 50], ['Edamame', 122, 11, 9, 5, 100], ['Soia gialla secca', 400, 36, 23, 18, 50], ['Hummus di ceci', 230, 7, 14, 16, 50], ['Falafel', 330, 13, 32, 18, 100, 'porzione'],
+  /* ---------- verdure ---------- */
+  ['Zucchine', 17, 1.3, 1.4, 0.1, 200], ['Melanzane', 18, 1.1, 2.6, 0.4, 200], ['Peperoni rossi', 31, 1, 6, 0.3, 150], ['Peperoni gialli', 27, 1, 5.5, 0.2, 150], ['Peperoni verdi', 20, 0.9, 4.2, 0.2, 150], ['Pomodori ciliegini', 20, 0.9, 3.5, 0.2, 150], ['Pomodori da insalata', 19, 1, 3, 0.2, 150], ['Pomodori secchi', 260, 14, 43, 3, 20],
+  ['Carote', 35, 1.1, 7.6, 0.2, 100], ['Cetrioli', 14, 0.7, 1.8, 0.5, 150], ['Finocchi', 9, 1.2, 1, 0, 200], ['Sedano', 20, 2.3, 2.4, 0.2, 100], ['Cipolle', 26, 1, 5.7, 0.1, 80], ['Cipollotti', 27, 1.1, 5.5, 0.2, 30], ['Porri', 29, 2.1, 5.2, 0.1, 100], ['Aglio', 45, 0.9, 8.4, 0.6, 5, 'spicchio'], ['Scalogno', 72, 2.5, 17, 0.1, 20],
+  ['Lattuga', 15, 1.4, 2.2, 0.4, 80], ['Insalata iceberg', 14, 0.9, 3, 0.1, 80], ['Rucola', 28, 2.6, 3.9, 0.3, 50], ['Valeriana (songino)', 21, 2, 3.6, 0.4, 50], ['Radicchio rosso', 13, 1.4, 1.6, 0.1, 100], ['Indivia', 17, 1.3, 2.7, 0.2, 100], ['Scarola', 17, 1.3, 2.7, 0.2, 150], ['Insalata mista in busta', 18, 1.5, 2.2, 0.2, 100, 'busta'],
+  ['Spinaci', 31, 3.4, 2.9, 0.7, 150], ['Spinaci surgelati', 23, 2.9, 1.7, 0.4, 150], ['Bietole', 17, 1.3, 2.8, 0.1, 200], ['Cavolo nero', 49, 4.3, 8.8, 0.9, 150], ['Cavolfiore', 25, 3.2, 2.7, 0.2, 200], ['Broccoli', 34, 3, 3.1, 0.4, 200], ['Cime di rapa', 22, 2.9, 2, 0.3, 200], ['Cavolini di Bruxelles', 43, 4.2, 4.2, 0.5, 150], ['Cavolo cappuccio', 19, 2.1, 2.5, 0.1, 150], ['Cavolo verza', 25, 2.1, 4, 0.1, 150],
+  ['Asparagi', 29, 3.6, 3.3, 0.2, 150], ['Carciofi', 22, 2.7, 2.5, 0.2, 150], ['Carciofini sott\'olio', 140, 2, 4, 13, 50], ['Fagiolini', 18, 2.1, 2.4, 0.1, 150], ['Zucca', 18, 1.1, 3.5, 0.1, 200], ['Zucca butternut', 45, 1, 12, 0.1, 200], ['Funghi champignon', 22, 3.1, 3.3, 0.3, 150], ['Funghi porcini', 26, 3.9, 1, 0.7, 150], ['Funghi trifolati', 70, 3, 3.5, 5, 150],
+  ['Barbabietola rossa (cotta)', 44, 1.7, 10, 0.2, 100], ['Ravanelli', 16, 0.7, 3.4, 0.1, 50], ['Rape', 28, 0.9, 6.4, 0.1, 100], ['Topinambur', 73, 2, 17, 0, 100], ['Mais dolce in scatola', 81, 2.9, 15, 1.2, 70, 'vasetto'], ['Olive verdi', 145, 1, 3.8, 15, 30], ['Olive nere', 115, 0.8, 6, 11, 30], ['Capperi', 23, 2.4, 4.9, 0.9, 5],
+  ['Germogli di soia', 30, 3, 6, 0.2, 50], ['Cavolo rosso', 31, 1.4, 7.4, 0.2, 100], ['Okra', 33, 1.9, 7, 0.2, 100], ['Avocado', 160, 2, 8.5, 14.7, 80], ['Patate', 77, 2, 17, 0.1, 200], ['Patate dolci (americane)', 86, 1.6, 20, 0.1, 200], ['Patate al forno', 140, 2.6, 22, 4.5, 200], ['Patate lesse', 85, 2, 18, 0.1, 200], ['Purè di patate', 105, 2.5, 14, 4.5, 200],
+  ['Patatine fritte', 310, 3.4, 41, 15, 150], ['Patatine fritte surgelate (al forno)', 160, 2.6, 25, 5, 150], ['Minestrone surgelato', 40, 2, 6.5, 0.4, 300], ['Verdure grigliate', 60, 1.6, 4.5, 4, 200], ['Verdure miste surgelate', 45, 2.5, 6, 0.4, 200], ['Pomodoro passata', 24, 1.3, 4, 0.2, 100], ['Pelati in scatola', 21, 1.2, 3, 0.2, 200], ['Concentrato di pomodoro', 82, 4.3, 18, 0.5, 20],
+  ['Insalata di cetrioli e pomodori', 35, 1, 4, 1.8, 200], ['Giardiniera', 30, 1, 5, 0.5, 50], ['Peperonata', 85, 1.2, 7, 6, 150], ['Caponata', 110, 1.5, 9, 7.5, 150], ['Ratatouille', 60, 1.3, 6, 3.5, 200], ['Melanzane grigliate', 45, 1.1, 3.5, 3, 150],
+  /* ---------- frutta ---------- */
+  ['Mela golden', 53, 0.3, 13.7, 0.1, 180, 'mela'], ['Mela rossa', 52, 0.3, 13.5, 0.2, 180, 'mela'], ['Mela verde', 48, 0.4, 12, 0.2, 180, 'mela'], ['Pera williams', 57, 0.4, 15, 0.1, 180, 'pera'], ['Pesca', 39, 0.9, 9.5, 0.3, 150, 'pesca'], ['Pesca noce', 44, 1.1, 10.5, 0.3, 150, 'nettarina'], ['Albicocca', 48, 1.4, 11, 0.4, 40, 'albicocca'],
+  ['Susine', 46, 0.7, 11.4, 0.3, 40, 'susina'], ['Ciliegie', 63, 1.1, 16, 0.2, 150], ['Fragole', 32, 0.7, 7.7, 0.3, 150], ['Mirtilli', 57, 0.7, 14.5, 0.3, 100], ['Lamponi', 52, 1.2, 12, 0.7, 100], ['More', 43, 1.4, 10, 0.5, 100], ['Ribes', 56, 1.4, 14, 0.2, 100], ['Uva bianca', 69, 0.7, 18, 0.2, 150], ['Uva nera', 70, 0.7, 18, 0.2, 150],
+  ['Banana', 89, 1.1, 22.8, 0.3, 120, 'banana'], ['Arancia', 47, 0.9, 11.8, 0.1, 200, 'arancia'], ['Mandarino', 53, 0.8, 13.3, 0.3, 80, 'mandarino'], ['Clementine', 47, 0.9, 12, 0.2, 80, 'clementina'], ['Pompelmo', 42, 0.8, 10.7, 0.1, 250, 'pompelmo'], ['Limone', 29, 1.1, 9.3, 0.3, 60, 'limone'], ['Lime', 30, 0.7, 10.5, 0.2, 50, 'lime'],
+  ['Kiwi', 61, 1.1, 14.7, 0.5, 80, 'kiwi'], ['Ananas', 50, 0.5, 13, 0.1, 150], ['Mango', 60, 0.8, 15, 0.4, 150], ['Papaya', 43, 0.5, 11, 0.3, 150], ['Melone', 34, 0.8, 8.2, 0.2, 200], ['Anguria', 30, 0.6, 7.6, 0.2, 300], ['Fichi', 74, 0.8, 19, 0.3, 50, 'fico'], ['Fichi d\'india', 41, 0.7, 9.6, 0.5, 100, 'frutto'], ['Cachi', 70, 0.6, 18.6, 0.2, 200, 'caco'],
+  ['Melagrana', 83, 1.7, 18.7, 1.2, 100], ['Castagne', 196, 2.9, 37, 1.7, 100], ['Castagne bollite', 131, 2, 28, 1.4, 100], ['Caldarroste', 245, 3.2, 53, 2.2, 100], ['Cocco fresco', 354, 3.3, 15, 33.5, 50], ['Litchi', 66, 0.8, 16.5, 0.4, 100], ['Frutto della passione', 97, 2.2, 23, 0.7, 50], ['Nespole', 47, 0.4, 12, 0.2, 100], ['Prugne', 46, 0.7, 11.4, 0.3, 100],
+  ['Macedonia di frutta', 50, 0.6, 12, 0.2, 200, 'coppetta'], ['Frutta sciroppata', 75, 0.4, 19, 0.1, 150], ['Composta di frutta', 70, 0.3, 17, 0.1, 100, 'vasetto'], ['Spremuta d\'arancia', 45, 0.7, 10.4, 0.2, 200, 'bicchiere'], ['Centrifugato di frutta e verdura', 40, 0.8, 9, 0.2, 250, 'bicchiere'], ['Frullato di frutta', 60, 0.8, 14, 0.3, 300, 'bicchiere'], ['Smoothie (in bottiglia)', 55, 0.6, 12.5, 0.1, 250, 'bottiglietta'],
+  /* ---------- frutta secca e semi ---------- */
+  ['Mandorle', 603, 22, 4.6, 55, 30], ['Mandorle tostate', 610, 21, 5, 56, 30], ['Noci', 689, 14.3, 5.1, 68, 30], ['Nocciole', 655, 13.8, 6.1, 64, 30], ['Pistacchi', 608, 18, 8, 56, 30], ['Pistacchi salati', 610, 21, 17, 50, 30], ['Anacardi', 604, 15, 22, 46, 30], ['Arachidi tostate', 598, 25.8, 8.5, 50, 30], ['Arachidi salate', 610, 26, 10, 51, 30],
+  ['Noci pecan', 690, 9.2, 4.3, 72, 30], ['Noci del Brasile', 659, 14, 4.2, 67, 20], ['Noci di macadamia', 718, 7.9, 5.2, 76, 30], ['Pinoli', 595, 31.9, 4, 50.3, 10], ['Semi di girasole', 580, 21, 10, 51, 15], ['Semi di zucca', 560, 30, 6, 49, 15], ['Semi di chia', 486, 17, 7.7, 31, 15], ['Semi di lino', 534, 18, 1.6, 42, 10], ['Semi di sesamo', 573, 18, 10, 50, 10], ['Tahina (crema di sesamo)', 595, 17, 21, 54, 15, 'cucchiaio'],
+  ['Mix frutta secca', 600, 18, 13, 52, 30, 'manciata'], ['Uvetta', 299, 3.1, 79, 0.5, 30], ['Albicocche secche', 241, 3.4, 63, 0.5, 30], ['Prugne secche', 240, 2.2, 64, 0.4, 30], ['Datteri', 282, 2.5, 75, 0.4, 25, 'dattero'], ['Fichi secchi', 249, 3.3, 64, 0.9, 30], ['Mirtilli rossi essiccati', 325, 0.1, 82, 1.4, 30], ['Cocco rapè', 660, 6.9, 24, 64, 10],
+  /* ---------- carne ---------- */
+  ['Petto di tacchino', 107, 24, 0, 1.2, 150], ['Fesa di tacchino', 107, 24, 0, 1.2, 150], ['Fusi di pollo', 172, 18, 0, 11, 150, 'fuso'], ['Sovracosce di pollo', 190, 17, 0, 13.5, 150], ['Ali di pollo', 205, 18, 0, 15, 100], ['Pollo intero (con pelle)', 215, 18.6, 0, 15, 200], ['Pollo arrosto', 190, 25, 0, 10, 200], ['Pollo alla griglia', 165, 31, 0, 3.6, 150],
+  ['Cotoletta di pollo impanata', 250, 16, 14, 14, 150], ['Nuggets di pollo', 290, 15, 18, 18, 100], ['Hamburger di pollo', 160, 17, 4, 8.5, 100, 'hamburger'], ['Straccetti di pollo', 110, 23, 0, 2, 150], ['Spiedini di pollo', 140, 21, 1, 6, 150],
+  ['Manzo magro (fesa)', 110, 21.8, 0, 2.5, 150], ['Filetto di manzo', 127, 21, 0, 5, 150], ['Bistecca di manzo (costata)', 220, 19, 0, 16, 250], ['Controfiletto (entrecôte)', 190, 21, 0, 12, 200], ['Tagliata di manzo', 160, 26, 0, 6.5, 200], ['Fettine di manzo', 120, 21.5, 0, 3.5, 150], ['Spezzatino di manzo', 160, 20, 0, 9, 150],
+  ['Macinato di manzo magro', 170, 20, 0, 10, 150], ['Macinato misto', 230, 18, 0, 17.5, 150], ['Hamburger di manzo', 230, 18, 0, 17, 100, 'hamburger'], ['Polpette di carne', 230, 15, 9, 15, 150], ['Carpaccio di manzo', 120, 21, 0, 4, 100], ['Bresaola', 151, 32, 0.4, 2, 50], ['Roast beef', 135, 22, 0.5, 5, 80], ['Brasato', 180, 25, 2, 8, 150], ['Bollito di manzo', 200, 27, 0, 10, 150],
+  ['Vitello (fesa)', 92, 20.7, 0, 1, 150], ['Scaloppine di vitello', 130, 21, 3, 4.5, 150], ['Ossobuco', 160, 20, 2, 8, 250], ['Cotoletta alla milanese', 290, 18, 13, 18, 200], ['Vitello tonnato', 210, 21, 2, 13, 150],
+  ['Lonza di maiale', 145, 21, 0, 6.5, 150], ['Filetto di maiale', 120, 21, 0, 4, 150], ['Braciola di maiale', 230, 18, 0, 17.5, 200], ['Costine di maiale', 290, 16, 0, 25, 200], ['Salsiccia di maiale', 300, 15, 1, 26.5, 100, 'salsiccia'], ['Salsiccia di pollo', 170, 16, 3, 10, 100, 'salsiccia'], ['Porchetta', 280, 21, 0, 22, 100], ['Cotechino (cotto)', 340, 17, 2, 30, 100], ['Zampone (cotto)', 300, 18, 2, 25, 100],
+  ['Agnello (cosciotto)', 160, 20, 0, 9, 150], ['Costolette di agnello', 280, 17, 0, 23.5, 150], ['Coniglio', 135, 21, 0, 5.5, 150], ['Cavallo', 108, 21, 0.5, 2.7, 150], ['Anatra (petto)', 200, 19, 0, 13.5, 150], ['Faraona', 130, 23, 0, 4, 150], ['Cinghiale', 120, 21, 0, 3.3, 150], ['Fegato di vitello', 135, 20, 4, 4, 120], ['Trippa', 85, 13, 0, 3.7, 150],
+  ['Würstel di suino', 270, 13, 2, 23, 50, 'würstel'], ['Würstel di pollo', 230, 12, 4, 18, 50, 'würstel'], ['Kebab (carne)', 230, 18, 2, 17, 150], ['Pulled pork', 210, 20, 6, 11, 150], ['Spiedini misti di carne', 220, 20, 1, 15, 150], ['Arrosticini', 230, 20, 0, 16.5, 100],
+  /* ---------- salumi ---------- */
+  ['Prosciutto cotto magro', 115, 20, 1, 3.5, 50], ['Prosciutto crudo di Parma', 230, 26, 0, 14, 50], ['Prosciutto crudo sgrassato', 145, 28, 0, 3.5, 50], ['Speck', 300, 28, 1, 20, 50], ['Salame milano', 425, 26, 1, 35, 30], ['Salame napoli', 410, 24, 1, 35, 30], ['Mortadella', 315, 14.7, 1, 28, 50], ['Coppa', 400, 24, 0, 34, 40],
+  ['Pancetta tesa', 450, 15, 0, 43, 30], ['Pancetta affumicata (cubetti)', 380, 17, 0.5, 34, 50, 'confezione'], ['Guanciale', 655, 6.5, 0, 69, 30], ['Lardo', 890, 2, 0, 98, 10], ['Fesa di tacchino affettata', 100, 19, 2, 1.8, 50], ['Petto di pollo affettato', 95, 19, 1.5, 1.5, 50], ['Culatello', 260, 30, 0, 15, 40], ['Nduja', 500, 12, 2, 50, 20], ['Soppressata', 410, 24, 1, 35, 30],
+  /* ---------- pesce e frutti di mare ---------- */
+  ['Salmone fresco', 208, 20, 0, 13.4, 150], ['Salmone affumicato', 170, 25, 0, 8, 50], ['Trota', 119, 20, 0, 3.5, 150], ['Branzino (spigola)', 97, 18.5, 0, 2.5, 200], ['Orata', 121, 19.7, 0, 3.8, 200], ['Merluzzo', 82, 17, 0, 0.7, 200], ['Baccalà ammollato', 95, 21, 0, 0.8, 150], ['Stoccafisso ammollato', 92, 20.5, 0, 0.8, 150],
+  ['Platessa', 70, 15, 0, 1.5, 200], ['Sogliola', 83, 16.9, 0.8, 1.4, 200], ['Nasello', 71, 17, 0, 0.3, 200], ['Pesce spada', 109, 16.9, 1, 4.2, 150], ['Tonno fresco', 130, 24, 0, 4, 150], ['Sgombro', 170, 17, 0.5, 11, 150], ['Alici fresche', 96, 16.8, 1.5, 2.6, 150], ['Sardine fresche', 129, 20.8, 1.5, 4.5, 150], ['Cernia', 88, 17.5, 0.5, 1.5, 200], ['Rana pescatrice', 76, 15, 0, 1.5, 200], ['Dentice', 100, 20, 0, 2, 200], ['Pesce persico', 85, 18, 0, 1, 200],
+  ['Tonno al naturale (sgocciolato)', 105, 25, 0, 0.6, 80, 'scatoletta'], ['Sgombro in scatola', 200, 19, 0, 14, 90, 'scatoletta'], ['Sardine sott\'olio', 220, 24, 0, 14, 80, 'scatoletta'], ['Alici sott\'olio', 210, 29, 0, 10, 20], ['Salmone in scatola', 160, 21, 0, 8, 90, 'scatoletta'], ['Polpa di granchio (surimi)', 95, 7.6, 15, 0.5, 80, 'confezione'],
+  ['Gamberi', 85, 18, 0.9, 0.9, 150], ['Gamberoni', 90, 19, 1, 1, 150], ['Scampi', 90, 18, 0.5, 1.5, 150], ['Calamari', 92, 15.6, 3, 1.4, 150], ['Calamari fritti', 230, 13, 18, 12, 150], ['Polpo', 82, 15, 1.5, 1, 200], ['Seppie', 79, 16, 0.8, 0.7, 200], ['Cozze', 86, 12, 3.7, 2.2, 200], ['Vongole', 72, 10.2, 2.2, 2.5, 200], ['Ostriche', 70, 10.2, 5, 0.9, 100], ['Capesante', 88, 16.8, 2.4, 0.8, 100],
+  ['Bastoncini di pesce', 210, 13, 18, 9.5, 100, '4 bastoncini'], ['Fritto misto di pesce', 250, 15, 16, 14, 200], ['Frittura di paranza', 260, 15, 12, 17, 200], ['Insalata di mare', 110, 13, 3, 5, 150], ['Sushi nigiri salmone', 165, 7, 26, 3.5, 35, 'pezzo'], ['Sashimi di salmone', 180, 20, 0, 11, 100], ['Uramaki', 175, 5, 28, 5, 30, 'pezzo'], ['Hosomaki', 140, 3.5, 28, 1.2, 20, 'pezzo'], ['Poke salmone e riso', 150, 8, 18, 5, 400, 'bowl'],
+  /* ---------- uova ---------- */
+  ['Uovo sodo', 155, 12.6, 1.1, 10.6, 60, 'uovo'], ['Uovo in camicia', 143, 12.5, 0.7, 9.5, 60, 'uovo'], ['Uovo fritto', 196, 13.6, 0.8, 15, 60, 'uovo'], ['Uova strapazzate', 150, 10, 1.6, 11, 120], ['Frittata', 175, 11, 1.5, 13.5, 150], ['Frittata di verdure', 130, 8.5, 4, 9, 150], ['Omelette al formaggio', 210, 14, 1.5, 16, 150], ['Albumi d\'uovo', 52, 10.9, 0.7, 0.2, 100], ['Tuorlo d\'uovo', 322, 16, 3.6, 26.5, 17, 'tuorlo'],
+  /* ---------- latte e latticini ---------- */
+  ['Latte intero', 64, 3.3, 4.9, 3.6, 200, 'bicchiere'], ['Latte parzialmente scremato', 46, 3.5, 5, 1.6, 200, 'bicchiere'], ['Latte scremato', 34, 3.6, 5.1, 0.1, 200, 'bicchiere'], ['Latte senza lattosio', 46, 3.4, 4.8, 1.5, 200, 'bicchiere'], ['Latte di capra', 69, 3.6, 4.5, 4.1, 200, 'bicchiere'], ['Latte condensato', 320, 8, 54, 8.7, 20],
+  ['Yogurt intero bianco', 66, 3.8, 4.3, 3.9, 125, 'vasetto'], ['Yogurt magro bianco', 43, 4.3, 5.6, 0.1, 125, 'vasetto'], ['Yogurt alla frutta', 95, 3.2, 15, 2.5, 125, 'vasetto'], ['Yogurt greco 0%', 57, 10, 3.6, 0.2, 170, 'vasetto'], ['Yogurt greco intero', 115, 6.5, 4, 8, 150, 'vasetto'], ['Yogurt proteico', 60, 10, 4, 0.2, 150, 'vasetto'], ['Skyr', 63, 11, 4, 0.2, 150, 'vasetto'], ['Kefir', 55, 3.4, 4.5, 2.5, 200, 'bicchiere'],
+  ['Mozzarella di bufala', 288, 16.7, 0.4, 24.4, 125], ['Mozzarella light', 160, 19, 1, 9, 125], ['Fior di latte', 250, 18, 1, 19, 125], ['Burrata', 330, 14, 1, 30, 125], ['Stracciatella', 285, 13, 2, 25, 100], ['Scamorza', 335, 25, 1, 25.6, 50], ['Provola affumicata', 360, 27, 0.5, 28, 50], ['Caciocavallo', 440, 37, 2, 31, 50],
+  ['Parmigiano Reggiano', 392, 33, 0, 28, 10, 'cucchiaio'], ['Grana Padano', 384, 33, 0, 28, 10, 'cucchiaio'], ['Pecorino romano', 387, 28, 0, 30, 10, 'cucchiaio'], ['Pecorino toscano', 400, 26, 0, 32, 40], ['Ricotta di pecora', 157, 9.6, 4.6, 11.5, 100], ['Ricotta light', 98, 10, 4, 4.5, 100], ['Fiocchi di latte', 104, 12, 3, 4.6, 150, 'vasetto'], ['Primo sale', 260, 17, 2, 20.5, 50],
+  ['Stracchino', 300, 18.5, 0, 25, 50], ['Crescenza', 280, 16, 0, 24, 50], ['Squacquerone', 245, 14, 2, 20, 50], ['Robiola', 300, 20, 2, 24, 50], ['Philadelphia (formaggio spalmabile)', 230, 5.4, 4, 21.5, 30], ['Formaggio spalmabile light', 145, 7.5, 5, 11, 30], ['Mascarpone', 455, 4.5, 4.5, 47, 30],
+  ['Gorgonzola', 330, 19, 0, 28, 40], ['Fontina', 375, 25, 1, 30, 40], ['Asiago', 360, 28, 1, 27, 40], ['Emmental', 380, 28.5, 0, 29.7, 40], ['Edamer', 345, 25, 1.4, 27, 40], ['Taleggio', 315, 19, 0.9, 26, 40], ['Brie', 334, 21, 0.5, 28, 40], ['Camembert', 300, 20, 0.5, 24, 40], ['Feta', 265, 14, 4, 21, 40],
+  ['Halloumi', 320, 21, 2.2, 25, 50], ['Cheddar', 400, 25, 1.3, 33, 40], ['Montasio', 380, 26, 1, 30, 40], ['Provolone', 375, 28, 1, 29, 40], ['Sottilette', 280, 14, 5, 22.5, 20, 'fetta'], ['Sottilette light', 190, 20, 5, 10, 20, 'fetta'], ['Formaggino', 230, 9, 6, 19, 20, 'formaggino'], ['Paneer', 300, 18, 3.5, 23, 50],
+  ['Panna da cucina', 200, 2.5, 4, 19, 25], ['Panna fresca', 337, 2.3, 3.4, 35, 25], ['Panna montata', 260, 2, 13, 22, 20, 'ciuffo'], ['Panna vegetale da cucina', 170, 1, 6, 16, 25], ['Burro chiarificato (ghee)', 900, 0, 0, 99.8, 10, 'cucchiaio'], ['Margarina', 720, 0.2, 0.6, 80, 10, 'cucchiaio'],
+  /* ---------- alternative vegetali e proteine ---------- */
+  ['Bevanda di soia', 40, 3.3, 2.5, 1.8, 200, 'bicchiere'], ['Bevanda di mandorla', 24, 0.5, 3, 1.1, 200, 'bicchiere'], ['Bevanda di avena', 45, 1, 6.5, 1.5, 200, 'bicchiere'], ['Bevanda di riso', 50, 0.1, 10, 1, 200, 'bicchiere'], ['Bevanda di cocco', 20, 0.1, 2.7, 0.9, 200, 'bicchiere'], ['Yogurt di soia', 50, 4, 2.5, 2.2, 125, 'vasetto'], ['Yogurt di cocco', 95, 0.5, 9, 6.5, 125, 'vasetto'],
+  ['Tofu', 76, 8, 1.9, 4.8, 100], ['Tofu affumicato', 145, 16, 1.5, 8.5, 100], ['Tempeh', 192, 20, 7.6, 10.8, 100], ['Seitan', 120, 21, 4, 2, 100], ['Burger vegetale', 210, 17, 6, 13, 100, 'burger'], ['Polpette vegetali', 200, 12, 15, 10, 120], ['Muscolo di grano', 160, 26, 7, 3, 100], ['Proteine della soia (granulare)', 330, 50, 30, 1, 30],
+  ['Proteine whey in polvere', 380, 78, 6, 5.5, 30, 'misurino'], ['Proteine vegetali in polvere', 380, 75, 8, 6, 30, 'misurino'], ['Barretta proteica', 360, 33, 33, 12, 60, 'barretta'], ['Budino proteico', 75, 10, 6, 1.5, 200, 'vasetto'], ['Creatina', 0, 0, 0, 0, 5, 'misurino'],
+  /* ---------- oli, grassi, condimenti, salse ---------- */
+  ['Olio di semi di girasole', 899, 0, 0, 99.9, 10, 'cucchiaio'], ['Olio di semi di arachide', 899, 0, 0, 99.9, 10, 'cucchiaio'], ['Olio di cocco', 892, 0, 0, 99, 10, 'cucchiaio'], ['Olio di sesamo', 884, 0, 0, 100, 10, 'cucchiaio'], ['Strutto', 891, 0, 0, 99, 10],
+  ['Maionese', 680, 1, 2, 75, 15, 'cucchiaio'], ['Maionese light', 300, 1, 9, 29, 15, 'cucchiaio'], ['Ketchup', 110, 1.2, 25, 0.2, 15, 'cucchiaio'], ['Senape', 66, 4.4, 5.3, 4, 10, 'cucchiaino'], ['Salsa barbecue', 170, 1, 40, 0.5, 15, 'cucchiaio'], ['Salsa rosa', 450, 1.5, 9, 45, 15, 'cucchiaio'], ['Salsa tartara', 400, 1, 8, 41, 15, 'cucchiaio'],
+  ['Salsa di soia', 53, 8, 4.9, 0.6, 10, 'cucchiaio'], ['Salsa teriyaki', 89, 5.9, 16, 0, 15, 'cucchiaio'], ['Salsa sriracha', 93, 2, 19, 1, 5], ['Tabasco', 12, 1.3, 0.8, 0.8, 2], ['Aceto balsamico', 88, 0.5, 17, 0, 10, 'cucchiaio'], ['Glassa di aceto balsamico', 260, 0.5, 60, 0, 10, 'cucchiaio'], ['Aceto di vino', 4, 0, 0.3, 0, 10, 'cucchiaio'],
+  ['Pesto alla genovese', 520, 5.5, 5, 52, 30], ['Pesto rosso', 390, 5, 10, 37, 30], ['Pesto di pistacchio', 560, 10, 6, 55, 30], ['Ragù alla bolognese', 140, 8, 5, 10, 100], ['Sugo al pomodoro', 50, 1.5, 6, 2.2, 100], ['Sugo all\'arrabbiata', 65, 1.5, 6, 4, 100], ['Sugo ai funghi', 70, 2, 4, 5, 100], ['Besciamella', 135, 4, 10, 9, 50], ['Salsa guacamole', 155, 2, 8.5, 13.5, 50], ['Salsa yogurt (tzatziki)', 95, 4, 4, 7, 50], ['Pesto di basilico senza aglio', 500, 5, 6, 50, 30],
+  ['Brodo vegetale', 6, 0.3, 0.8, 0.2, 250, 'tazza'], ['Brodo di carne', 15, 1.5, 0.5, 0.8, 250, 'tazza'], ['Dado da brodo', 250, 10, 15, 17, 10, 'dado'], ['Sale', 0, 0, 0, 0, 1, 'pizzico'], ['Lievito di birra', 107, 12, 3.6, 0.4, 25, 'cubetto'], ['Gelatina in fogli', 340, 85, 0, 0.1, 2, 'foglio'],
+  /* ---------- dolci e dessert ---------- */
+  ['Tiramisù', 300, 6, 30, 17, 120], ['Panna cotta', 250, 3, 25, 15, 120], ['Cheesecake', 320, 5.5, 26, 22, 120], ['Torta al cioccolato', 400, 5.5, 50, 20, 80], ['Torta della nonna', 370, 7, 45, 18, 100], ['Crostata di frutta', 300, 4, 45, 12, 100], ['Crostata alla marmellata', 380, 5, 60, 14, 100], ['Ciambellone', 380, 6, 55, 15, 80], ['Torta di mele', 280, 4, 40, 11.5, 100], ['Torta caprese', 470, 9, 40, 31, 80],
+  ['Cannolo siciliano', 370, 7, 38, 21, 100, 'cannolo'], ['Sfogliatella', 370, 7, 45, 18, 100, 'sfogliatella'], ['Babà', 300, 4.5, 50, 9, 80, 'babà'], ['Cassata siciliana', 380, 6, 52, 16, 120], ['Profiteroles', 330, 5.5, 30, 21, 120], ['Bignè alla crema', 290, 6, 30, 16, 30, 'bignè'], ['Pastiera', 330, 7, 43, 14, 120], ['Zeppole di San Giuseppe', 350, 6, 38, 19, 90, 'zeppola'], ['Cannoli alla crema', 380, 6, 40, 22, 60],
+  ['Gelato alla crema', 210, 4, 25, 11, 100, 'coppetta'], ['Gelato al cioccolato', 220, 4, 27, 11, 100, 'coppetta'], ['Gelato alla frutta', 140, 0.8, 32, 1, 100, 'coppetta'], ['Gelato confezionato (cono)', 260, 3.5, 32, 13, 75, 'cono'], ['Ghiacciolo', 75, 0, 19, 0, 60, 'ghiacciolo'], ['Granita al limone', 85, 0.1, 22, 0, 200, 'bicchiere'], ['Sorbetto', 120, 0.3, 30, 0.1, 100, 'coppetta'], ['Semifreddo', 300, 5, 30, 18, 100], ['Affogato al caffè', 180, 3.5, 21, 9, 120],
+  ['Budino al cioccolato', 130, 3.2, 21, 3.5, 125, 'vasetto'], ['Budino alla vaniglia', 120, 3, 20, 3, 125, 'vasetto'], ['Crème brûlée', 300, 4.5, 23, 21, 120], ['Mousse al cioccolato', 290, 5.5, 25, 19, 100], ['Crema pasticcera', 160, 4.5, 21, 6.5, 50], ['Macedonia con gelato', 120, 1.5, 22, 3.5, 200],
+  ['Cioccolato fondente 70%', 580, 8, 33, 43, 20, 'quadretti'], ['Cioccolato fondente 85%', 600, 11, 17, 52, 20, 'quadretti'], ['Cioccolato al latte', 545, 7.6, 57, 31, 20, 'quadretti'], ['Cioccolato bianco', 550, 6, 59, 32, 20, 'quadretti'], ['Cioccolatino', 520, 6, 55, 30, 12, 'cioccolatino'], ['Barretta di cioccolato con caramello', 470, 4.5, 64, 22, 50, 'barretta'], ['Barretta al cioccolato e nocciole', 520, 7, 55, 30, 40, 'barretta'], ['Ovetto di cioccolato', 560, 8, 52, 35, 20, 'ovetto'],
+  ['Caramelle', 390, 0, 97, 0.2, 5, 'caramella'], ['Caramelle gommose', 340, 6.5, 77, 0.2, 25, 'manciata'], ['Liquirizia', 375, 3.5, 82, 0.5, 10], ['Chewing gum senza zucchero', 200, 0, 60, 0, 2, 'gomma'], ['Marshmallow', 320, 2, 81, 0.2, 7, 'marshmallow'], ['Torrone', 450, 10, 60, 19, 30, 'pezzo'], ['Croccante di mandorle', 500, 9, 58, 26, 30],
+  /* ---------- snack salati ---------- */
+  ['Patatine in busta', 535, 6.5, 52, 33, 25, 'pacchetto'], ['Patatine al forno', 450, 6, 70, 15, 25, 'pacchetto'], ['Popcorn salati', 500, 9, 58, 26, 30], ['Popcorn al microonde', 480, 8, 55, 25, 30], ['Tortilla chips (nachos)', 490, 7, 63, 23, 30], ['Salatini', 480, 9, 63, 21, 30], ['Pop chips', 410, 6, 72, 11, 23, 'pacchetto'],
+  ['Barretta ai cereali', 400, 6, 70, 10, 25, 'barretta'], ['Barretta di frutta secca', 500, 13, 40, 32, 35, 'barretta'], ['Gallette di riso al cioccolato', 490, 6.5, 62, 23, 17, 'galletta'], ['Pretzel', 380, 10, 79, 3, 30], ['Chips di verdure', 500, 5, 50, 31, 25],
+  /* ---------- bevande ---------- */
+  ['Acqua naturale', 0, 0, 0, 0, 500, 'bottiglietta'], ['Acqua frizzante', 0, 0, 0, 0, 500, 'bottiglietta'], ['Caffè americano', 2, 0.1, 0, 0, 200, 'tazza'], ['Caffè macchiato', 15, 0.8, 1, 0.8, 40, 'tazzina'], ['Caffè d\'orzo', 5, 0.2, 1, 0, 100, 'tazzina'], ['Ginseng (caffè)', 60, 1, 10, 2, 60, 'tazzina'], ['Marocchino', 90, 2.5, 8, 5, 60, 'tazzina'],
+  ['Latte macchiato', 55, 3, 4.5, 2.5, 250, 'bicchiere'], ['Cappuccino con latte vegetale', 40, 1.8, 4, 1.8, 150, 'tazza'], ['Frappuccino', 80, 1.5, 14, 2, 350, 'bicchiere'], ['Tè freddo al limone', 32, 0, 8, 0, 330, 'lattina'], ['Tè verde', 1, 0, 0, 0, 250, 'tazza'], ['Tisana', 1, 0, 0.2, 0, 250, 'tazza'],
+  ['Aranciata', 40, 0, 10, 0, 330, 'lattina'], ['Gassosa', 38, 0, 9.5, 0, 330, 'lattina'], ['Chinotto', 45, 0, 11, 0, 330, 'lattina'], ['Ginger beer', 40, 0, 10, 0, 330, 'lattina'], ['Acqua tonica', 34, 0, 8.6, 0, 200, 'bottiglietta'], ['Energy drink', 45, 0, 11, 0, 250, 'lattina'], ['Energy drink zero', 3, 0, 0.5, 0, 250, 'lattina'], ['Sport drink (isotonico)', 25, 0, 6, 0, 500, 'bottiglia'],
+  ['Succo di mela', 46, 0.1, 11, 0.1, 200, 'bicchiere'], ['Succo di pera', 50, 0.2, 12, 0.1, 200, 'bicchiere'], ['Succo di pesca', 50, 0.3, 12, 0.1, 200, 'bicchiere'], ['Succo di mirtillo', 46, 0.1, 12, 0.1, 200, 'bicchiere'], ['Succo d\'arancia (confezionato)', 45, 0.7, 10, 0.2, 200, 'bicchiere'], ['Acqua di cocco', 19, 0.7, 3.7, 0.2, 330, 'bottiglietta'], ['Kombucha', 18, 0, 4, 0, 330, 'bottiglietta'],
+  ['Birra chiara', 43, 0.5, 3.6, 0, 330, 'bottiglia'], ['Birra media alla spina', 43, 0.5, 3.6, 0, 400, 'media'], ['Birra rossa', 60, 0.6, 4.5, 0, 330, 'bottiglia'], ['Birra analcolica', 22, 0.3, 5, 0, 330, 'bottiglia'], ['Birra artigianale IPA', 60, 0.6, 4.8, 0, 330, 'bottiglia'], ['Prosecco', 75, 0.1, 1.5, 0, 125, 'calice'], ['Champagne', 80, 0.1, 1.2, 0, 125, 'calice'], ['Vino rosé', 80, 0.1, 2.5, 0, 125, 'calice'], ['Vino dolce (passito)', 160, 0.2, 14, 0, 75, 'bicchierino'],
+  ['Aperol spritz', 120, 0, 12, 0, 200, 'bicchiere'], ['Campari spritz', 125, 0, 12, 0, 200, 'bicchiere'], ['Hugo', 115, 0, 11, 0, 200, 'bicchiere'], ['Negroni', 250, 0, 15, 0, 90, 'bicchiere'], ['Gin tonic', 90, 0, 7, 0, 200, 'bicchiere'], ['Mojito', 110, 0, 13, 0, 200, 'bicchiere'], ['Moscow mule', 110, 0, 11, 0, 200, 'bicchiere'], ['Cuba libre', 110, 0, 11, 0, 200, 'bicchiere'], ['Sangria', 90, 0.1, 10, 0, 200, 'bicchiere'],
+  ['Amaro', 280, 0, 30, 0, 30, 'bicchierino'], ['Limoncello', 290, 0, 35, 0, 30, 'bicchierino'], ['Grappa', 230, 0, 0, 0, 30, 'bicchierino'], ['Vodka', 231, 0, 0, 0, 40, 'shot'], ['Whisky', 250, 0, 0, 0, 40, 'bicchierino'], ['Rum', 231, 0, 0, 0, 40, 'shot'], ['Sambuca', 340, 0, 40, 0, 30, 'bicchierino'], ['Baileys', 330, 3, 25, 16, 50, 'bicchiere'],
+  /* ---------- primi piatti ---------- */
+  ['Spaghetti aglio, olio e peperoncino', 220, 6, 34, 7, 250], ['Spaghetti alle vongole', 170, 8, 26, 4, 300], ['Spaghetti allo scoglio', 160, 9, 23, 4, 350], ['Spaghetti cacio e pepe', 250, 10, 30, 10, 280], ['Bucatini all\'amatriciana', 210, 8, 25, 9, 300], ['Pasta alla gricia', 260, 10, 27, 12.5, 280], ['Pasta alla norma', 160, 5, 22, 6, 320],
+  ['Pasta alla puttanesca', 165, 5, 24, 5.5, 300], ['Penne all\'arrabbiata', 150, 4.5, 25, 3.5, 300], ['Pasta al tonno', 175, 9, 24, 5, 300], ['Pasta e zucchine', 150, 5, 23, 4.5, 300], ['Pasta con broccoli', 150, 5.5, 23, 4, 300], ['Pasta ai funghi', 160, 5, 24, 5, 300], ['Pasta al salmone', 190, 9, 23, 7, 300], ['Pasta panna e prosciutto', 230, 9, 24, 11, 300],
+  ['Pasta zucca e salsiccia', 195, 8, 24, 7.5, 300], ['Pasta e ceci', 130, 6, 20, 3, 350], ['Pasta e lenticchie', 125, 6, 20, 2.5, 350], ['Pasta e patate', 135, 4, 23, 3, 350], ['Pasta al forno', 190, 9, 21, 8, 300], ['Pasta fredda (insalata di pasta)', 180, 6, 24, 7, 300], ['Orecchiette alle cime di rapa', 165, 5.5, 23, 5.5, 300], ['Trofie al pesto', 220, 6, 28, 9.5, 300],
+  ['Tagliatelle al ragù', 180, 8, 23, 6, 300], ['Lasagne al pesto', 190, 8, 18, 9.5, 300], ['Cannelloni ricotta e spinaci', 165, 8, 15, 8, 300], ['Tortellini in brodo', 85, 4, 10, 3, 400], ['Tortellini panna e prosciutto', 250, 10, 25, 12, 300], ['Ravioli burro e salvia', 260, 9, 30, 12, 250], ['Gnocchi al pomodoro', 130, 3.5, 25, 2, 300], ['Gnocchi alla sorrentina', 160, 6, 24, 4.5, 300], ['Gnocchi al gorgonzola', 210, 6, 25, 9.5, 300],
+  ['Risotto alla milanese', 165, 4, 24, 5.5, 300], ['Risotto ai funghi', 150, 4, 23, 4.5, 300], ['Risotto alla pescatora', 140, 7, 21, 3.5, 330], ['Risotto alla zucca', 140, 3.5, 23, 4, 300], ['Risotto agli asparagi', 145, 4, 23, 4, 300], ['Riso in bianco', 160, 3, 28, 4, 250], ['Riso alla cantonese', 165, 5, 25, 5, 300], ['Paella', 155, 9, 18, 5, 350],
+  ['Minestrone', 50, 2, 7, 1.5, 350, 'piatto'], ['Minestra di verdure', 45, 1.8, 7, 1, 350, 'piatto'], ['Zuppa di legumi', 90, 5, 12, 2, 350, 'piatto'], ['Pasta e fagioli (fatta in casa)', 120, 6, 18, 2.5, 350], ['Ribollita', 90, 4, 12, 3, 350], ['Vellutata di zucca', 50, 1, 7, 2, 300, 'piatto'], ['Vellutata di verdure', 45, 1.5, 6, 1.8, 300, 'piatto'], ['Passato di verdure', 40, 1.8, 6, 1, 300, 'piatto'], ['Zuppa di pesce', 95, 11, 4, 3.5, 400, 'piatto'], ['Stracciatella in brodo', 60, 5, 1, 4, 300],
+  /* ---------- secondi, contorni, piatti unici ---------- */
+  ['Petto di pollo al limone', 140, 23, 2, 4.5, 180], ['Pollo al curry', 150, 15, 4, 8, 250], ['Pollo con peperoni', 120, 14, 4, 5.5, 250], ['Pollo arrosto con patate', 175, 14, 12, 8, 350], ['Arrosto di vitello', 150, 24, 1, 5.5, 150], ['Polpette al sugo', 180, 12, 8, 11, 200], ['Polpettone', 210, 15, 7, 13.5, 180], ['Involtini di carne', 210, 20, 3, 13, 150], ['Saltimbocca alla romana', 210, 21, 2, 13, 150],
+  ['Spezzatino con patate', 140, 12, 8, 6.5, 300], ['Bollito misto', 210, 24, 0, 12, 200], ['Stinco di maiale', 240, 22, 0, 17, 300], ['Grigliata mista di carne', 260, 24, 0, 18, 250], ['Bistecca alla fiorentina', 235, 22, 0, 16, 400], ['Cotoletta di tacchino', 220, 18, 14, 10, 150], ['Scaloppine al limone', 150, 20, 4, 6, 150], ['Spezzatino di seitan', 140, 16, 6, 6, 200],
+  ['Salmone al forno', 200, 22, 0, 12, 150], ['Pesce al cartoccio', 110, 18, 1, 4, 200], ['Orata al forno', 135, 20, 1, 5.5, 250], ['Merluzzo in umido', 100, 15, 3, 3, 200], ['Baccalà alla vicentina', 190, 20, 3, 11, 200], ['Polpo e patate', 120, 12, 9, 4, 250], ['Calamari ripieni', 160, 15, 8, 7, 200], ['Gamberi in padella', 120, 19, 1.5, 4.5, 150], ['Cozze alla marinara', 100, 12, 4, 4, 300], ['Seppie con piselli', 110, 14, 5, 3.5, 250],
+  ['Melanzane alla parmigiana (leggera)', 140, 7, 9, 8.5, 250], ['Polpette di melanzane', 240, 8, 20, 14, 150], ['Peperoni ripieni', 140, 7, 10, 8, 250], ['Zucchine ripiene', 120, 8, 6, 7, 250], ['Pomodori al riso', 120, 2.5, 18, 4, 250], ['Torta salata ricotta e spinaci', 260, 9, 20, 16, 150], ['Quiche lorraine', 300, 11, 18, 21, 150], ['Sformato di verdure', 150, 7, 8, 10, 150], ['Flan di zucchine', 130, 7, 5, 9, 120],
+  ['Insalata caprese', 200, 12, 3, 16, 250], ['Insalata greca', 110, 4, 5, 8.5, 250], ['Insalata Caesar', 160, 10, 7, 10.5, 300], ['Insalata di pollo', 120, 12, 4, 6, 300], ['Insalata di farro', 150, 5, 21, 5, 300], ['Insalata di riso (fatta in casa)', 160, 6, 22, 5.5, 300], ['Insalata nizzarda', 120, 9, 6, 7, 300], ['Panzanella', 120, 3, 17, 4.5, 250], ['Cous cous di verdure', 140, 4, 22, 4, 300],
+  ['Spinaci al burro', 90, 3, 3, 7.5, 150], ['Cicoria ripassata', 80, 2, 3, 6.5, 150], ['Broccoli ripassati', 85, 3, 4, 6, 150], ['Fagiolini in umido', 60, 2, 5, 3.5, 150], ['Carote al vapore', 35, 0.8, 7, 0.2, 150], ['Zucchine trifolate', 60, 1.5, 2.5, 5, 150], ['Cavolfiore gratinato', 120, 6, 7, 7.5, 150], ['Patate e zucchine al forno', 110, 2, 13, 5.5, 200], ['Verdure saltate in padella', 70, 2, 6, 4, 200],
+  /* ---------- pizze e rosticceria ---------- */
+  ['Pizza marinara', 210, 5.5, 36, 4.5, 330, 'pizza'], ['Pizza diavola', 270, 11, 33, 10, 350, 'pizza'], ['Pizza capricciosa', 255, 11, 31, 9, 380, 'pizza'], ['Pizza quattro formaggi', 290, 13, 30, 13, 350, 'pizza'], ['Pizza prosciutto e funghi', 240, 11, 31, 8, 370, 'pizza'], ['Pizza tonno e cipolla', 250, 12, 31, 8.5, 360, 'pizza'], ['Pizza alle verdure', 220, 8, 32, 6.5, 380, 'pizza'], ['Pizza bufala', 260, 11, 32, 9.5, 350, 'pizza'],
+  ['Pizza wurstel e patatine', 290, 9, 35, 12, 380, 'pizza'], ['Pizza integrale margherita', 235, 10, 31, 7.5, 330, 'pizza'], ['Pizza al taglio margherita', 260, 9, 35, 9, 120, 'trancio'], ['Pizza al taglio patate', 250, 6, 38, 8, 120, 'trancio'], ['Pizzetta rossa', 300, 7, 41, 12, 60, 'pizzetta'], ['Pizza fritta', 310, 9, 36, 14, 250, 'pizza'], ['Calzone', 260, 11, 30, 10.5, 330, 'calzone'], ['Panzerotto', 290, 10, 32, 13, 150, 'panzerotto'],
+  ['Crocchè di patate', 230, 4.5, 23, 13.5, 60, 'crocchè'], ['Frittatina di pasta', 300, 10, 28, 16, 150, 'frittatina'], ['Olive ascolane', 300, 9, 18, 21, 15, 'oliva'], ['Mozzarella in carrozza', 290, 12, 25, 16, 120, 'pezzo'], ['Sfincione', 240, 7, 34, 8.5, 150, 'trancio'], ['Focaccia barese', 260, 6, 38, 9.5, 150, 'trancio'], ['Pizza rossa al taglio', 230, 6, 36, 7, 120, 'trancio'],
+  ['Piadina vuota', 330, 8, 50, 10.5, 110, 'piadina'], ['Piadina prosciutto e mozzarella', 290, 14, 30, 13, 220, 'piadina'], ['Crescia (cresciolina)', 330, 8, 48, 11, 110], ['Tigelle', 320, 8, 52, 9, 35, 'tigella'], ['Gnocco fritto', 400, 8, 45, 21, 30, 'pezzo'], ['Borek', 320, 9, 30, 18, 120],
+  /* ---------- panini, fast food, takeaway ---------- */
+  ['Panino con cotoletta', 280, 13, 30, 12, 220, 'panino'], ['Panino con salame', 340, 13, 33, 17, 150, 'panino'], ['Panino con porchetta', 300, 15, 30, 14, 200, 'panino'], ['Panino con bresaola e rucola', 230, 17, 30, 4.5, 170, 'panino'], ['Panino vegetariano', 220, 7, 30, 8, 200, 'panino'], ['Panino con tonno', 260, 13, 30, 9.5, 180, 'panino'], ['Club sandwich', 250, 13, 22, 12, 250, 'sandwich'],
+  ['Cheeseburger da fast food', 265, 14, 27, 11.5, 120, 'panino'], ['Big burger doppio', 255, 13, 20, 13.5, 220, 'panino'], ['Chicken burger da fast food', 245, 12, 26, 10.5, 200, 'panino'], ['Crispy chicken wrap', 250, 11, 26, 11, 220, 'wrap'], ['Alette di pollo fritte', 290, 21, 9, 19, 150], ['Patatine fritte piccole (fast food)', 320, 3.5, 41, 15.5, 80, 'porzione'], ['Patatine fritte medie (fast food)', 320, 3.5, 41, 15.5, 115, 'porzione'], ['Patatine fritte grandi (fast food)', 320, 3.5, 41, 15.5, 150, 'porzione'],
+  ['Milkshake', 110, 3.3, 18, 3, 350, 'bicchiere'], ['Gelato soft (fast food)', 175, 4.5, 28, 5, 150, 'coppetta'], ['Hot dog', 290, 10, 24, 17, 150, 'hot dog'], ['Piadina kebab', 240, 12, 23, 11, 350, 'piadina'], ['Kebab in pita', 220, 11, 22, 9.5, 350, 'kebab'], ['Gyros', 220, 12, 20, 10, 350, 'porzione'], ['Shawarma di pollo', 200, 13, 20, 7.5, 350, 'porzione'],
+  ['Burrito', 200, 9, 25, 7, 300, 'burrito'], ['Tacos', 210, 9, 20, 10, 120, 'taco'], ['Quesadilla', 290, 13, 26, 15, 200], ['Nachos con formaggio', 340, 9, 36, 18, 150], ['Chili con carne', 130, 10, 9, 6, 300], ['Pad thai', 170, 8, 22, 6, 350], ['Pollo fritto all\'americana', 260, 20, 9, 16, 200], ['Fish and chips', 230, 11, 22, 11, 350],
+  ['Involtini primavera', 220, 5, 26, 11, 60, 'involtino'], ['Ravioli al vapore cinesi', 190, 8, 23, 7, 30, 'raviolo'], ['Gyoza', 210, 8, 22, 10, 25, 'gyoza'], ['Pollo alle mandorle', 180, 15, 9, 9.5, 250], ['Maiale in agrodolce', 230, 11, 22, 11, 250], ['Spaghetti di riso con verdure', 140, 3, 25, 3, 300], ['Riso fritto', 175, 5, 27, 5.5, 300], ['Edamame salati', 125, 11, 9, 5, 150],
+  ['Ramen (piatto)', 90, 5, 11, 3, 600, 'ciotola'], ['Curry indiano con riso', 150, 7, 19, 5, 400], ['Pollo tikka masala', 150, 12, 6, 9, 300], ['Naan', 290, 9, 50, 5.5, 90, 'naan'], ['Dal di lenticchie', 110, 6, 15, 3, 300], ['Bibimbap', 130, 6, 18, 4, 450, 'ciotola'], ['Moussaka', 170, 8, 9, 11, 300], ['Couscous con carne', 170, 9, 20, 6, 350], ['Tajine di pollo', 140, 13, 8, 6.5, 350],
+  /* ---------- verdure cotte e conservate ---------- */
+  ['Zucchine grigliate', 40, 1.5, 2, 2.8, 150], ['Zucchine lesse', 15, 1.2, 1.4, 0.1, 200], ['Spinaci lessi', 23, 3, 1.4, 0.6, 150], ['Broccoli lessi', 35, 2.4, 4, 0.4, 200], ['Cavolfiore lesso', 23, 1.8, 4, 0.5, 200], ['Fagiolini lessi', 30, 1.9, 6, 0.1, 150], ['Carote lesse', 35, 0.8, 8, 0.2, 150], ['Bietole lesse', 20, 1.9, 3, 0.1, 200],
+  ['Asparagi lessi', 22, 2.4, 4, 0.2, 150], ['Carciofi lessi', 47, 2.9, 10, 0.3, 150], ['Carciofi alla romana', 110, 3, 9, 7, 150], ['Melanzane fritte', 280, 1.5, 7, 28, 100], ['Zucchine fritte', 230, 2, 10, 20, 100], ['Fiori di zucca fritti', 250, 6, 20, 16, 100], ['Peperoni arrostiti', 40, 1, 7, 1, 150], ['Cipolle caramellate', 120, 1.2, 18, 5, 50],
+  ['Funghi sott\'olio', 110, 2, 3, 10, 50], ['Pomodori secchi sott\'olio', 210, 5, 23, 14, 30], ['Melanzane sott\'olio', 230, 1, 5, 23, 50], ['Peperoncini ripieni', 280, 5, 6, 26, 30], ['Cetriolini sottaceto', 12, 0.5, 2, 0.2, 30], ['Crauti', 19, 0.9, 4.3, 0.1, 100], ['Kimchi', 23, 1.5, 4, 0.5, 50],
+  ['Cavolo nero saltato', 85, 4, 7, 5, 150], ['Erbette', 20, 2, 2.5, 0.3, 200], ['Catalogna', 20, 1.6, 2.4, 0.3, 200], ['Friarielli', 30, 2.8, 3, 0.5, 200], ['Agretti', 18, 1.8, 2.5, 0.1, 150], ['Puntarelle', 20, 1.5, 3, 0.3, 150], ['Cicoria', 20, 1.5, 3.4, 0.3, 150], ['Pak choi', 13, 1.5, 2.2, 0.2, 150], ['Mais (pannocchia)', 86, 3.3, 19, 1.4, 150, 'pannocchia'],
+  ['Zenzero fresco', 80, 1.8, 18, 0.8, 5], ['Basilico', 23, 3, 2.7, 0.6, 5], ['Prezzemolo', 36, 3, 6.3, 0.8, 5], ['Peperoncino fresco', 40, 1.9, 9, 0.4, 5], ['Alga nori', 35, 6, 5, 0.3, 3, 'foglio'], ['Alghe wakame', 45, 3, 9, 0.6, 20],
+  /* ---------- frutta in più ---------- */
+  ['Mela cotta', 60, 0.3, 15, 0.2, 180], ['Pera cotta', 65, 0.3, 16, 0.1, 180], ['Banana matura', 95, 1.1, 24, 0.3, 120, 'banana'], ['Ananas sciroppato', 60, 0.4, 15, 0.1, 100], ['Pesche sciroppate', 65, 0.5, 16, 0.1, 150], ['Fragole con zucchero', 55, 0.7, 13, 0.3, 150], ['Mirtilli surgelati', 51, 0.4, 12, 0.6, 100], ['Frutti di bosco surgelati', 45, 1, 9, 0.4, 100],
+  ['Uva sultanina', 299, 3.1, 79, 0.5, 30], ['Ananas essiccato', 330, 1.5, 80, 0.5, 30], ['Mango essiccato', 320, 2.5, 78, 1, 30], ['Banana chips', 520, 2.3, 58, 34, 30], ['Bacche di goji', 350, 14, 65, 0.4, 15], ['Pompelmo rosa', 42, 0.8, 10.7, 0.1, 250, 'pompelmo'], ['Cedro', 25, 0.9, 5, 0.3, 50], ['Kumquat', 71, 1.9, 16, 0.9, 20], ['Physalis', 53, 1.9, 11, 0.7, 50], ['Pitaya (frutto del drago)', 60, 1.2, 13, 0, 150], ['Carambola', 31, 1, 6.7, 0.3, 100], ['Guava', 68, 2.6, 14, 1, 100],
+  /* ---------- carne e pesce cotti ---------- */
+  ['Petto di pollo lesso', 150, 29, 0, 3.5, 150], ['Petto di pollo al forno', 165, 31, 0, 3.6, 150], ['Petto di tacchino ai ferri', 135, 29, 0, 1.5, 150], ['Manzo ai ferri', 170, 29, 0, 6, 150], ['Hamburger di manzo cotto', 250, 26, 0, 16, 90, 'hamburger'], ['Lonza di maiale ai ferri', 170, 28, 0, 6, 150], ['Salsiccia ai ferri', 320, 19, 1, 27, 90, 'salsiccia'], ['Coniglio alla cacciatora', 170, 22, 3, 8, 200],
+  ['Pollo alla cacciatora', 160, 18, 4, 8, 250], ['Pollo al forno con pelle', 230, 27, 0, 13.5, 200], ['Cosce di pollo al forno', 210, 26, 0, 11, 150], ['Agnello al forno', 260, 25, 0, 17.5, 150], ['Arrosto di maiale', 200, 28, 0, 9.5, 150], ['Fegato alla veneziana', 160, 20, 6, 6.5, 150], ['Trippa alla romana', 120, 13, 4, 6, 250], ['Coda alla vaccinara', 220, 18, 4, 15, 250],
+  ['Salmone ai ferri', 210, 25, 0, 12, 150], ['Tonno ai ferri', 165, 29, 0, 5, 150], ['Pesce spada ai ferri', 150, 23, 0, 6, 150], ['Merluzzo al forno', 105, 23, 0, 0.9, 200], ['Branzino al forno', 125, 23, 0, 3.5, 200], ['Gamberi lessi', 99, 21, 0, 1.1, 150], ['Polpo lesso', 164, 30, 4, 2, 150], ['Seppie ai ferri', 110, 20, 1.5, 1.5, 150], ['Sarde a beccafico', 260, 16, 12, 17, 150], ['Alici marinate', 130, 18, 1, 6, 100],
+  ['Filetti di platessa impanati', 200, 12, 17, 9.5, 120], ['Cotoletta di pesce', 220, 12, 18, 11, 120], ['Burger di salmone', 170, 17, 3, 10, 100, 'burger'], ['Bocconcini di pollo surgelati', 260, 14, 16, 16, 100], ['Polpette di pesce', 190, 12, 14, 9.5, 120],
+  /* ---------- formaggi e latticini in più ---------- */
+  ['Ricotta vaccina intera', 146, 8.8, 3.5, 10.9, 100], ['Ricotta salata', 260, 20, 1, 19, 30], ['Ricotta di bufala', 220, 10, 3, 19, 100], ['Mozzarella fiordilatte light', 165, 20, 1, 9, 125], ['Bocconcini di mozzarella', 250, 18, 1, 19, 50], ['Ciliegine di mozzarella', 250, 18, 1, 19, 50], ['Treccia', 260, 18, 1, 20, 100], ['Mozzarella per pizza', 290, 22, 2, 22, 50],
+  ['Grana grattugiato', 390, 33, 0, 28, 10, 'cucchiaio'], ['Parmigiano 36 mesi', 400, 34, 0, 29, 20], ['Asiago fresco', 320, 26, 1, 24, 40], ['Bitto', 390, 26, 0, 32, 40], ['Castelmagno', 400, 26, 0, 33, 40], ['Pecorino sardo', 390, 26, 0, 32, 40], ['Caprino fresco', 205, 9.6, 2.2, 18, 50], ['Formaggio di capra stagionato', 360, 22, 1, 30, 40], ['Raschera', 360, 24, 1, 29, 40], ['Toma', 340, 24, 0.5, 27, 40],
+  ['Gruviera', 400, 29, 0, 32, 40], ['Parmigiano light (snack)', 330, 32, 0, 22, 20], ['Mozzarella senza lattosio', 240, 18, 1, 18, 125], ['Yogurt senza lattosio', 60, 3.6, 5, 3, 125, 'vasetto'], ['Latte di soia al cioccolato', 70, 3, 9, 2.2, 200, 'bicchiere'], ['Latte al cacao', 75, 3.2, 10, 2, 200, 'brick'], ['Yogurt da bere', 75, 3, 12, 1.5, 200, 'bottiglietta'], ['Latte fermentato (tipo probiotico)', 70, 2.7, 11, 1.5, 100, 'flaconcino'],
+  ['Dessert al cucchiaio proteico', 80, 10, 6, 2, 200, 'vasetto'], ['Quark magro', 67, 12, 4, 0.2, 150, 'vasetto'], ['Robiola light', 170, 15, 3, 11, 50], ['Formaggio fresco spalmabile di capra', 230, 10, 3, 20, 30],
+  /* ---------- colazione e merende ---------- */
+  ['Fette biscottate al grano duro', 400, 11, 75, 6, 10, 'fetta'], ['Fette biscottate senza glutine', 400, 5, 80, 6, 9, 'fetta'], ['Pane tostato integrale', 290, 12, 50, 4.5, 30, 'fetta'], ['Muesli con frutta secca', 380, 10, 62, 9, 45], ['Porridge d\'avena (con acqua)', 70, 2.5, 12, 1.4, 250, 'ciotola'], ['Overnight oats', 130, 5.5, 18, 4, 250, 'barattolo'], ['Chia pudding', 140, 5, 12, 8, 200, 'vasetto'],
+  ['Pancake proteici', 200, 18, 20, 5, 50, 'pancake'], ['French toast', 230, 8, 26, 10.5, 70, 'fetta'], ['Bowl di yogurt, frutta e granola', 120, 5, 18, 3.5, 300, 'bowl'], ['Açaí bowl', 110, 2, 18, 3.5, 350, 'bowl'], ['Toast con avocado', 220, 6, 22, 12, 120, 'toast'], ['Uova e bacon', 270, 16, 1, 22.5, 150],
+  ['Crostatina', 400, 5, 60, 15, 40, 'crostatina'], ['Torta paradiso', 420, 7, 50, 21, 35, 'merendina'], ['Pan di spagna farcito (merendina)', 400, 5, 54, 18, 30, 'merendina'], ['Ciambellina al cacao', 430, 6, 52, 22, 30, 'merendina'], ['Kinder-style barretta al latte', 560, 8.7, 53, 35, 21, 'barretta'], ['Snack al latte e cacao', 450, 8, 47, 25, 28, 'snack'],
+  ['Biscotti al burro', 500, 6.5, 66, 23, 8, 'biscotto'], ['Biscotti all\'avena', 450, 7, 65, 17, 12, 'biscotto'], ['Biscotti senza zucchero', 420, 8, 66, 14, 8, 'biscotto'], ['Biscotti ripieni al cacao', 470, 5, 70, 19, 11, 'biscotto'], ['Frollini con farina integrale', 450, 8, 66, 17, 10, 'biscotto'], ['Biscotti al miele', 440, 7, 72, 13, 7, 'biscotto'], ['Biscotti di riso soffiato al cioccolato', 470, 7, 65, 20, 12, 'biscotto'],
+  /* ---------- surgelati e piatti pronti ---------- */
+  ['Lasagne surgelate', 150, 7, 14, 7, 350, 'confezione'], ['Pizza surgelata margherita', 240, 9.5, 31, 8.5, 330, 'pizza'], ['Pizza surgelata salame', 260, 10, 30, 11, 330, 'pizza'], ['Sofficini', 250, 7, 30, 11, 50, 'pezzo'], ['Bastoncini di merluzzo al forno', 190, 13, 17, 7.5, 100, '4 bastoncini'], ['Cordon bleu', 250, 12, 18, 14.5, 100, 'pezzo'], ['Crocchette di pollo', 260, 13, 18, 15, 100],
+  ['Risotto pronto surgelato', 130, 3.5, 20, 4, 300], ['Paella surgelata', 140, 6, 20, 4, 350], ['Gnocchi ripieni', 200, 5, 33, 5, 200], ['Zuppa pronta di legumi', 70, 4, 10, 1.5, 300, 'confezione'], ['Vellutata pronta', 45, 1, 6, 2, 300, 'confezione'], ['Insalatona pronta con pollo', 110, 9, 6, 5.5, 250, 'confezione'], ['Poke pronto da supermercato', 150, 8, 19, 4.5, 330, 'confezione'],
+  ['Tramezzino confezionato', 280, 9, 25, 16, 125, 'pacchetto'], ['Panino confezionato', 260, 11, 32, 9.5, 150, 'panino'], ['Piadina confezionata', 300, 8, 49, 8, 60, 'piadina'], ['Hummus confezionato', 280, 7, 13, 22, 50], ['Insalata di cereali pronta', 160, 5, 22, 6, 250],
+  /* ---------- regionali ---------- */
+  ['Arancina al burro', 260, 8, 31, 11.5, 180, 'arancina'], ['Pasta con le sarde', 200, 9, 25, 7, 300], ['Pasta alla carbonara di zucchine', 200, 8, 24, 8, 300], ['Pici cacio e pepe', 260, 10, 32, 10, 280], ['Pizzoccheri', 190, 7, 22, 8.5, 350], ['Canederli', 220, 8, 28, 8.5, 150], ['Polenta e osei', 180, 10, 18, 7.5, 300], ['Polenta concia', 200, 6, 18, 11, 300],
+  ['Bigoli in salsa', 220, 8, 32, 7, 300], ['Vincisgrassi', 220, 11, 18, 12, 300], ['Culurgiones', 230, 8, 33, 7.5, 200], ['Malloreddus alla campidanese', 190, 7, 25, 7, 300], ['Strozzapreti', 280, 9, 56, 1.5, 120], ['Passatelli in brodo', 110, 6, 13, 4, 350], ['Agnolotti del plin', 270, 11, 36, 9, 150], ['Tortelli di zucca', 240, 7, 38, 6.5, 200],
+  ['Bagna càuda', 400, 5, 8, 39, 50], ['Vitel tonné (porzione)', 210, 21, 2, 13, 150], ['Cassoeula', 200, 13, 4, 15, 350], ['Baccalà mantecato', 300, 18, 1, 25, 80], ['Sarde in saor', 210, 13, 10, 13, 120], ['Fegatini (crostini toscani)', 270, 11, 26, 13, 60], ['Lampredotto (panino)', 230, 13, 22, 10, 220, 'panino'], ['Pane e panelle', 330, 9, 42, 14, 200, 'panino'],
+  ['Cuoppo di fritto', 280, 10, 22, 17, 200, 'cuoppo'], ['Taralli napoletani sugna e pepe', 500, 10, 48, 30, 50, 'tarallo'], ['Friselle con pomodoro', 210, 6, 35, 5, 150], ['Burrata con pomodorini', 230, 10, 3, 20, 200], ['Seadas', 400, 9, 36, 25, 100, 'seadas'], ['Pardulas', 320, 10, 38, 14, 60, 'pardula'], ['Struffoli', 420, 6, 55, 20, 60], ['Chiacchiere', 480, 6, 55, 26, 40],
+  ['Castagnole', 430, 6, 50, 23, 50], ['Frittelle', 400, 6, 50, 20, 50], ['Cantucci al vin santo', 340, 7, 50, 10, 60], ['Ricciarelli', 440, 9, 60, 19, 25, 'ricciarello'], ['Panforte', 390, 6, 60, 15, 40], ['Buccellato', 360, 6, 55, 13, 60], ['Bonet', 270, 6, 33, 13, 120], ['Zuppa inglese', 200, 4.5, 28, 8, 150],
+  /* ---------- cucine dal mondo ---------- */
+  ['Pollo teriyaki con riso', 160, 11, 22, 3, 350], ['Sushi misto (porzione)', 150, 6, 26, 2.5, 250, 'porzione'], ['Temaki salmone', 170, 7, 24, 5, 120, 'temaki'], ['Onigiri', 170, 4, 36, 0.5, 110, 'onigiri'], ['Tempura di gamberi', 230, 11, 18, 13, 120], ['Zuppa di miso', 40, 3, 4, 1.2, 250, 'ciotola'], ['Udon (piatto)', 120, 5, 20, 2, 450, 'ciotola'], ['Katsu curry', 180, 9, 22, 6.5, 400],
+  ['Pho', 60, 5, 7, 1.2, 600, 'ciotola'], ['Bao bun con maiale', 240, 9, 30, 9, 90, 'bao'], ['Dim sum (porzione)', 190, 8, 23, 7, 150, 'porzione'], ['Riso basmati con verdure', 140, 3, 26, 2.5, 300], ['Biryani di pollo', 170, 9, 22, 5, 350], ['Samosa', 300, 6, 30, 17, 60, 'samosa'], ['Chapati', 300, 8, 50, 7.5, 40, 'chapati'], ['Palak paneer', 160, 8, 6, 12, 250],
+  ['Tabbouleh', 130, 3, 15, 7, 150], ['Baba ganoush', 140, 2.5, 7, 12, 50], ['Pita con falafel', 240, 8, 30, 10, 250, 'pita'], ['Shakshuka', 110, 6, 6, 7, 300], ['Kofta', 250, 17, 4, 18.5, 150], ['Fajitas di pollo', 160, 13, 12, 7, 300], ['Guacamole con nachos', 300, 4.5, 30, 19, 150], ['Poutine', 230, 6, 25, 12, 350],
+  ['Bagel', 270, 10, 53, 1.7, 100, 'bagel'], ['Bagel con salmone e formaggio', 250, 13, 30, 8.5, 200, 'bagel'], ['Pancake all\'americana con sciroppo', 250, 5, 40, 8, 150], ['Brownie', 450, 5.5, 55, 24, 60, 'brownie'], ['Cookie americano', 480, 5.5, 64, 23, 40, 'cookie'], ['Donut glassato', 420, 5, 50, 22, 60, 'donut'], ['Cinnamon roll', 380, 6, 52, 16, 100, 'pezzo'], ['Apple pie', 265, 2.4, 37, 12.5, 125],
+  /* ---------- bevande in più ---------- */
+  ['Caffè freddo zuccherato', 45, 0.5, 10, 0, 100, 'bicchiere'], ['Shakerato', 40, 0.2, 10, 0, 100, 'bicchiere'], ['Caffè con panna', 80, 0.7, 2, 7.5, 60, 'tazzina'], ['Bubble tea', 80, 1, 17, 1.5, 500, 'bicchiere'], ['Matcha latte', 60, 3, 6, 2.5, 300, 'tazza'], ['Golden milk', 70, 3, 7, 3, 250, 'tazza'], ['Spremuta di pompelmo', 39, 0.5, 9, 0.1, 200, 'bicchiere'], ['Limonata', 40, 0, 10, 0, 330, 'lattina'],
+  ['Cola light', 0.4, 0, 0.1, 0, 330, 'lattina'], ['Tè freddo alla pesca', 30, 0, 7.5, 0, 500, 'bottiglia'], ['Acqua aromatizzata', 4, 0, 1, 0, 500, 'bottiglia'], ['Bibita all\'arancia zero', 2, 0, 0.3, 0, 330, 'lattina'], ['Sidro', 50, 0, 6, 0, 330, 'bottiglia'], ['Birra weiss', 50, 0.5, 4, 0, 500, 'bottiglia'], ['Lambrusco', 80, 0.1, 4, 0, 125, 'calice'], ['Vin brulé', 140, 0.1, 18, 0, 200, 'tazza'],
+  ['Martini (cocktail)', 220, 0, 2, 0, 90, 'bicchiere'], ['Margarita', 170, 0, 14, 0, 150, 'bicchiere'], ['Piña colada', 180, 0.5, 23, 6, 200, 'bicchiere'], ['Daiquiri', 150, 0, 16, 0, 120, 'bicchiere'], ['Long Island', 160, 0, 15, 0, 250, 'bicchiere'], ['Bellini', 75, 0.2, 9, 0, 150, 'calice'], ['Americano (cocktail)', 140, 0, 12, 0, 100, 'bicchiere'], ['Mirto', 300, 0, 35, 0, 30, 'bicchierino'],
+  /* ---------- varie ---------- */
+  ['Tramezzino tonno e uova', 270, 10, 22, 16, 100, 'tramezzino'], ['Toast al prosciutto', 260, 13, 30, 9, 100, 'toast'], ['Bruschetta al pomodoro', 180, 4.5, 26, 6.5, 70, 'bruschetta'], ['Crostini con paté', 330, 10, 30, 19, 40, 'crostino'], ['Tagliere di salumi e formaggi', 360, 23, 2, 29, 150, 'porzione'], ['Antipasto misto', 250, 13, 8, 18, 200, 'porzione'], ['Uovo alla coque', 155, 12.6, 1.1, 10.6, 60, 'uovo'],
+  ['Pasto sostitutivo (shake)', 360, 30, 35, 9, 60, 'porzione'], ['Barretta sostitutiva', 380, 25, 40, 12, 60, 'barretta'], ['Omogeneizzato di frutta', 70, 0.3, 17, 0.1, 100, 'vasetto'], ['Brioche con gelato', 330, 6, 46, 14, 180, 'brioche'],
+];
+/* foods that are usually counted in pieces (used for "2 uova", "1 mela"…) */
+const FOOD_UNITS = [[/^uov[ao]/i, 60, 'uovo'], [/^fett[ae]\b|pan(e|carré)/i, 30, 'fetta'], [/cucchiai(o|ni)\b/i, 10, 'cucchiaio'], [/cucchiain[oi]/i, 5, 'cucchiaino'], [/biscott/i, 8, 'biscotto'], [/\bmel[ae]\b/i, 180, 'mela'], [/banan/i, 120, 'banana'], [/yogurt/i, 125, 'vasetto']];
+/* the words people type → the food they mean */
+const FOOD_SYN = { coca: 'coca-cola', 'coca cola': 'coca-cola', patatine: 'patatine fritte', pollo: 'petto di pollo', tacchino: 'petto di tacchino', tonno: 'tonno al naturale', 'tonno in scatola': 'tonno sott\'olio', mozzarella: 'mozzarella', crudo: 'prosciutto crudo', cotto: 'prosciutto cotto', parmigiano: 'parmigiano reggiano', grana: 'grana padano', uova: 'uovo', uovo: 'uovo', caffe: 'caffè espresso', cafe: 'caffè espresso', cappuccio: 'cappuccino', 'olio evo': 'olio extravergine', olio: 'olio extravergine', pane: 'pane', avena: 'avena', fiocchi: 'fiocchi d\'avena', burger: 'hamburger', ham: 'hamburger', nutella: 'crema spalmabile nocciole e cacao', pizza: 'pizza margherita', spritz: 'spritz', birra: 'birra', vino: 'vino rosso', gelato: 'gelato', cornetto: 'cornetto', brioche: 'cornetto', skyr: 'skyr', whey: 'proteine whey', proteine: 'proteine whey' };
+{ const have = new Set(FOOD_IDX.map(f => f.name.toLowerCase())); for (const [n, kcal, p, c, f, por, unit] of FOODS_X) if (!have.has(n.toLowerCase())) { have.add(n.toLowerCase()); FOOD_IDX.push({ name: n, kcal, p, c, f, por, unit: unit || '' }); } }
+
+/* =========================================================
+   CUCINA COLLEGATA — la ricerca alimenti diventa furba (senza
+   accenti, singolare/plurale, errori di battitura, sinonimi, i
+   tuoi cibi e quelli che hai in casa prima) e ricorda i prodotti
+   trovati su Open Food Facts anche offline. Poi spesa, dispensa e
+   dieta diventano un ciclo solo:
+   · quello che spunti nella spesa entra in dispensa (con i grammi)
+   · quello che registri nel diario esce dalla dispensa; se finisce
+     ti propongo di rimetterlo in lista
+   · la dieta ti dice cosa hai già in casa e cosa manca (un tocco e
+     va in lista), la lista della settimana toglie ciò che hai già
+   · la spesa mostra valori e coerenza con la dieta, e fin quando
+     la dieta è coperta con quello che hai e che stai comprando
+   ========================================================= */
+const kNorm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[''`’]/g, ' ').replace(/[^a-z0-9%\s]/g, ' ').replace(/\s+/g, ' ').trim();
+const kStem = w => w.length >= 4 ? w.replace(/(i|e|a|o)$/, '') : w;
+const kLev1 = (a, b) => { if (Math.abs(a.length - b.length) > 1) return false; let i = 0, j = 0, d = 0; while (i < a.length && j < b.length) { if (a[i] === b[j]) { i++; j++; continue; } if (++d > 1) return false; if (a.length > b.length) i++; else if (b.length > a.length) j++; else { i++; j++; } } return d + (a.length - i) + (b.length - j) <= 1; };
+/* pieces: foods without their own unit get one when it's obvious */
+for (const f of FOOD_IDX) if (!f.unit) for (const [re, g, u] of FOOD_UNITS) if (re.test(f.name) && !/\(piatto\)|cott|crud/i.test(f.name)) { f.unit = u; f.por = g; break; }
+const FoodX = {
+  K: 'orbita.offc',
+  cache() { if (!this._c) try { this._c = JSON.parse(localStorage.getItem(this.K) || '[]'); } catch (_) { this._c = []; } return this._c; },
+  remember(L) { const C = this.cache(); for (const f of L) { if (!f || !f.name) continue; const i = C.findIndex(x => x.code ? x.code === f.code : x.name === f.name); if (i >= 0) C.splice(i, 1); C.unshift({ name: f.name, kcal: f.kcal, p: f.p, c: f.c, f: f.f, por: f.por || 100, unit: f.unit || '', src: 'off', code: f.code || '' }); } C.length = Math.min(C.length, 500); try { localStorage.setItem(this.K, JSON.stringify(C)); } catch (_) {} },
+  tok(t) { const n = kNorm(t); return { n, w: n.split(' '), s: n.split(' ').map(kStem) }; },
+  idx(f) { if (!f._k) { f._k = this.tok(f.name); if (f.alt) f._a = this.tok(f.alt); } return f._k; },
+  /** name first; the original/English names and the cuisine count a bit less */
+  score(f, Q) { const a = this.sc(this.idx(f), Q); if (!f._a) return a; const b = this.sc(f._a, Q, true); return b < 0 ? a : Math.max(a, b - 1.5); },
+  sc({ n, w, s }, Q, alt) { let sc = 0;
+    for (const q of Q) { let best = 0; for (let i = 0; i < w.length; i++) { const t = w[i]; if (t === q.w) best = Math.max(best, 5); else if (t.startsWith(q.w)) best = Math.max(best, 4); else if (s[i] === q.s && q.s.length >= 3) best = Math.max(best, 4); else if (q.w.length >= 3 && t.includes(q.w)) best = Math.max(best, 2); else if (q.w.length >= 4 && t.length >= 4 && kLev1(t, q.w)) best = Math.max(best, 1.5); } if (!best) return -1; sc += best; }
+    if (n.startsWith(Q.map(q => q.w).join(' '))) sc += 4; else if (n.startsWith(Q[0].w) || s[0] === Q[0].s) sc += 3; if (w.length === Q.length && Q.every((q, i) => s[i] === q.s)) sc += 3;
+    return alt ? sc : sc - Math.min(3, w.length * .15); },
+  search(q, max = 40) {
+    let nq = kNorm(q); if (!nq) return [];
+    /* a cuisine ("giapponese", "Messico", "cucina thai") → its dishes, in their curated order */
+    if (typeof CUISINES !== 'undefined') { const cq = nq.replace(/^cucina /, ''); for (const [k, [n, adj]] of Object.entries(CUISINES)) if (k !== 'xx' && (kNorm(n) === cq || (cq !== 'americano' && kNorm(adj).split(' ').some(a => kStem(a) === kStem(cq))))) return FOOD_IDX.filter(f => f.cu === k).sort((a, b) => (a.wi || 0) - (b.wi || 0)); }
+    const syn = FOOD_SYN[nq]; const Qs = [nq].concat(syn ? [kNorm(syn)] : []);
+    const H = S.health, rec = new Map((H.recent || []).map((x, i) => [x.name, i])), pan = new Set((S.pantry || []).map(p => kNorm(p.food || p.name)));
+    const pool = [...(H.custom || []).map(x => ({ ...x, src: 'mio' })), ...(H.recent || []), ...FOOD_IDX, ...this.cache()], seen = new Set(), out = [];
+    for (const f of pool) { const key = f.name.toLowerCase(); if (seen.has(key)) continue; let best = -1;
+      for (const qq of Qs) { const Q = qq.split(' ').filter(Boolean).map(w => ({ w, s: kStem(w) })); const sc = this.score(f, Q); if (sc > best) best = sc + (qq !== nq ? -1 : 0); }
+      if (best < 0) continue; seen.add(key);
+      if (f.src === 'mio') best += 3; if (rec.has(f.name)) best += 3 - rec.get(f.name) * .05; if (pan.has(kNorm(f.name))) best += 1.5; if (f.src === 'off') best -= .5; if (f.src === 'usda') best -= .8;
+      out.push({ f, s: best }); }
+    return out.sort((a, b) => b.s - a.s).slice(0, max).map(x => x.f); },
+};
+Health.search = q => FoodX.search(q);
+{ const oO = Health.off.bind(Health); Health.off = async function (q) { let L = []; try { L = await oO(q); } catch (_) {}
+    if (!L.length) try { const r = await fetch('https://search.openfoodfacts.org/search?' + new URLSearchParams({ q, page_size: 20, langs: 'it', fields: 'product_name,product_name_it,brands,nutriments,serving_quantity,code' })); const j = await r.json(); L = (j.hits || []).map(p => Health.fromOff({ ...p, brands: Array.isArray(p.brands) ? p.brands.join(',') : p.brands })).filter(Boolean); } catch (_) {}
+    FoodX.remember(L.slice(0, 8)); return L; }; }
+{ const oB = Health.barcode.bind(Health); Health.barcode = async function (code) { const f = await oB(code); if (f) FoodX.remember([f]); return f; }; }
+
+/* ---------- quantities ---------- */
+const Qty = {
+  /** "500 g", "1,5 kg", "1 l", "6 uova", "2 confezioni da 125 g", "3" → grams (null if unknown) */
+  grams(q, food) { const t = String(q || '').toLowerCase().replace(',', '.').trim(); if (!t) return null; let m;
+    if ((m = t.match(/(\d+(?:\.\d+)?)\s*(?:x|confezion\w*|pacch\w*|vasett\w*|bottigli\w*)\s*(?:da)?\s*(\d+(?:\.\d+)?)\s*(kg|g|gr|ml|l|lt)\b/))) return +m[1] * +m[2] * (/^(kg|l|lt)$/.test(m[3]) ? 1000 : 1);
+    if ((m = t.match(/(\d+(?:\.\d+)?)\s*(kg|chili|g|gr|grammi|ml|l|lt|litr\w*)\b/))) return +m[1] * (/^(kg|chili|l|lt|litr)/.test(m[2]) ? 1000 : 1);
+    if ((m = t.match(/^(\d+(?:\.\d+)?)\b/))) { const n = +m[1]; const por = food && food.unit && food.por ? food.por : null; return por ? n * por : null; }
+    return null; },
+  fmt(g) { return g >= 1000 ? (Math.round(g / 100) / 10).toLocaleString('it-IT') + ' kg' : Math.round(g) + ' g'; },
+};
+
+/* ---------- the loop: shop ↔ pantry ↔ diet ↔ diary ---------- */
+const Kit = {
+  on() { return S.profile.kitLink !== false; },
+  food(name) { const L = FoodX.search(String(name).replace(/\(.*?\)/g, '').trim(), 1); return L[0] || null; },
+  key(name) { return kNorm(String(name).replace(/\(.*?\)|\b(crud[oaie]|cott[oaie]|fresc[oaie]|surgelat[oaie]|in scatola|sgocciolat[oaie]|bio)\b/gi, '')).split(' ').filter(w => w.length > 2).map(kStem); },
+  /** same thing? "petto di pollo" ~ "pollo", "yogurt greco 0%" ~ "yogurt greco" */
+  same(a, b) { const A = this.key(a), B = this.key(b); if (!A.length || !B.length) return false; const [S1, L1] = A.length <= B.length ? [A, B] : [B, A]; return S1.every(w => L1.some(x => x === w || (Math.min(w.length, x.length) >= 4 && Math.abs(w.length - x.length) <= 1 && (x.startsWith(w) || w.startsWith(x))))); },
+  pantryOf(name) { return (S.pantry || []).filter(p => this.same(p.food || p.name, name)); },
+  listOf(name) { return (S.shop || []).filter(x => !x.done && this.same(x.name, name)); },
+  status(name) { if (/^acqua\b/i.test(name) || PANTRY.test(String(name).trim())) return 'base'; if (this.pantryOf(name).length) return 'have'; if (this.listOf(name).length) return 'list'; return 'miss'; },
+  dietWords() { const D = typeof Diet !== 'undefined' && Diet.D(); if (!D) return []; const out = []; for (const d of D.days) for (const m of d.meals) for (const it of m.items) { out.push(it.n); for (const a of it.alt || []) out.push(a); } return out; },
+  inDiet(name) { return this.dietWords().some(n => this.same(n, name)); },
+  junk(name) { return /patatin|merendin|cioccolat|caramell|biscott|wafer|gelat|bibit|coca|aranciata|energy|snack|crema spalmabile|nutella|birra|vino|spritz|liquor|amaro|dolc|torta|cornett|brioche|pizza surgelata|salatini|popcorn|chips/i.test(name); },
+  /** bought → pantry, with grams when we can tell */
+  bought(x) { if (!this.on() || typeof Pantry === 'undefined' || /casa|igiene/.test(x.aisle || '')) return; if (S.pantry.some(p => p.shopId === x.id)) return;
+    const f = this.food(x.name), p = Pantry.add(x.name, { qty: x.qty || '' }); if (!p) return; p.shopId = x.id; if (f) p.food = f.name; const g = Qty.grams(x.qty, f); if (g) p.g = p.g0 = Math.round(g); save('pantry'); },
+  unbought(x) { const i = (S.pantry || []).findIndex(p => p.shopId === x.id); if (i >= 0) { S.pantry.splice(i, 1); save('pantry'); } },
+  /** eaten → out of the pantry; when it's finished, offer to buy it again */
+  /** a dish ("pollo e zucchine", a recipe) is not the ingredient: only the same food leaves the pantry */
+  dish(name, pan) { const C = /\b(con|e|al|alla|allo|ai|alle|agli|in|di)\b/i; return C.test(String(name)) && this.key(name).length > this.key(pan).length + 1; },
+  ate(food, g, k) { if (!this.on() || k !== todayK() || food.src === 'ricetta') return; const L = this.pantryOf(food.name).filter(p => !this.dish(food.name, p.food || p.name)).sort((a, b) => (a.exp || '9').localeCompare(b.exp || '9')); const p = L[0]; if (!p) return;
+    if (p.g != null) { p.g = Math.max(0, Math.round(p.g - g)); if (p.g > 0) { save('pantry'); return; } }
+    else return; /* unknown amount at home: don't guess, leave it there */
+    S.pantry = S.pantry.filter(x => x !== p); save('pantry');
+    setTimeout(() => Island.toast({ icon: 'list', c: 'var(--orange)', t: `${p.name}: finito`, s: 'Tolto dalla dispensa', action: { label: 'Rimetti in lista', fn: () => { Shop.add(p.name, p.g0 ? Qty.fmt(p.g0) : '', 'Dispensa'); Island.toast({ icon: 'list', c: 'var(--green)', t: 'Aggiunto alla spesa', ms: 1500 }); } }, ms: 5200 }), 1900); },
+  /** next days of the diet: from when something is missing at home and in the list */
+  coverage(n = 7) { const D = typeof Diet !== 'undefined' && Diet.D(); if (!D) return null; const t = todayK(); let covered = 0, firstMiss = null;
+    for (let i = 0; i < n; i++) { const d = Diet.day(addDK(t, i)); if (!d) break; const miss = []; for (const m of d.meals) for (const it of m.items) { const st = this.status(it.n); if (st === 'miss' && !(it.alt || []).some(a => this.status(a) !== 'miss')) miss.push(it.n); } if (miss.length) { firstMiss = { k: addDK(t, i), miss }; break; } covered++; }
+    return { covered, firstMiss }; },
+};
+{ const oA = Health.add.bind(Health); Health.add = function (meal, food, g, k = UI.hDay || todayK()) { const r = oA(meal, food, g, k); try { Kit.ate(food, g, k); } catch (_) {} return r; }; }
+/* the shopping list: tick → pantry (after the list's own handler has done its job) */
+document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('[data-shop]'); if (!b) return; const id = b.dataset.shop; setTimeout(() => { const x = (S.shop || []).find(z => z.id === id); if (!x) return; x.done ? (x.doneAt ||= Date.now(), Kit.bought(x)) : Kit.unbought(x); }, 0); }, true);
+
+/* ---------- Spesa: values, diet fit, coverage ---------- */
+{ const oR = VIEWS.shop.render, oM = VIEWS.shop.mount;
+  VIEWS.shop.render = function (...a) { let h = oR.apply(this, a); const D = typeof Diet !== 'undefined' && Diet.D();
+    for (const x of (S.shop || []).filter(z => !z.done)) { const at = h.indexOf(`data-shop="${x.id}"`); if (at < 0) continue; const t0 = h.indexOf('<span class="t">', at), t1 = t0 >= 0 ? h.indexOf('</span>', t0) : -1; if (t1 < 0) continue;
+      const f = Kit.food(x.name), tags = [];
+      if (D && Kit.inDiet(x.name)) tags.push('<span class="kt-b ok" title="È nella tua dieta">🥗 dieta</span>'); else if (D && Kit.junk(x.name)) tags.push('<span class="kt-b no" title="Non è nel piano della dieta">fuori dieta</span>');
+      if (Kit.pantryOf(x.name).length) tags.push('<span class="kt-b have" title="Ne hai già in dispensa">🥫 ce l\'hai</span>');
+      if (f && /^(frutta|pane|pasta|carne|salumi|latte|surgelati|bevande|altro)$/.test(x.aisle || 'altro')) tags.push(`<span class="kt-k tnum" title="${esc(f.name)} · per 100 g">${f.kcal} kcal · P ${Math.round(f.p)} g</span>`);
+      if (tags.length) h = h.slice(0, t1 + 7) + `<span class="kt-tags">${tags.join('')}</span>` + h.slice(t1 + 7); }
+    const cv = Kit.coverage(), open = (S.shop || []).filter(z => !z.done);
+    const card = D ? `<div class="card kt-cov"><div class="kt-cov-h"><span style="font-size:24px">🥗</span><span class="grow"><b>${cv && cv.covered >= 7 ? 'La dieta è coperta per tutta la settimana' : cv && cv.covered ? `Con quello che hai e la lista, la dieta è coperta fino a ${relDay(addDK(todayK(), cv.covered - 1)).toLowerCase()}` : 'Per la dieta di oggi manca qualcosa'}</b>${cv && cv.firstMiss ? `<small class="muted">${relDay(cv.firstMiss.k)} serve: ${esc(cv.firstMiss.miss.slice(0, 4).join(', '))}${cv.firstMiss.miss.length > 4 ? '…' : ''}</small>` : ''}</span>${cv && cv.firstMiss ? `<button class="btn sm primary" data-act="kitAddMiss">Aggiungi</button>` : ''}</div>${open.length ? `<small class="muted">${open.filter(x => Kit.inDiet(x.name)).length} su ${open.length} prodotti in lista sono nella tua dieta</small>` : ''}</div>` : '';
+    const sw = `<div class="kt-sw"><span class="muted">Quello che spunti finisce in dispensa</span>${toggleBtn('ktOn', Kit.on())}</div>`;
+    const anchor = h.indexOf('<div class="section-h"'); return anchor >= 0 ? h.slice(0, anchor) + card + sw + h.slice(anchor) : h + card + sw; };
+  VIEWS.shop.mount = function (root) { oM && oM.call(this, root); const t = $('#ktOn', root); if (t) wireToggle(t, v => { S.profile.kitLink = v; save('profile'); }); }; }
+ACT.kitAddMiss = () => { const cv = Kit.coverage(); if (!cv || !cv.firstMiss) return; let n = 0; const t = todayK();
+  for (let i = 0; i < 7; i++) { const d = Diet.day(addDK(t, i)); if (!d) break; for (const m of d.meals) for (const it of m.items) if (Kit.status(it.n) === 'miss' && !(it.alt || []).some(a => Kit.status(a) !== 'miss')) { Shop.add(it.n.replace(/\(.*?\)/g, '').trim(), '', 'Dieta'); n++; } }
+  Island.toast({ icon: 'list', c: 'var(--green)', t: `${n} ${n === 1 ? 'alimento aggiunto' : 'alimenti aggiunti'} alla spesa`, s: 'Per i prossimi 7 giorni della dieta', ms: 2400 }); App.refresh(); };
+
+/* ---------- Dieta: what's at home, what's missing ---------- */
+const KT_ST = { have: ['🥫', 'In casa'], list: ['🛒', 'In lista'], miss: ['＋', 'Manca: tocca per metterlo in lista'], base: ['', ''] };
+{ const oD = dietDayHtml; dietDayHtml = function (D, di, done, ro) { let h = oD(D, di, done, ro); const d = D.days[di]; if (!d || !Kit.on()) return h; let pos = 0;
+    for (const m of d.meals) for (const it of m.items) { const tag = `<span class="t">${esc(it.n)}</span>`, i = h.indexOf(tag, pos); if (i < 0) continue; const st = Kit.status(it.n), e = i + tag.length; pos = e;
+      if (st === 'base') continue; const b = st === 'miss' ? `<span class="kt-st miss" role="button" data-ktadd="${esc(it.n)}" title="${KT_ST.miss[1]}">＋ spesa</span>` : `<span class="kt-st ${st}" title="${KT_ST[st][1]}">${KT_ST[st][0]}</span>`; h = h.slice(0, e) + b + h.slice(e); pos = e + b.length; }
+    return h; }; }
+document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('[data-ktadd]'); if (!b) return; e.stopPropagation(); e.preventDefault(); Shop.add(b.dataset.ktadd.replace(/\(.*?\)/g, '').trim(), '', 'Dieta'); b.className = 'kt-st list'; b.textContent = '🛒'; b.removeAttribute('data-ktadd'); Island.toast({ icon: 'list', c: 'var(--green)', t: 'Aggiunto alla spesa', s: b.closest('.dt-it') ? (b.closest('.dt-it').querySelector('.t') || {}).textContent : '', ms: 1500 }); }, true);
+/* Today diet card: what's missing for the next meal, what to use before it expires */
+{ const oT = TODAY_EXTRA.diet; TODAY_EXTRA.diet = () => { let h = oT(); if (!h || !Kit.on()) return h; const di = Diet.dayIdx(), d = Diet.D().days[di], m = Diet.nowMeal(); if (!d || !m) return h;
+    const miss = m.items.filter(it => Kit.status(it.n) === 'miss' && !(it.alt || []).some(a => Kit.status(a) !== 'miss')).map(it => it.n), soon = typeof Pantry !== 'undefined' ? Pantry.soon(2).filter(p => Kit.dietWords().some(n => Kit.same(n, p.food || p.name))).slice(0, 3) : [];
+    const extra = (miss.length ? `<div class="kt-miss">🛒 Ti manca: ${miss.slice(0, 3).map(n => `<span class="kt-st miss" role="button" data-ktadd="${esc(n)}">${esc(n)} ＋</span>`).join(' ')}</div>` : '') + (soon.length ? `<div class="kt-soon">⏳ Da usare presto: ${soon.map(p => `<b>${esc(p.name)}</b> (${expLbl(p.exp)})`).join(', ')}</div>` : '');
+    return extra ? h.replace(/<\/section>\s*$/, extra + '</section>') : h; }; }
+/* weekly diet shopping: subtract what's already at home, in grams */
+{ const oS = Diet.shop.bind(Diet); Diet.shop = function (...a) { const L = oS(...a); for (const i of L) { const P = Kit.pantryOf(i.name), f = Kit.food(i.name), need = Qty.grams(i.qty, f), have = P.reduce((s, p) => s + (p.g || 0), 0);
+      if (P.length && need && have) { const rest = need - have; if (rest <= 0) { i.have = true; i.on = false; } else { i.qty = Qty.fmt(rest) + ' (ne hai ' + Qty.fmt(have) + ')'; i.have = false; i.on = !i.basic; } } else if (P.length && !need) { i.have = true; i.on = false; } }
+    return L; }; }
+/* the pantry shows how much is left */
+{ const oR = VIEWS.home && VIEWS.home.render; if (oR) VIEWS.home.render = function (...a) { let h = oR.apply(this, a); for (const p of S.pantry || []) if (p.g != null && p.g0) { const tag = `<div class="t">${esc(p.name)}`, i = h.indexOf(tag); if (i >= 0) h = h.slice(0, i + tag.length) + ` <span class="kt-left tnum">· ${Qty.fmt(p.g)} rimasti</span>` + h.slice(i + tag.length); } return h; }; }
+CMD_ACT.push(['Spesa per la dieta (solo quello che manca)', 'list', () => ACT.kitAddMiss()]);
+/* snacks are not vegetables: "patatine" ≠ "patate" */
+{ const oA = Shop.aisle.bind(Shop); Shop.aisle = function (name) { const n = String(name || '').toLowerCase(); if (/patatin|chips|salatin|popcorn|pretzel|snack|nachos|taralli|crackers/.test(n)) return 'pane'; return oA(name); }; }
+
+/* =========================================================
+   CIBI DAL MONDO — il database cresce: oltre 500 piatti e
+   ingredienti di 25 cucine (con i nomi originali, così trovi
+   "pad thai", "bibimbap" o "pão de queijo" come li conosci) più
+   circa 1.900 alimenti dalle tabelle USDA FoodData Central
+   (SR Legacy, dominio pubblico) tradotti in italiano e
+   cercabili anche in inglese. Valori per 100 g; i piatti sono
+   medie di ricette tipiche, i carboidrati sono al netto della fibra.
+   ========================================================= */
+const CUISINES = {"jp": ["Giappone", "giapponese"], "cn": ["Cina", "cinese"], "kr": ["Corea", "coreano"], "th": ["Thailandia", "thailandese thai"], "vn": ["Vietnam", "vietnamita"], "in": ["India", "indiano"], "id": ["Sud-est asiatico", "indonesiano malese filippino"], "me": ["Medio Oriente", "libanese mediorientale israeliano arabo"], "tr": ["Turchia", "turco"], "gr": ["Grecia", "greco"], "es": ["Spagna", "spagnolo"], "pt": ["Portogallo", "portoghese"], "fr": ["Francia", "francese"], "de": ["Germania e Austria", "tedesco austriaco"], "gb": ["Regno Unito", "inglese britannico"], "sc": ["Scandinavia", "svedese danese norvegese nordico"], "ee": ["Est Europa", "russo polacco ungherese"], "us": ["Stati Uniti", "americano"], "mx": ["Messico", "messicano tex mex"], "la": ["America Latina", "sudamericano argentino peruviano colombiano venezuelano"], "br": ["Brasile", "brasiliano"], "ca": ["Caraibi", "caraibico giamaicano cubano"], "ma": ["Nord Africa", "marocchino tunisino"], "af": ["Africa", "africano etiope nigeriano senegalese"], "oc": ["Oceania", "australiano"], "xx": ["Dal mondo", "internazionale"]};
+/* [nome, kcal, prot, carb, grassi, porzione g, unità, cucina, nomi originali/inglesi] */
+const FOODS_W = [
+["Sushi nigiri al salmone",190,8,28,4.5,30,"pezzo","jp","sushi nigiri sake"],
+["Sushi nigiri al tonno",165,9,28,1.2,30,"pezzo","jp","sushi nigiri maguro"],
+["Sushi nigiri al gambero",150,7,28,0.6,30,"pezzo","jp","sushi nigiri ebi"],
+["Sushi nigiri all'anguilla",220,8,30,7,32,"pezzo","jp","sushi unagi"],
+["Hosomaki al cetriolo",130,3,28,0.4,20,"pezzo","jp","kappa maki sushi"],
+["Hosomaki al salmone",165,7,26,3.5,20,"pezzo","jp","sake maki sushi"],
+["Hosomaki al tonno",150,8,26,1,20,"pezzo","jp","tekka maki sushi"],
+["Uramaki California",175,5,27,5,30,"pezzo","jp","california roll sushi"],
+["Uramaki salmone e avocado",190,7,25,7,30,"pezzo","jp","salmon avocado roll sushi"],
+["Uramaki tempura di gamberi",230,6,30,9.5,32,"pezzo","jp","ebi tempura roll sushi"],
+["Uramaki spicy tuna",185,8,25,6,30,"pezzo","jp","spicy tuna roll sushi"],
+["Uramaki Philadelphia",210,7,25,9,30,"pezzo","jp","philadelphia roll sushi"],
+["Futomaki",150,5,28,2,40,"pezzo","jp","sushi futomaki"],
+["Temaki al salmone",180,8,24,5.5,90,"pezzo","jp","temaki sushi cono"],
+["Gunkan al salmone",185,8,25,5.5,30,"pezzo","jp","gunkan sushi ikura"],
+["Sashimi di salmone",208,20,0,13.4,15,"fetta","jp","sashimi sake"],
+["Sashimi di tonno",130,29,0,1,15,"fetta","jp","sashimi maguro"],
+["Sashimi di branzino",120,20,0,4,15,"fetta","jp","sashimi suzuki"],
+["Chirashi",165,9,25,3.5,350,"","jp","chirashi sushi bowl"],
+["Onigiri al tonno",180,6,34,2,110,"pezzo","jp","onigiri tuna mayo"],
+["Onigiri al salmone",175,6,34,1.8,110,"pezzo","jp","onigiri sake"],
+["Riso per sushi",150,2.6,33,0.3,150,"","jp","sushi rice shari"],
+["Ramen tonkotsu",110,5.5,12,4.5,550,"","jp","ramen maiale brodo"],
+["Ramen shoyu",85,5,11,2.3,550,"","jp","ramen soia"],
+["Ramen miso",95,5,12,3,550,"","jp","ramen miso"],
+["Shio ramen",80,5,10.5,2,550,"","jp","ramen sale"],
+["Udon in brodo",75,3,14,0.6,500,"","jp","udon kake"],
+["Yaki udon",140,6,20,4,350,"","jp","udon saltati"],
+["Soba fredda",115,5,23,0.6,300,"","jp","zaru soba"],
+["Yakisoba",160,6,22,5.5,350,"","jp","yakisoba noodles saltati"],
+["Tempura di gamberi",250,12,18,14,25,"pezzo","jp","ebi tempura"],
+["Tempura di verdure",210,3,22,12,30,"pezzo","jp","yasai tempura"],
+["Gyoza",210,9,23,9,25,"pezzo","jp","gyoza ravioli giapponesi"],
+["Edamame cotti",121,12,3,5,100,"","jp","edamame"],
+["Zuppa di miso",30,2,3,1,250,"","jp","miso soup misoshiru"],
+["Pollo teriyaki",180,20,8,7,200,"","jp","teriyaki chicken"],
+["Salmone teriyaki",200,20,7,10,180,"","jp","teriyaki salmon"],
+["Tonkatsu",280,18,14,17,180,"","jp","tonkatsu cotoletta giapponese"],
+["Katsu curry",160,7,20,6,450,"","jp","katsu kare"],
+["Curry giapponese con riso",150,4,24,4.5,400,"","jp","kare raisu japanese curry"],
+["Karaage",260,17,12,16,30,"pezzo","jp","karaage pollo fritto"],
+["Yakitori",185,20,6,9,35,"pezzo","jp","yakitori spiedino"],
+["Okonomiyaki",180,7,18,9,250,"","jp","okonomiyaki"],
+["Takoyaki",190,6,21,9,25,"pezzo","jp","takoyaki polpo"],
+["Donburi gyudon",165,7,22,5,450,"","jp","gyudon donburi manzo"],
+["Oyakodon",150,9,20,4,450,"","jp","oyakodon donburi pollo uovo"],
+["Katsudon",180,9,22,6,450,"","jp","katsudon"],
+["Poke bowl giapponese",150,9,20,4,400,"","jp","poke"],
+["Mochi",230,3,50,1,40,"pezzo","jp","mochi daifuku"],
+["Dorayaki",285,6,55,4,80,"pezzo","jp","dorayaki"],
+["Matcha latte",55,3,6,2,250,"","jp","matcha latte"],
+["Tè matcha",3,0.3,0.4,0,200,"","jp","matcha tea"],
+["Alga nori",188,41,15,0.3,3,"foglio","jp","nori seaweed"],
+["Wakame insalata",95,2,11,4,80,"","jp","wakame salad goma"],
+["Tamagoyaki",170,11,7,11,30,"pezzo","jp","tamagoyaki omelette"],
+["Natto con riso",170,7,28,3,200,"","jp","natto gohan"],
+["Sakè",134,0.5,5,0,100,"","jp","sake rice wine"],
+["Salsa teriyaki",90,6,16,0,15,"cucchiaio","jp","teriyaki sauce"],
+["Maionese giapponese",700,2,2,77,15,"cucchiaio","jp","kewpie mayo"],
+["Panko",370,12,75,2,100,"","jp","panko pangrattato"],
+["Ponzu",55,4,9,0,15,"cucchiaio","jp","ponzu"],
+["Riso alla cantonese",165,6,24,5,300,"","cn","fried rice cantonese"],
+["Spaghetti di soia saltati",150,3,25,4.5,300,"","cn","glass noodles"],
+["Chow mein",150,7,19,5,350,"","cn","chow mein noodles"],
+["Lo mein",145,7,20,4,350,"","cn","lo mein"],
+["Pollo alle mandorle",170,14,8,9,300,"","cn","almond chicken"],
+["Pollo kung pao",190,15,9,11,300,"","cn","kung pao chicken gong bao"],
+["Pollo al limone cinese",230,13,22,10,300,"","cn","lemon chicken"],
+["Maiale in agrodolce",230,10,26,10,300,"","cn","sweet and sour pork"],
+["Pollo in agrodolce",210,11,24,8,300,"","cn","sweet and sour chicken"],
+["Manzo con bambù e funghi",120,12,6,5.5,300,"","cn","beef bamboo mushrooms"],
+["Manzo alla piastra con cipolle",140,13,6,7,300,"","cn","beef onions"],
+["Anatra laccata alla pechinese",300,18,8,22,150,"","cn","peking duck"],
+["Ravioli al vapore cinesi",185,8,25,6,25,"pezzo","cn","jiaozi dumplings"],
+["Ravioli fritti cinesi",240,8,25,12,25,"pezzo","cn","fried dumplings"],
+["Dim sum har gow",150,7,22,4,25,"pezzo","cn","har gow dim sum"],
+["Dim sum siu mai",190,10,15,10,25,"pezzo","cn","siu mai shumai"],
+["Bao al maiale",230,9,35,6,80,"pezzo","cn","char siu bao baozi"],
+["Involtini primavera",230,5,26,12,60,"pezzo","cn","spring rolls"],
+["Nuvole di drago",520,1,62,29,15,"","cn","prawn crackers"],
+["Zuppa agropiccante",45,3,5,1.5,300,"","cn","hot and sour soup"],
+["Wonton in brodo",65,4,8,1.8,350,"","cn","wonton soup"],
+["Mapo tofu",130,8,4,9,300,"","cn","mapo tofu"],
+["Char siu",230,22,12,10,150,"","cn","char siu maiale arrosto"],
+["Hot pot",90,8,4,5,500,"","cn","hot pot huoguo"],
+["Tofu saltato con verdure",110,7,6,6.5,300,"","cn","stir fry tofu"],
+["Verdure saltate cinesi",70,2.5,7,3.5,250,"","cn","stir fry vegetables"],
+["Gamberi alla piastra cinesi",130,17,4,5,250,"","cn","gamberi saltati"],
+["Riso bianco al vapore",130,2.5,28,0.3,180,"","cn","steamed rice jasmine"],
+["Mantou",225,7,47,1,70,"pezzo","cn","mantou panino vapore"],
+["Gelato fritto",300,5,32,17,100,"","cn","fried ice cream"],
+["Banana fritta",250,2,38,10,100,"","cn","fried banana"],
+["Salsa di ostriche",50,1.4,11,0.3,15,"cucchiaio","cn","oyster sauce"],
+["Salsa hoisin",220,3,44,3.5,15,"cucchiaio","cn","hoisin sauce"],
+["Salsa agrodolce",150,0.3,37,0.1,15,"cucchiaio","cn","sweet and sour sauce"],
+["Olio di sesamo",884,0,0,100,5,"cucchiaino","cn","sesame oil"],
+["Tè verde cinese",1,0,0,0,200,"","cn","green tea"],
+["Bubble tea",75,0.6,15,1.5,500,"","cn","bubble tea tapioca boba"],
+["Bibimbap",145,7,20,4.5,500,"","kr","bibimbap"],
+["Bulgogi",200,18,9,10,200,"","kr","bulgogi"],
+["Kimchi",23,1.5,2.5,0.5,50,"","kr","kimchi"],
+["Kimchi jjigae",55,4,3,3,400,"","kr","kimchi stew"],
+["Pollo fritto coreano",280,17,15,17,40,"pezzo","kr","korean fried chicken yangnyeom"],
+["Tteokbokki",180,3.5,38,1.5,250,"","kr","tteokbokki"],
+["Japchae",150,3,24,5,250,"","kr","japchae"],
+["Kimbap",150,5,25,3.5,30,"pezzo","kr","kimbap gimbap"],
+["Samgyeopsal",330,15,0,30,150,"","kr","samgyeopsal pancia maiale"],
+["Sundubu jjigae",60,5,3,3.5,450,"","kr","sundubu tofu stew"],
+["Ramyeon",110,3,16,4,550,"","kr","ramyeon ramen coreano"],
+["Gochujang",200,5,40,2,15,"cucchiaio","kr","gochujang"],
+["Soju",140,0,0,0,50,"","kr","soju"],
+["Bingsu",120,2,26,1.5,300,"","kr","bingsu patbingsu"],
+["Pad thai",175,8,22,6,350,"","th","pad thai"],
+["Pad see ew",170,6,24,5.5,350,"","th","pad see ew"],
+["Curry verde thai con pollo",130,9,5,8.5,350,"","th","green curry gaeng keow wan"],
+["Curry rosso thai con pollo",130,9,5,8.5,350,"","th","red curry gaeng phet"],
+["Curry massaman",160,9,9,10,350,"","th","massaman curry"],
+["Curry panang",150,10,5,10,350,"","th","panang curry"],
+["Tom yum",40,4,3,1.5,350,"","th","tom yum goong"],
+["Tom kha gai",95,6,4,6.5,350,"","th","tom kha gai coconut soup"],
+["Riso fritto thai",165,6,24,5,350,"","th","khao pad fried rice"],
+["Pollo al basilico thai",150,14,5,8,300,"","th","pad kra pao krapow"],
+["Som tam",55,2,9,1,200,"","th","som tam papaya salad"],
+["Larb",150,16,4,8,200,"","th","larb laab"],
+["Satay di pollo",200,20,6,11,30,"pezzo","th","satay chicken"],
+["Salsa satay",300,9,15,23,30,"","th","peanut sauce satay"],
+["Riso glutinoso al mango",210,3,36,6,250,"","th","mango sticky rice"],
+["Riso jasmine",130,2.7,28,0.3,180,"","th","jasmine rice"],
+["Latte di cocco",200,2,3,20,100,"","th","coconut milk"],
+["Tè thai",70,1.2,13,1.5,300,"","th","thai iced tea cha yen"],
+["Salsa di pesce thai",35,5,3.6,0,15,"cucchiaio","th","nam pla fish sauce"],
+["Pho bo",60,4.5,7,1.5,600,"","vn","pho manzo"],
+["Pho ga",55,4.5,7,1,600,"","vn","pho pollo"],
+["Banh mi",230,11,28,8,200,"pezzo","vn","banh mi"],
+["Involtini vietnamiti freschi",120,6,19,2,60,"pezzo","vn","goi cuon summer rolls rice paper"],
+["Nem fritti",250,8,20,15,40,"pezzo","vn","cha gio nem ran"],
+["Bun bo",110,7,15,2.5,450,"","vn","bun bo hue bun cha"],
+["Bun cha",150,9,17,5,450,"","vn","bun cha"],
+["Com tam",170,9,22,5,400,"","vn","com tam broken rice"],
+["Caffè vietnamita",110,2,18,3,150,"","vn","ca phe sua da"],
+["Carta di riso",330,6,80,0.5,9,"foglio","vn","rice paper"],
+["Pollo tikka masala",150,12,6,9,350,"","in","chicken tikka masala"],
+["Butter chicken",170,12,6,11,350,"","in","murgh makhani butter chicken"],
+["Pollo tandoori",150,24,3,5,200,"","in","tandoori chicken"],
+["Chicken korma",175,12,7,11,350,"","in","korma"],
+["Chicken biryani",170,8,22,5.5,400,"","in","biryani"],
+["Biryani vegetariano",150,3.5,25,4,400,"","in","veg biryani"],
+["Dal",110,6,15,3,300,"","in","dal tadka lenticchie"],
+["Dal makhani",130,5,14,6,300,"","in","dal makhani"],
+["Chana masala",130,6,17,4.5,300,"","in","chana masala ceci"],
+["Palak paneer",140,7,6,10,300,"","in","palak paneer spinaci"],
+["Paneer",320,20,3.5,25,100,"","in","paneer"],
+["Paneer tikka",240,15,6,17,200,"","in","paneer tikka"],
+["Aloo gobi",100,2.5,12,5,250,"","in","aloo gobi"],
+["Samosa",300,5.5,32,17,70,"pezzo","in","samosa"],
+["Pakora",280,7,28,16,30,"pezzo","in","pakora bhaji"],
+["Naan",290,9,50,5.5,90,"pezzo","in","naan"],
+["Garlic naan",305,9,50,7.5,95,"pezzo","in","garlic naan"],
+["Chapati",240,8,46,3.5,40,"pezzo","in","chapati roti"],
+["Paratha",320,7,45,13,80,"pezzo","in","paratha"],
+["Riso basmati cotto",130,2.8,28,0.4,180,"","in","basmati"],
+["Pollo vindaloo",150,13,6,8,350,"","in","vindaloo"],
+["Rogan josh",160,14,5,9,350,"","in","rogan josh agnello"],
+["Raita",60,3.5,5,3,100,"","in","raita"],
+["Dosa",170,4,29,4,120,"pezzo","in","dosa"],
+["Idli",130,4,27,0.5,40,"pezzo","in","idli"],
+["Lassi al mango",90,3,16,2,250,"","in","mango lassi"],
+["Chai latte",60,2.5,9,1.8,250,"","in","masala chai"],
+["Gulab jamun",320,5,50,12,40,"pezzo","in","gulab jamun"],
+["Chutney di mango",220,0.5,54,0.3,20,"cucchiaio","in","mango chutney"],
+["Garam masala",380,15,45,15,2,"cucchiaino","in","garam masala spezie"],
+["Ghee",900,0,0,99.8,10,"cucchiaio","in","ghee burro chiarificato"],
+["Nasi goreng",170,6,24,5.5,350,"","id","nasi goreng"],
+["Mie goreng",180,6,25,6.5,350,"","id","mie goreng"],
+["Rendang",220,20,5,13,200,"","id","rendang beef"],
+["Gado gado",140,7,9,9,300,"","id","gado gado"],
+["Laksa",110,5,10,6,500,"","id","laksa"],
+["Nasi lemak",200,6,25,8.5,350,"","id","nasi lemak malaysia"],
+["Adobo di pollo",190,17,3,12,250,"","id","adobo filipino chicken"],
+["Lumpia",240,7,22,14,50,"pezzo","id","lumpia filipino"],
+["Hummus",170,7,14,9.5,50,"","me","hummus houmous"],
+["Falafel",330,13,32,18,17,"pezzo","me","falafel"],
+["Pita",275,9,55,1.2,60,"pezzo","me","pita bread"],
+["Baba ganoush",130,2.5,8,10,50,"","me","baba ghanoush mutabbal"],
+["Tabbouleh",120,2.5,12,7,150,"","me","tabbouleh tabule"],
+["Fattoush",90,2,10,5,200,"","me","fattoush"],
+["Shawarma di pollo",210,17,10,11,250,"","me","shawarma chicken"],
+["Shawarma piadina",230,13,22,10,300,"pezzo","me","shawarma wrap"],
+["Kebab panino",245,12,25,11,300,"pezzo","me","doner kebab panino"],
+["Kebab al piatto",220,14,14,12,400,"","me","doner kebab teller"],
+["Shish taouk",180,24,3,8,200,"","me","shish tawook"],
+["Kofta",240,17,5,17,50,"pezzo","me","kofta kefta"],
+["Labneh",180,7,4,15,30,"","me","labneh"],
+["Shakshuka",105,6,6,6.5,300,"","me","shakshuka"],
+["Mujaddara",160,6,26,3.5,300,"","me","mujadara"],
+["Muhammara",280,5,15,22,30,"","me","muhammara"],
+["Manakish al za'atar",330,8,42,15,150,"pezzo","me","manakish zaatar"],
+["Baklava",430,6,50,24,40,"pezzo","me","baklava"],
+["Halva",470,12,60,22,30,"","me","halva tahini"],
+["Datteri ripieni",300,4,60,6,15,"pezzo","me","stuffed dates"],
+["Kibbeh",250,13,20,13,60,"pezzo","me","kibbeh kebbe"],
+["Fuul medames",110,7,15,3,250,"","me","ful medames fave"],
+["Za'atar",300,9,30,15,2,"cucchiaino","me","zaatar spezie"],
+["Sumac",300,3,40,14,2,"cucchiaino","me","sommacco"],
+["Pide",260,11,32,10,250,"pezzo","tr","pide turco"],
+["Lahmacun",220,10,30,7,150,"pezzo","tr","lahmacun"],
+["Börek",320,9,28,19,100,"","tr","borek burek"],
+["Iskender kebab",190,13,12,10,400,"","tr","iskender"],
+["Adana kebab",250,17,2,20,200,"","tr","adana kebab"],
+["Köfte turche",240,17,5,17,50,"pezzo","tr","kofte turkish"],
+["Menemen",110,6,5,7.5,250,"","tr","menemen"],
+["Ayran",36,1.7,2.5,2,250,"","tr","ayran"],
+["Delizia turca",370,0.2,92,0.2,15,"pezzo","tr","lokum turkish delight"],
+["Caffè turco",5,0.2,0.7,0.1,60,"","tr","turkish coffee"],
+["Dolma",150,3,18,7,25,"pezzo","tr","dolma sarma foglie di vite"],
+["Gyros di maiale",220,17,3,15,250,"","gr","gyros"],
+["Gyros pita",230,11,22,11,300,"pezzo","gr","gyros pita"],
+["Souvlaki",190,24,2,10,80,"pezzo","gr","souvlaki spiedino"],
+["Moussaka",140,7,9,8.5,350,"","gr","moussaka"],
+["Pastitsio",180,9,15,9.5,350,"","gr","pastitsio"],
+["Insalata greca",95,3,4.5,7.5,300,"","gr","horiatiki greek salad"],
+["Tzatziki",95,4,4,7,50,"","gr","tzatziki"],
+["Spanakopita",270,8,22,17,120,"pezzo","gr","spanakopita"],
+["Tiropita",320,10,25,20,120,"pezzo","gr","tiropita"],
+["Dolmades",150,3,18,7,25,"pezzo","gr","dolmades"],
+["Taramosalata",450,4,8,45,30,"","gr","taramosalata"],
+["Yogurt greco con miele",140,7,14,6,200,"","gr","greek yogurt honey"],
+["Halloumi",320,22,2,25,50,"","gr","halloumi cipro"],
+["Loukoumades",350,5,45,17,100,"","gr","loukoumades"],
+["Ouzo",240,0,0,0,40,"","gr","ouzo"],
+["Paella valenciana",160,10,18,5.5,400,"","es","paella valenciana"],
+["Paella di mare",150,10,19,4,400,"","es","paella marisco"],
+["Paella nera",145,9,19,4,400,"","es","arroz negro"],
+["Tortilla di patate",175,6,15,10,150,"","es","tortilla espanola"],
+["Gazpacho",45,1,5,2.5,250,"","es","gazpacho"],
+["Salmorejo",100,2,10,6,250,"","es","salmorejo"],
+["Patatas bravas",190,2,22,10,200,"","es","patatas bravas"],
+["Croquetas",260,8,22,15,30,"pezzo","es","croquetas"],
+["Gambas al ajillo",210,18,1,15,150,"","es","gambas al ajillo"],
+["Pulpo a la gallega",130,17,7,4,200,"","es","polpo alla galiziana"],
+["Albóndigas",200,12,8,13,200,"","es","albondigas polpette"],
+["Jamón serrano",240,31,0,13,30,"","es","jamon serrano"],
+["Jamón ibérico",375,29,0,29,30,"","es","jamon iberico pata negra"],
+["Chorizo spagnolo",455,24,2,38,30,"","es","chorizo"],
+["Pan con tomate",220,5,30,9,80,"pezzo","es","pan con tomate"],
+["Pimientos de padrón",90,2,5,7,100,"","es","pimientos padron"],
+["Churros",400,5,45,22,25,"pezzo","es","churros"],
+["Churros con cioccolata",330,5,45,15,200,"","es","churros chocolate"],
+["Crema catalana",180,4,22,9,130,"","es","crema catalana"],
+["Flan",150,4.5,24,4,120,"","es","flan"],
+["Sangria",90,0.1,10,0,200,"","es","sangria"],
+["Manchego",390,26,0.5,32,30,"","es","manchego"],
+["Pastel de nata",300,5,33,16,60,"pezzo","pt","pastel de nata pasteis"],
+["Bacalhau à brás",180,12,12,9,300,"","pt","bacalhau bras"],
+["Francesinha",250,14,15,15,550,"","pt","francesinha"],
+["Caldo verde",50,2,6,2,300,"","pt","caldo verde"],
+["Porto",160,0.1,12,0,75,"","pt","vino porto"],
+["Croissant al burro",406,8,44,21,60,"pezzo","fr","croissant"],
+["Pain au chocolat",415,7.5,45,22,70,"pezzo","fr","pain au chocolat"],
+["Baguette",275,9,56,1.5,60,"fetta","fr","baguette"],
+["Quiche lorraine",270,10,17,18,150,"","fr","quiche lorraine"],
+["Croque monsieur",280,15,22,15,180,"pezzo","fr","croque monsieur"],
+["Croque madame",270,15,19,15,220,"pezzo","fr","croque madame"],
+["Ratatouille",70,1.5,7,4,250,"","fr","ratatouille"],
+["Boeuf bourguignon",150,14,4,7.5,350,"","fr","boeuf bourguignon"],
+["Coq au vin",150,15,3,8,350,"","fr","coq au vin"],
+["Zuppa di cipolle francese",80,3.5,8,4,350,"","fr","soupe a l'oignon"],
+["Bouillabaisse",90,10,3,4,400,"","fr","bouillabaisse"],
+["Crêpe dolce",230,6,33,8,80,"pezzo","fr","crepe nutella zucchero"],
+["Crêpe salata",200,9,20,9,150,"pezzo","fr","galette crepe salata"],
+["Crème brûlée",290,4.5,22,20,130,"","fr","creme brulee"],
+["Macaron",400,7,55,17,12,"pezzo","fr","macaron"],
+["Éclair",260,6,25,15,80,"pezzo","fr","eclair"],
+["Tarte tatin",250,2,35,11,130,"","fr","tarte tatin"],
+["Mousse au chocolat",250,5,25,15,100,"","fr","mousse cioccolato"],
+["Foie gras",460,7,4,45,40,"","fr","foie gras"],
+["Escargot",90,16,2,1.4,60,"","fr","lumache escargots"],
+["Bistecca con patatine",250,17,15,14,350,"","fr","steak frites"],
+["Brie",334,21,0.5,28,30,"","fr","brie"],
+["Camembert",300,20,0.5,24,30,"","fr","camembert"],
+["Roquefort",369,21.5,2,31,30,"","fr","roquefort"],
+["Champagne",80,0.2,1.5,0,125,"","fr","champagne"],
+["Würstel bratwurst",300,13,2,26,100,"pezzo","de","bratwurst"],
+["Currywurst",240,9,12,17,250,"","de","currywurst"],
+["Wiener Schnitzel",260,17,15,15,200,"","de","wiener schnitzel cotoletta"],
+["Brezel",340,9,70,3,100,"pezzo","de","brezel pretzel"],
+["Crauti",20,1,2.5,0.1,150,"","de","sauerkraut"],
+["Strudel di mele",250,3,36,11,120,"","de","apfelstrudel"],
+["Sachertorte",380,5,50,18,100,"","de","sachertorte"],
+["Kaiserschmarrn",260,7,33,11,250,"","de","kaiserschmarrn"],
+["Spätzle",190,6,32,4,250,"","de","spaetzle"],
+["Gulasch",120,12,5,6,350,"","de","goulash gulasch"],
+["Canederli",210,8,30,6,80,"pezzo","de","knodel knoedel canederli"],
+["Leberkäse",300,12,2,27,150,"","de","leberkase"],
+["Torta Foresta Nera",300,4,32,18,120,"","de","schwarzwalder kirschtorte black forest"],
+["Birra weiss",47,0.5,4,0,500,"","de","weissbier"],
+["Pane di segale tedesco",220,6,45,1.5,50,"fetta","de","pumpernickel roggenbrot"],
+["Fish and chips",230,10,22,12,400,"","gb","fish and chips"],
+["Colazione inglese",190,10,9,13,450,"","gb","full english breakfast"],
+["Fagioli in salsa di pomodoro",80,4.7,12,0.4,200,"","gb","baked beans"],
+["Shepherd's pie",120,7,10,6,400,"","gb","shepherd's pie cottage pie"],
+["Scones",360,7,50,14,70,"pezzo","gb","scones"],
+["Crumpet",180,6,37,1,55,"pezzo","gb","crumpet"],
+["Porridge d'avena",75,2.5,12,1.7,300,"","gb","porridge oatmeal"],
+["Sticky toffee pudding",350,3.5,50,15,150,"","gb","sticky toffee pudding"],
+["Cheesecake",320,5.5,26,22,120,"","gb","cheesecake new york"],
+["Carrot cake",415,4.5,50,22,120,"","gb","carrot cake torta di carote"],
+["Apple crumble",230,2.5,35,9,150,"","gb","crumble di mele"],
+["Pasticcio di carne",280,9,25,16,200,"","gb","meat pie pork pie"],
+["Gin tonic",80,0,7,0,200,"","gb","gin tonic"],
+["Cider",45,0,3.5,0,330,"","gb","sidro"],
+["Salmone gravlax",160,19,3,8,50,"","sc","gravlax"],
+["Aringa marinata",260,14,10,18,50,"","sc","aringhe marinate sill"],
+["Polpette svedesi",230,12,10,15,200,"","sc","kottbullar swedish meatballs"],
+["Kanelbulle",360,7,52,14,80,"pezzo","sc","cinnamon roll kanelbulle"],
+["Smørrebrød",210,10,20,10,150,"pezzo","sc","smorrebrod"],
+["Pane croccante di segale",335,9,60,1.7,10,"pezzo","sc","knackebrod crispbread wasa"],
+["Skyr",63,11,4,0.2,170,"vasetto","sc","skyr"],
+["Pierogi",210,7,30,7,30,"pezzo","ee","pierogi ruskie"],
+["Borscht",50,1.5,6,2.2,350,"","ee","borscht barszcz"],
+["Pelmeni",250,11,28,10,300,"","ee","pelmeni"],
+["Blini",220,7,30,8,40,"pezzo","ee","blini"],
+["Gulyás",90,7,6,4.5,400,"","ee","gulyas ungherese"],
+["Insalata russa",180,3,9,15,150,"","ee","olivier"],
+["Stroganoff di manzo",160,12,5,10,300,"","ee","beef stroganoff"],
+["Kielbasa",300,13,2.5,26,100,"","ee","kielbasa"],
+["Kefir",55,3.3,4,3,250,"","ee","kefir"],
+["Vodka",231,0,0,0,40,"","ee","vodka"],
+["Hamburger classico",250,13,21,12,220,"pezzo","us","hamburger burger"],
+["Cheeseburger",265,14,20,14,240,"pezzo","us","cheeseburger"],
+["Bacon cheeseburger",290,15,18,17,280,"pezzo","us","bacon burger"],
+["Double cheeseburger",275,16,15,17,300,"pezzo","us","double burger"],
+["Hot dog",250,9,23,14,150,"pezzo","us","hot dog"],
+["Pollo fritto americano",270,20,9,17,150,"","us","fried chicken southern"],
+["Chicken wings",260,22,3,18,35,"pezzo","us","buffalo wings ali di pollo"],
+["Chicken nuggets",295,15,17,19,18,"pezzo","us","nuggets"],
+["Ribs barbecue",290,20,8,20,300,"","us","bbq ribs costine"],
+["Pulled pork",200,18,8,11,150,"","us","pulled pork"],
+["Pulled pork burger",250,14,25,10,250,"pezzo","us","pulled pork sandwich"],
+["Brisket affumicato",270,23,1,19,200,"","us","brisket bbq"],
+["Mac and cheese",165,7,18,7,300,"","us","mac n cheese macaroni"],
+["Clam chowder",90,4,9,4.5,350,"","us","clam chowder"],
+["Club sandwich",230,12,20,11,300,"pezzo","us","club sandwich"],
+["Sandwich BLT",260,10,22,15,200,"pezzo","us","blt bacon lettuce tomato"],
+["Grilled cheese sandwich",330,12,30,18,140,"pezzo","us","grilled cheese toast"],
+["Bagel con salmone e formaggio",250,12,30,9,200,"pezzo","us","bagel lox cream cheese"],
+["Pancake americani",227,6.5,28,10,50,"pezzo","us","pancakes"],
+["Pancake con sciroppo d'acero",260,5,40,8,200,"","us","pancakes maple syrup"],
+["Waffle",290,8,33,14,75,"pezzo","us","waffle"],
+["French toast",230,8,25,11,130,"pezzo","us","french toast"],
+["Uova alla Benedict",230,12,12,15,250,"","us","eggs benedict"],
+["Brownie",450,5,55,24,60,"pezzo","us","brownie"],
+["Cookie americano",480,5,62,23,40,"pezzo","us","cookie chocolate chip"],
+["Donut glassato",420,5,50,22,60,"pezzo","us","donut doughnut glazed"],
+["Muffin ai mirtilli",380,5,52,17,110,"pezzo","us","blueberry muffin"],
+["Cupcake",380,4,52,18,70,"pezzo","us","cupcake"],
+["Apple pie",265,2.5,37,12,130,"","us","apple pie"],
+["Pumpkin pie",230,4.5,29,10,130,"","us","pumpkin pie"],
+["Cinnamon roll",400,6,55,17,110,"pezzo","us","cinnamon roll"],
+["Milkshake alla vaniglia",115,3.5,17,3.5,400,"","us","milkshake"],
+["Burro di arachidi e marmellata",350,11,42,16,100,"pezzo","us","pb&j peanut butter jelly sandwich"],
+["Patatine fritte fast food",312,3.4,38,15,120,"","us","french fries"],
+["Onion rings",330,4,38,18,100,"","us","anelli di cipolla"],
+["Coleslaw",150,1,12,11,100,"","us","coleslaw"],
+["Cornbread",330,7,48,12,70,"pezzo","us","cornbread"],
+["Caesar salad",190,9,7,14,250,"","us","caesar salad"],
+["Cobb salad",170,12,4,12,300,"","us","cobb salad"],
+["Poke bowl",150,10,18,4.5,450,"","us","poke hawaii"],
+["Burrito bowl",140,8,16,5,500,"","us","burrito bowl"],
+["Bagel semplice",260,10,50,1.5,100,"pezzo","us","bagel"],
+["Beef jerky",410,33,11,26,30,"","us","jerky carne secca"],
+["Pop-tart",400,4,70,11,50,"pezzo","us","pop tarts"],
+["Root beer",41,0,10.6,0,330,"","us","root beer"],
+["Bourbon",250,0,0,0,40,"","us","bourbon whiskey"],
+["Tacos al pastor",210,12,18,10,90,"pezzo","mx","tacos al pastor"],
+["Tacos di manzo",220,12,17,12,90,"pezzo","mx","tacos carne asada"],
+["Tacos di pollo",190,13,18,7.5,90,"pezzo","mx","tacos pollo"],
+["Tacos di pesce",200,10,19,9.5,100,"pezzo","mx","fish tacos baja"],
+["Burrito di manzo",210,11,23,8.5,300,"pezzo","mx","burrito beef"],
+["Burrito di pollo",190,11,23,6,300,"pezzo","mx","burrito chicken"],
+["Burrito vegetariano",170,6,27,4.5,300,"pezzo","mx","burrito veggie fagioli"],
+["Quesadilla",300,14,25,16,180,"pezzo","mx","quesadilla"],
+["Enchiladas",170,9,15,8.5,300,"","mx","enchiladas"],
+["Fajitas di pollo",150,14,10,6,300,"","mx","fajitas"],
+["Nachos con formaggio",340,9,35,19,150,"","mx","nachos"],
+["Guacamole",155,2,6,14,50,"","mx","guacamole"],
+["Pico de gallo",25,1,5,0.2,50,"","mx","pico de gallo salsa"],
+["Chili con carne",120,9,9,5.5,350,"","mx","chili con carne"],
+["Chilaquiles",180,7,20,8.5,300,"","mx","chilaquiles"],
+["Tamales",210,7,25,9.5,130,"pezzo","mx","tamales"],
+["Pozole",75,6,7,2.5,450,"","mx","pozole"],
+["Ceviche",90,15,5,1,200,"","mx","ceviche"],
+["Elote",160,4,22,7,150,"pezzo","mx","elote mais grigliato"],
+["Tortilla di mais",220,5.7,45,2.8,30,"pezzo","mx","corn tortilla"],
+["Tortilla di frumento",300,8,50,7.5,45,"pezzo","mx","flour tortilla wrap"],
+["Tortilla chips",490,7,63,23,30,"","mx","totopos"],
+["Fagioli refritos",90,5.5,12,2.5,150,"","mx","refried beans frijoles"],
+["Salsa messicana piccante",30,1.5,6,0.2,30,"","mx","salsa picante"],
+["Mole poblano",190,5,15,13,100,"","mx","mole"],
+["Churros messicani",400,5,45,22,25,"pezzo","mx","churros"],
+["Margarita",200,0,15,0,150,"","mx","margarita"],
+["Tequila",231,0,0,0,40,"","mx","tequila"],
+["Horchata",60,0.5,12,1,250,"","mx","horchata"],
+["Arepa",220,5,38,5,100,"pezzo","la","arepa venezuela colombia"],
+["Arepa ripiena",230,9,26,10,200,"pezzo","la","arepa reina pepiada"],
+["Empanada di carne",290,10,28,16,100,"pezzo","la","empanada argentina"],
+["Empanada al formaggio",300,9,29,17,90,"pezzo","la","empanada queso"],
+["Asado",280,25,0,20,250,"","la","asado argentino"],
+["Chimichurri",460,1,5,48,15,"cucchiaio","la","chimichurri"],
+["Lomo saltado",150,11,12,6.5,400,"","la","lomo saltado peru"],
+["Pollo alla brace peruviano",210,22,1,13,250,"","la","pollo a la brasa"],
+["Ceviche peruviano",90,15,5,1,200,"","la","ceviche peru leche de tigre"],
+["Causa limeña",160,5,20,7,200,"","la","causa limena"],
+["Ají de gallina",170,11,9,10,300,"","la","aji de gallina"],
+["Bandeja paisa",190,11,16,9,600,"","la","bandeja paisa"],
+["Pupusa",250,9,30,10,120,"pezzo","la","pupusa salvador"],
+["Gallo pinto",150,5,26,3,250,"","la","gallo pinto"],
+["Dulce de leche",315,7,55,7.5,20,"cucchiaio","la","dulce de leche"],
+["Alfajor",430,5,62,18,50,"pezzo","la","alfajor"],
+["Tres leches",250,6,35,10,130,"","la","tres leches"],
+["Mate",2,0,0.3,0,250,"","la","yerba mate"],
+["Pisco sour",150,1.5,11,0,150,"","la","pisco sour"],
+["Platano fritto",250,1.5,38,11,100,"","la","platanos fritos maduros tostones"],
+["Feijoada",160,11,10,8.5,400,"","br","feijoada"],
+["Pão de queijo",340,6,40,17,25,"pezzo","br","pao de queijo"],
+["Coxinha",280,9,27,15,80,"pezzo","br","coxinha"],
+["Picanha",290,24,0,21,250,"","br","picanha"],
+["Moqueca",120,12,4,6.5,350,"","br","moqueca"],
+["Brigadeiro",420,4,62,17,15,"pezzo","br","brigadeiro"],
+["Açaí bowl",130,2,22,4.5,300,"","br","acai bowl"],
+["Farofa",400,2,62,15,30,"","br","farofa"],
+["Caipirinha",180,0,17,0,200,"","br","caipirinha"],
+["Guaranà",40,0,10,0,330,"","br","guarana antarctica"],
+["Pollo jerk",200,20,5,11,250,"","ca","jerk chicken jamaica"],
+["Riso e fagioli caraibici",170,5,27,4.5,250,"","ca","rice and peas"],
+["Patty giamaicano",300,8,28,17,140,"pezzo","ca","jamaican patty"],
+["Mojito",140,0,13,0,250,"","ca","mojito"],
+["Piña colada",180,0.5,22,5,250,"","ca","pina colada"],
+["Rum",231,0,0,0,40,"","ca","rum"],
+["Couscous marocchino con verdure",130,4,20,3.5,350,"","ma","couscous verdure"],
+["Couscous con agnello",160,9,17,6,400,"","ma","couscous agnello"],
+["Tajine di pollo",130,12,6,6.5,400,"","ma","tagine tajine"],
+["Tajine di agnello con prugne",170,12,12,8,400,"","ma","tajine prugne"],
+["Harira",65,3.5,9,1.5,400,"","ma","harira"],
+["Pastilla",280,12,25,15,200,"","ma","bastilla pastilla"],
+["Shakshuka tunisina",105,6,6,6.5,300,"","ma","chakchouka"],
+["Brik",260,9,22,15,100,"pezzo","ma","brik tunisino"],
+["Harissa",80,3,10,3.5,10,"cucchiaino","ma","harissa"],
+["Tè alla menta",40,0,10,0,200,"","ma","te marocchino menta"],
+["Msemen",330,6,45,14,80,"pezzo","ma","msemen"],
+["Injera",165,5,34,1,100,"pezzo","af","injera etiopia"],
+["Doro wat",150,12,6,9,300,"","af","doro wat"],
+["Jollof rice",160,3.5,26,5,300,"","af","jollof"],
+["Fufu",160,1.5,38,0.3,250,"","af","fufu"],
+["Pollo yassa",160,14,6,9,350,"","af","yassa senegal"],
+["Maafe",180,10,9,12,350,"","af","mafe arachidi"],
+["Bobotie",190,12,9,12,300,"","af","bobotie"],
+["Biltong",300,55,2,8,30,"","af","biltong"],
+["Bunny chow",200,8,25,7.5,400,"","af","bunny chow"],
+["Bissap",45,0,11,0,250,"","af","bissap karkade ibisco"],
+["Meat pie australiano",260,8,24,15,175,"pezzo","oc","aussie meat pie"],
+["Pavlova",300,3,55,8,100,"","oc","pavlova"],
+["Lamington",350,4,50,15,70,"pezzo","oc","lamington"],
+["Avocado toast",210,5,20,12,180,"pezzo","oc","avocado toast"],
+["Flat white",45,2.5,3.5,2.3,200,"","oc","flat white"],
+["Acai in polpa",70,1,4,5,100,"","xx","acai"],
+["Bacche di goji",350,14,64,0.4,20,"","xx","goji"],
+["Semi di chia",490,17,8,31,15,"cucchiaio","xx","chia"],
+["Quinoa cotta",120,4.4,19,1.9,150,"","xx","quinoa"],
+["Tempeh",192,20,8,11,100,"","xx","tempeh"],
+["Seitan",120,21,4,2,100,"","xx","seitan"],
+["Tofu al naturale",76,8,1.9,4.8,100,"","xx","tofu"],
+["Tofu affumicato",160,16,2,10,100,"","xx","tofu smoked"],
+["Latte d'avena",45,1,6.5,1.5,250,"","xx","oat milk bevanda avena"],
+["Latte di mandorla",24,0.6,3,1.1,250,"","xx","almond milk bevanda mandorla"],
+["Latte di soia",40,3.3,2.5,1.8,250,"","xx","soy milk bevanda soia"],
+["Latte di riso",50,0.3,10,1,250,"","xx","rice milk bevanda riso"],
+["Latte di cocco da bere",20,0.2,2.7,0.9,250,"","xx","coconut drink"],
+["Kombucha",15,0,3.5,0,330,"","xx","kombucha"],
+["Acqua di cocco",19,0.7,3.7,0.2,330,"","xx","coconut water"],
+["Sciroppo d'acero",260,0,67,0.1,20,"cucchiaio","xx","maple syrup"],
+["Sciroppo d'agave",310,0,76,0.5,15,"cucchiaio","xx","agave"],
+["Burro di arachidi",590,25,16,50,15,"cucchiaio","xx","peanut butter"],
+["Crema di anacardi",590,18,28,49,15,"cucchiaio","xx","cashew butter"],
+["Tahina",595,17,21,54,15,"cucchiaio","xx","tahini"],
+["Avocado",160,2,1.8,14.7,150,"pezzo","xx","avocado"],
+["Mango",60,0.8,13.4,0.4,200,"pezzo","xx","mango"],
+["Papaya",43,0.5,9.8,0.3,300,"pezzo","xx","papaya"],
+["Frutto della passione",97,2.2,13,0.7,20,"pezzo","xx","maracuja passion fruit"],
+["Litchi",66,0.8,15.2,0.4,10,"pezzo","xx","lychee"],
+["Pitaya",60,1.2,11,0,300,"pezzo","xx","dragon fruit frutto del drago"],
+["Guava",68,2.6,9,1,100,"pezzo","xx","guava"],
+["Platano da cuocere",122,1.3,29,0.4,180,"pezzo","xx","plantain"],
+["Manioca",160,1.4,36,0.3,100,"","xx","cassava yuca"],
+["Patata dolce",86,1.6,17,0.1,150,"pezzo","xx","sweet potato batata americana"],
+["Jackfruit",95,1.7,22,0.6,100,"","xx","jackfruit"],
+["Okra",33,1.9,4,0.2,100,"","xx","okra gombo"],
+["Pak choi",13,1.5,1.2,0.2,100,"","xx","bok choy"],
+["Germogli di soia",30,3,4,0.2,50,"","xx","bean sprouts"],
+["Shiitake",34,2.2,4.3,0.5,50,"","xx","shiitake"],
+["Daikon",18,0.6,2.5,0.1,100,"","xx","daikon ravanello giapponese"],
+["Zenzero fresco",80,1.8,16,0.8,5,"","xx","ginger"],
+["Citronella",99,1.8,25,0.5,5,"","xx","lemongrass"],
+["Salsa sriracha",93,2,19,1,5,"cucchiaino","xx","sriracha"],
+["Salsa barbecue",170,0.8,40,0.6,15,"cucchiaio","xx","bbq sauce"],
+["Salsa Worcestershire",78,0,19,0,5,"cucchiaino","xx","worcestershire"],
+["Salsa Tabasco",12,1.3,0.8,0.8,1,"cucchiaino","xx","tabasco"],
+["Senape di Digione",140,7,6,10,5,"cucchiaino","xx","dijon mustard"],
+["Wasabi",290,2,46,11,3,"cucchiaino","xx","wasabi"],
+["Miso",198,12.8,20,6,15,"cucchiaio","xx","miso"],
+["Salsa di soia",53,8,4.9,0.6,15,"cucchiaio","xx","soy sauce shoyu"],
+["Tamari",60,10,5,0.1,15,"cucchiaio","xx","tamari"],
+["Noodles di riso cotti",108,1.8,24,0.2,200,"","xx","rice noodles"],
+["Noodles di frumento cotti",138,4.5,25,2,200,"","xx","egg noodles"],
+["Noodles istantanei",440,9,60,18,85,"confezione","xx","instant noodles ramen"],
+["Couscous cotto",112,3.8,22,0.2,150,"","xx","couscous"],
+["Bulgur cotto",83,3,17,0.2,150,"","xx","bulgur"],
+["Miglio cotto",119,3.5,23,1,150,"","xx","millet"],
+["Grano saraceno cotto",92,3.4,18,0.6,150,"","xx","buckwheat kasha"],
+["Amaranto cotto",102,3.8,19,1.6,150,"","xx","amaranth"],
+["Riso venere cotto",130,3.5,25,1.5,150,"","xx","black rice"],
+["Riso selvatico cotto",101,4,20,0.3,150,"","xx","wild rice"],
+["Teff cotto",101,3.9,18,0.7,150,"","xx","teff"],
+["Proteine whey",380,78,8,5,30,"misurino","xx","whey protein"],
+["Barretta proteica",370,33,35,12,55,"pezzo","xx","protein bar"],
+["Energy drink",45,0,11,0,250,"lattina","xx","energy drink red bull monster"],
+["Hard seltzer",40,0,1,0,330,"","xx","hard seltzer"],
+["Bacon croccante",541,37,1.4,42,8,"fetta","xx","bacon cooked crispy"],
+["Bacon crudo",417,13,1.4,40,15,"fetta","xx","bacon raw"]];
+/* [nome, kcal, prot, carb, grassi, porzione g, unità, nome inglese] */
+const FOODS_U = [
+["Abalone, cotte, fritte",189,19.6,11.1,6.8,100,"","mollusks, abalone, mixed species"],
+["Abalone, crude",105,17.1,6,0.8,100,"","mollusks, abalone, mixed species"],
+["Acciughe, europee, crude",131,20.4,0,4.8,100,"","fish, anchovy, european"],
+["Acciughe, europee, sott'olio",210,28.9,0,9.7,100,"","fish, anchovy, european"],
+["Acerola, cruda",32,0.4,6.6,0.3,100,"","acerola, (west indian cherry), raw"],
+["Aceto, balsamico",88,0.5,17,0,16,"cucchiaio","vinegar, balsamic"],
+["Aceto, di mele",21,0,0.9,0,15,"cucchiaio","vinegar, cider"],
+["Aceto, di vino rosso",19,0,0.3,0,15,"cucchiaio","vinegar, red wine"],
+["Aceto, distillato",18,0,0,0,15,"cucchiaio","vinegar, distilled"],
+["Acqua di cocco",19,0.7,2.6,0.2,100,"","nuts, coconut water (liquid from coconuts)"],
+["Acqua di cocco, pronto da bere, senza zucchero",18,0.2,4.2,0,100,"","beverages, coconut water, ready-to-drink"],
+["Aglio in polvere",331,16.6,63.7,0.7,100,"","spices, garlic powder"],
+["Aglio, crudo",149,6.4,31,0.5,100,"","garlic, raw"],
+["Agnello, costata, cotto, alla griglia",340,23.1,0,26.8,100,"","lamb, domestic, rib"],
+["Agnello, costata, cotto, arrosto",341,21.8,0,27.5,100,"","lamb, domestic, rib"],
+["Agnello, costata, crudo",342,15.3,0,30.7,100,"","lamb, domestic, rib"],
+["Agnello, cotto",256,24.5,0,16.8,100,"","lamb, australian, imported"],
+["Agnello, crudo",229,17.8,0,17,100,"","lamb, domestic, composite of trimmed retail cuts"],
+["Agnello, fegato, crudo",136,20.7,2.2,4.9,100,"","lamb, new zealand, imported"],
+["Agnello, filetto, cotto, arrosto",187,30.9,0,7,100,"","lamb, australian, imported"],
+["Agnello, filetto, crudo",136,23.4,0,4.7,100,"","lamb, new zealand, imported"],
+["Agnello, lombata, cotto, alla griglia",219,25.5,0,12.2,100,"","lamb, australian, imported"],
+["Agnello, lombata, cotto, arrosto",290,23.3,0,21.1,100,"","lamb, domestic, loin"],
+["Agnello, lombata, crudo",146,21,0,6.2,100,"","lamb, new zealand, imported"],
+["Agnello, macinato, cotto, alla griglia",283,24.8,0,19.6,100,"","lamb, ground, cooked"],
+["Agnello, macinato, cotto, brasato",192,22.6,0,11.3,100,"","lamb, new zealand, imported"],
+["Agnello, macinato, crudo",255,17.1,0,20.7,100,"","lamb, new zealand, imported"],
+["Agnello, petto, cotto, brasato",270,28.2,0,17.5,100,"","lamb, new zealand, imported"],
+["Agnello, petto, crudo",149,18.3,1,8,100,"","lamb, new zealand, imported"],
+["Agnello, spalla, cotto",296,23.6,0,21.6,100,"","lamb, australian, imported"],
+["Agnello, spalla, cotto, alla griglia",268,23.8,0,18.4,100,"","lamb, domestic, shoulder"],
+["Agnello, spalla, cotto, arrosto",269,22.7,0,19.1,100,"","lamb, domestic, shoulder"],
+["Agnello, spalla, cotto, brasato",338,29.5,0,23.6,100,"","lamb, domestic, shoulder"],
+["Agnello, spalla, crudo",244,17.1,0,19,100,"","lamb, domestic, shoulder"],
+["Agnello, surgelato, costata, cotto, arrosto",317,19.9,0,25.7,100,"","lamb, new zealand, imported"],
+["Agnello, surgelato, costata, crudo",311,15.9,0,27,100,"","lamb, new zealand, imported"],
+["Agnello, surgelato, cotto",270,25.3,0,18,100,"","lamb, new zealand, imported"],
+["Agnello, surgelato, crudo",232,17.9,0,17.2,100,"","lamb, new zealand, imported"],
+["Agnello, surgelato, lombata, cotto, alla griglia",296,24.4,0,21.3,100,"","lamb, new zealand, imported"],
+["Agnello, surgelato, lombata, crudo",273,17.2,0,22.1,100,"","lamb, new zealand, imported"],
+["Agnello, surgelato, spalla, cotto, brasato",342,29.4,0,24,100,"","lamb, new zealand, imported"],
+["Agnello, surgelato, spalla, crudo",251,17.2,0,19.7,100,"","lamb, new zealand, imported"],
+["Albicocche, crude",48,1.4,9.1,0.4,100,"","apricots, raw"],
+["Albicocche, essiccate, solforate, crude",241,3.4,55.3,0.5,100,"","apricots, dried, sulfured"],
+["Albicocche, essiccate, solforate, in umido",113,1.2,25.2,0.1,100,"","apricots, dried, sulfured"],
+["Albicocche, in scatola, al naturale, con buccia",27,0.7,4.8,0.2,100,"","apricots, canned, water pack"],
+["Albicocche, in scatola, al naturale, senza buccia",22,0.7,4.4,0,100,"","apricots, canned, water pack"],
+["Albicocche, in scatola, al succo, con buccia",48,0.6,10.7,0,100,"","apricots, canned, juice pack"],
+["Albicocche, in scatola, in sciroppo leggero, con buccia",63,0.5,14.9,0.1,100,"","apricots, canned, light syrup pack"],
+["Albicocche, in scatola, sciroppate",83,0.6,18.6,0.1,100,"","apricots, canned, heavy syrup"],
+["Albicocche, in scatola, sciroppate, con buccia",83,0.5,19.9,0.1,100,"","apricots, canned, heavy syrup pack"],
+["Albicocche, in scatola, sciroppate, senza buccia",96,0.6,23.2,0,100,"","apricots, canned, heavy syrup pack"],
+["Albicocche, surgelate, zuccherate",98,0.7,22.9,0.1,100,"","apricots, frozen, sweetened"],
+["Alce, cotto, arrosto",134,29.3,0,1,100,"","game meat, moose, cooked"],
+["Alce, crudo",102,22.2,0,0.7,100,"","game meat, moose, raw"],
+["Alga, agar agar, cruda",26,0.5,6.2,0,100,"","seaweed, agar, raw"],
+["Alga, agar agar, essiccata",306,6.2,73.2,0.3,100,"","seaweed, agar, dried"],
+["Alga, kelp, cruda",43,1.7,8.3,0.6,100,"","seaweed, kelp, raw"],
+["Alga, nori, cruda",35,5.8,4.8,0.3,100,"","seaweed, laver, raw"],
+["Alga, spirulina, cruda",26,5.9,2,0.4,100,"","seaweed, spirulina, raw"],
+["Alga, spirulina, essiccata",290,57.5,20.3,7.7,100,"","seaweed, spirulina, dried"],
+["Alga, wakame, cruda",45,3,8.6,0.6,100,"","seaweed, wakame, raw"],
+["Alloro",313,7.6,48.7,8.4,100,"","spices, bay leaf"],
+["Amaranto, cotto",102,3.8,16.6,1.6,100,"","amaranth grain, cooked"],
+["Amaranto, crudo",371,13.6,58.5,7,100,"","amaranth grain, uncooked"],
+["Anacardi, crudi",553,18.2,26.9,43.9,100,"","nuts, cashew nuts, raw"],
+["Anacardi, tostati",574,15.3,29.7,46.4,100,"","nuts, cashew nuts, dry roasted"],
+["Anacardi, tostati con olio",581,16.8,26.9,47.8,100,"","nuts, cashew nuts, oil roasted"],
+["Ananas, crudo",50,0.5,11.7,0.1,100,"","pineapple, raw, all varieties"],
+["Ananas, in scatola, al naturale",32,0.4,7.5,0.1,100,"","pineapple, canned, water pack"],
+["Ananas, in scatola, al succo",60,0.5,14.3,0.1,100,"","pineapple, canned, juice pack"],
+["Ananas, in scatola, in sciroppo leggero",52,0.4,12.6,0.1,100,"","pineapple, canned, light syrup pack"],
+["Ananas, in scatola, sciroppato",83,0.3,20.7,0.1,100,"","pineapple, canned, heavy syrup pack"],
+["Anatra, di allevamento, con pelle, cotta, arrosta",337,19,0,28.4,100,"","duck, domesticated, meat and skin"],
+["Anatra, di allevamento, con pelle, cruda",404,11.5,0,39.3,100,"","duck, domesticated, meat and skin"],
+["Anatra, di allevamento, fegato, cruda",136,18.7,3.5,4.6,100,"","duck, domesticated, liver"],
+["Anatra, di allevamento, solo carne, cotta, arrosta",201,23.5,0,11.2,100,"","duck, domesticated, meat only"],
+["Anatra, di allevamento, solo carne, cruda",135,18.3,0.9,6,100,"","duck, domesticated, meat only"],
+["Anatra, selvatica, con pelle, cruda",211,17.4,0,15.2,100,"","duck, wild, meat and skin"],
+["Anatra, selvatica, petto, solo carne, cruda",123,19.9,0,4.2,100,"","duck, wild, breast"],
+["Aneto",43,3.5,4.9,1.1,100,"","dill weed, fresh"],
+["Aneto, essiccato",253,20,42.2,4.4,100,"","spices, dill weed, dried"],
+["Anguilla, cotta",236,23.6,0,14.9,100,"","fish, eel, mixed species"],
+["Anguilla, cruda",184,18.4,0,11.7,100,"","fish, eel, mixed species"],
+["Anguria, cruda",30,0.6,7.1,0.1,100,"","watermelon, raw"],
+["Antilope, cotte, arroste",150,29.4,0,2.7,100,"","game meat, antelope, cooked"],
+["Antilope, crude",114,22.4,0,2,100,"","game meat, antelope, raw"],
+["Arachidi, cotte, bollite",318,13.5,12.5,22,100,"","peanuts, all types, cooked"],
+["Arachidi, crude",567,25.8,7.6,49.2,100,"","peanuts, all types, raw"],
+["Arachidi, spagnole, crude",570,26.1,6.3,49.6,100,"","peanuts, spanish, raw"],
+["Arachidi, spagnole, tostate con olio",579,28,8.5,49,100,"","peanuts, spanish, oil-roasted"],
+["Arachidi, tostate",587,24.4,12.9,49.7,100,"","peanuts, all types, dry-roasted"],
+["Arachidi, tostate con olio",599,28,5.9,52.5,100,"","peanuts, all types, oil-roasted"],
+["Aragosta, cotta",143,26.4,3.1,1.9,100,"","crustaceans, spiny lobster, mixed species"],
+["Aragosta, cruda",112,20.6,2.4,1.5,100,"","crustaceans, spiny lobster, mixed species"],
+["Arance, crude",47,0.9,9.3,0.1,100,"","oranges, raw, all commercial varieties"],
+["Arance, crude, con buccia",63,1.3,11,0.3,100,"","oranges, raw, with peel"],
+["Aringa, atlantica, cotta",203,23,0,11.6,100,"","fish, herring, atlantic"],
+["Aringa, atlantica, cruda",158,18,0,9,100,"","fish, herring, atlantic"],
+["Aringa, atlantica, sott'aceto",262,14.2,9.6,18,100,"","fish, herring, atlantic"],
+["Aringa, del Pacifico, cotta",250,21,0,17.8,100,"","fish, herring, pacific"],
+["Aringa, del Pacifico, cruda",195,16.4,0,13.9,100,"","fish, herring, pacific"],
+["Asparagi, cotti, bolliti",22,2.4,2.1,0.2,100,"","asparagus, cooked, boiled"],
+["Asparagi, crudi",20,2.2,1.8,0.1,100,"","asparagus, raw"],
+["Asparagi, in scatola",15,1.8,1.5,0.2,100,"","asparagus, canned, regular pack"],
+["Asparagi, surgelati",24,3.2,2.2,0.2,100,"","asparagus, frozen, unprepared"],
+["Asparagi, surgelati, cotti, bolliti",18,3,0.3,0.4,100,"","asparagus, frozen, cooked"],
+["Avocado, crudo",160,2,1.8,14.7,100,"","avocados, raw, all commercial varieties"],
+["Bacche di goji, essiccate",349,14.3,64.1,0.4,28,"cucchiaio","goji berries, dried"],
+["Bacche di sambuco, crude",73,0.7,11.4,0.5,100,"","elderberries, raw"],
+["Bacon di tacchino",226,15.9,1.9,16.9,100,"","turkey bacon, unprepared"],
+["Bacon di tacchino, al microonde",368,29.5,4.2,25.9,8,"fetta","turkey bacon, microwaved"],
+["Bacon, tacchino",253,13.3,4.8,20,100,"","bacon, turkey, low sodium"],
+["Bacon, vegetariano",309,11.7,2.7,29.5,100,"","bacon, meatless"],
+["Bagel, all'uovo",278,10.6,50.7,2.1,100,"","bagels, egg"],
+["Bagel, cannella e uvetta",274,9.8,52.9,1.7,26,"pezzo","bagels, cinnamon-raisin"],
+["Bagel, cannella e uvetta, tostati",294,10.6,56.8,1.8,24,"pezzo","bagels, cinnamon-raisin, toasted"],
+["Bagel, crusca d'avena",255,10.7,49.7,1.2,26,"pezzo","bagels, oat bran"],
+["Bagel, di frumento",250,10.2,44.8,1.5,98,"pezzo","bagels, wheat"],
+["Bagel, multicereali",241,9.9,41.3,1.2,81,"pezzo","bagels, multigrain"],
+["Banane, crude",89,1.1,20.2,0.3,100,"","bananas, raw"],
+["Barbabietole, cotte, bollite",44,1.7,8,0.2,100,"","beets, cooked, boiled"],
+["Barbabietole, crude",43,1.6,6.8,0.2,100,"","beets, raw"],
+["Barbabietole, in scatola",30,0.7,5.9,0.1,100,"","beets, canned, no salt added"],
+["Barbabietole, sott'aceto, in scatola",65,0.8,15.5,0.1,100,"","beets, pickled, canned"],
+["Barrette ai cereali, dure, al burro di arachidi",483,9.8,59.4,23.8,100,"","snacks, granola bars, hard"],
+["Barrette ai cereali, dure, con gocce di cioccolato",438,7.3,67.7,16.3,100,"","snacks, granola bars, hard"],
+["Barrette ai cereali, dure, di mandorle",495,7.7,57.2,25.5,100,"","snacks, granola bars, hard"],
+["Barrette ai cereali, dure, semplici",471,10.1,59.1,19.8,21,"pezzo","snacks, granola bars, hard"],
+["Basilico",23,3.1,1,0.6,100,"","basil, fresh"],
+["Basilico, essiccato",233,23,10,4.1,100,"","spices, basil, dried"],
+["Bastoncini di pesce, surgelati, preparati",277,11,20.2,16.2,57,"pezzo","fish, fish sticks, frozen"],
+["Bevanda di mandorla, al cioccolato, pronto da bere",50,0.6,9,1.2,100,"","beverages, almond milk, chocolate"],
+["Bevanda di riso, senza zucchero",47,0.3,8.9,1,100,"","beverages, rice milk, unsweetened"],
+["Bevanda di soia",43,2.6,4.7,1.5,100,"","soymilk (all flavors), nonfat, with added calcium"],
+["Bevanda di soia, al cioccolato",63,2.3,9.5,1.5,100,"","soymilk, chocolate, nonfat"],
+["Bevanda di soia, senza zucchero",34,2.6,3.2,0.8,100,"","soymilk (all flavors), unsweetened, with added calcium"],
+["Bietola, cotta, bollita",20,1.9,2,0.1,100,"","chard, swiss, cooked"],
+["Bietola, cruda",19,1.8,2.1,0.2,100,"","chard, swiss, raw"],
+["Bignè vuoto",360,9,22,25.9,100,"","cream puff shell, prepared from recipe"],
+["Birra",43,0.5,3.5,0,100,"","alcoholic beverage, beer, light"],
+["Biscotti, al burro",467,6.1,68.1,18.8,100,"","cookies, butter, commercially prepared"],
+["Biscotti, al burro di arachidi",475,9,58.9,23.8,100,"","cookies, peanut butter, commercially prepared"],
+["Biscotti, al burro di arachidi, impasto fresco",458,8.2,51,25,100,"","cookies, peanut butter, refrigerated dough"],
+["Biscotti, al burro di arachidi, impasto fresco, al forno",503,9.1,56.1,27.5,100,"","cookies, peanut butter, refrigerated dough"],
+["Biscotti, all'avena",450,6.2,65.9,18.1,100,"","cookies, oatmeal, reduced fat"],
+["Biscotti, all'avena, impasto fresco",424,5.4,56.6,18.9,100,"","cookies, oatmeal, refrigerated dough"],
+["Biscotti, all'avena, impasto fresco, al forno",471,6,62.9,21,100,"","cookies, oatmeal, refrigerated dough"],
+["Biscotti, all'avena, preparato in polvere",462,6.5,67.3,19.2,100,"","cookies, oatmeal, dry mix"],
+["Biscotti, brownie",405,4.8,61.8,16.3,100,"","cookies, brownies, commercially prepared"],
+["Biscotti, brownie, preparato in polvere",434,4,76.6,14.9,100,"","cookies, brownies, dry mix"],
+["Biscotti, con gocce di cioccolato, impasto fresco",451,4,59.5,21.3,100,"","cookies, chocolate chip, refrigerated dough"],
+["Biscotti, con gocce di cioccolato, impasto fresco, al forno",492,4.9,66.5,22.6,100,"","cookies, chocolate chip, refrigerated dough"],
+["Biscotti, con gocce di cioccolato, preparato in polvere",497,4.6,66.1,25.2,100,"","cookies, chocolate chip, dry mix"],
+["Biscotti, frollini",451,5.4,74.7,14,12,"pezzo","cookies, shortbread, reduced fat"],
+["Biscotti, frollini, alle noci pecan",542,4.9,56.5,32.5,100,"","cookies, shortbread, commercially prepared"],
+["Biscotti, frollini, semplici",514,5.4,62.5,26.2,100,"","cookies, shortbread, commercially prepared"],
+["Biscotti, zucchero, impasto fresco",436,4,60.3,19.5,100,"","cookies, sugar, refrigerated dough"],
+["Biscotti, zucchero, impasto fresco, al forno",489,4.7,64.7,23.1,100,"","cookies, sugar, refrigerated dough"],
+["Biscuit americani",353,7,43.1,16.3,100,"","biscuits, plain or buttermilk, prepared from recipe"],
+["Biscuit americani, preparato in polvere",428,8,61.3,15.4,100,"","biscuits, plain or buttermilk, dry mix"],
+["Biscuit americani, preparato in polvere, preparati",335,7.3,46.6,12.1,100,"","biscuits, plain or buttermilk, dry mix"],
+["Biscuit americani, surgelati, al forno",338,6.2,52.6,11,100,"","biscuits, plain or buttermilk, frozen"],
+["Bisonte, cotto, arrosto",143,28.4,0,2.4,100,"","game meat, bison, separable lean only"],
+["Bisonte, crudo",109,21.6,0,1.8,100,"","game meat, bison, separable lean only"],
+["Bisonte, fesa, cotto, alla griglia",174,30.2,0,5,100,"","game meat, bison, top round"],
+["Bisonte, fesa, crudo",122,23.3,0,2.4,100,"","game meat, bison, top round"],
+["Bisonte, macinato, cotto",179,25.4,0,8.6,100,"","bison, ground, grass-fed"],
+["Bisonte, macinato, cotto, alla piastra",238,23.8,0,15.1,87,"pezzo","game meat, bison, ground"],
+["Bisonte, macinato, crudo",223,18.7,0,15.9,100,"","bison, ground, grass-fed"],
+["Bisonte, scamone, cotto, alla griglia",171,28.1,0,5.7,100,"","game meat, bison, top sirloin"],
+["Bisonte, scamone, crudo",113,21.4,0,2.4,100,"","game meat, bison, top sirloin"],
+["Borragine, cotta, bollita",25,2.1,3.5,0.8,100,"","borage, cooked, boiled"],
+["Borragine, cruda",21,1.8,3.1,0.7,100,"","borage, raw"],
+["Bottatrice, cotte",115,24.8,0,1,100,"","fish, burbot, cooked"],
+["Bottatrice, crude",90,19.3,0,0.8,100,"","fish, burbot, raw"],
+["Bratwurst, maiale, cotto",333,13.7,2.9,29.2,85,"pezzo","bratwurst, pork, cooked"],
+["Bratwurst, manzo e maiale, affumicato",297,12.2,2,26.3,100,"","bratwurst, beef and pork, smoked"],
+["Bratwurst, pollo, cotto",176,19.4,0,10.3,100,"","bratwurst, chicken, cooked"],
+["Bratwurst, vitello, cotto",341,14,0,31.7,100,"","bratwurst, veal, cooked"],
+["Brioche dolci, al formaggio",360,7.1,42.5,18.3,100,"","sweet rolls, cheese"],
+["Broccoli, cinesi, cotti",22,1.1,1.3,0.7,100,"","broccoli, chinese, cooked"],
+["Broccoli, cinesi, crudi",30,1.2,2.1,0.8,100,"","broccoli, chinese, raw"],
+["Broccoli, cotti, bolliti",35,2.4,3.9,0.4,100,"","broccoli, cooked, boiled"],
+["Broccoli, crudi",34,2.8,4,0.4,100,"","broccoli, raw"],
+["Broccoli, foglie, crudi",28,3,2.8,0.3,100,"","broccoli, leaves, raw"],
+["Broccoli, surgelati, tritati",26,2.8,1.8,0.3,100,"","broccoli, frozen, chopped"],
+["Broccoli, surgelati, tritati, cotti, bolliti",28,3.1,2.3,0.1,100,"","broccoli, frozen, chopped"],
+["Brodo di pesce",16,2,0.4,0.6,100,"","fish broth"],
+["Budino, al cioccolato, preparato in polvere",362,2.6,84.8,2.1,100,"","puddings, chocolate, dry mix"],
+["Budino, al cioccolato, preparato in polvere, istantaneo",378,2.3,84.3,1.9,100,"","puddings, chocolate, dry mix"],
+["Budino, al cioccolato, preparato in polvere, istantaneo, preparato con latte intero",111,3.1,17.8,3.1,100,"","puddings, chocolate, dry mix"],
+["Budino, al cioccolato, preparato in polvere, preparato con latte intero",120,3.2,18.8,3.1,100,"","puddings, chocolate, dry mix"],
+["Budino, al cioccolato, pronto",142,2.1,23,4.6,100,"","puddings, chocolate, ready-to-eat"],
+["Budino, al limone, preparato in polvere",363,0.1,91.7,0.5,100,"","puddings, lemon, dry mix"],
+["Budino, al limone, preparato in polvere, istantaneo",378,0,95.4,0.7,100,"","puddings, lemon, dry mix"],
+["Budino, al limone, preparato in polvere, istantaneo, preparato con latte intero",115,2.7,20.1,2.9,100,"","puddings, lemon, dry mix"],
+["Budino, alla banana, preparato in polvere",366,0,92.7,0.4,100,"","puddings, banana, dry mix"],
+["Budino, alla banana, preparato in polvere, istantaneo",367,0,92.7,0.6,100,"","puddings, banana, dry mix"],
+["Budino, alla banana, preparato in polvere, istantaneo, preparato con latte intero",115,2.6,19.8,2.8,100,"","puddings, banana, dry mix"],
+["Budino, alla banana, preparato in polvere, preparato con latte intero",111,2.7,18.4,2.9,100,"","puddings, banana, dry mix"],
+["Budino, alla vaniglia, preparato in polvere",369,0.3,92.4,1.1,100,"","puddings, vanilla, dry mix"],
+["Budino, alla vaniglia, preparato in polvere, istantaneo",377,0,92.9,0.6,100,"","puddings, vanilla, dry mix"],
+["Budino, alla vaniglia, preparato in polvere, istantaneo, preparato con latte intero",114,2.7,19.7,2.9,100,"","puddings, vanilla, dry mix"],
+["Budino, alla vaniglia, preparato in polvere, preparato con latte intero",113,2.8,18.8,2.9,100,"","puddings, vanilla, dry mix"],
+["Budino, alla vaniglia, pronto",130,1.4,22.6,3.8,100,"","puddings, vanilla, ready-to-eat"],
+["Budino, crema di cocco, preparato in polvere",434,1,80.2,11.4,100,"","puddings, coconut cream, dry mix"],
+["Budino, crema di cocco, preparato in polvere, istantaneo",415,0.9,79.5,10,100,"","puddings, coconut cream, dry mix"],
+["Budino, crema di cocco, preparato in polvere, istantaneo, preparato con latte intero",117,2.9,19,3.5,100,"","puddings, coconut cream, dry mix"],
+["Budino, crema di cocco, preparato in polvere, preparato con latte intero",114,3,17.5,3.8,100,"","puddings, coconut cream, dry mix"],
+["Budino, di riso, preparato in polvere",376,2.7,90.5,0.1,100,"","puddings, rice, dry mix"],
+["Budino, di riso, preparato in polvere, preparato con latte intero",121,3.2,20.6,2.8,100,"","puddings, rice, dry mix"],
+["Budino, di riso, pronto",108,3.2,18.1,2.1,100,"","puddings, rice, ready-to-eat"],
+["Budino, tapioca, preparato in polvere",369,0.1,94.1,0.1,100,"","puddings, tapioca, dry mix"],
+["Budino, tapioca, preparato in polvere, preparato con latte intero",115,2.8,19.4,2.9,100,"","puddings, tapioca, dry mix"],
+["Budino, tapioca, pronto",130,1.9,21.7,3.9,100,"","puddings, tapioca, ready-to-eat"],
+["Bufalo, acqua, cotto, arrosto",131,26.8,0,1.8,100,"","game meat, buffalo, water"],
+["Bufalo, acqua, crudo",99,20.4,0,1.4,100,"","game meat, buffalo, water"],
+["Bulgur, cotto",83,3.1,14.1,0.2,100,"","bulgur, cooked"],
+["Bulgur, secco",342,12.3,63.4,1.3,100,"","bulgur, dry"],
+["Burger vegetale",177,15.7,9.4,6.3,100,"","veggie burgers or soyburgers, unprepared"],
+["Burro",717,0.8,0.1,81.1,100,"","butter, light, stick"],
+["Burro di arachidi",590,24,15.2,49.9,16,"cucchiaio","peanut butter, reduced sodium"],
+["Burro di arachidi, cremoso",598,22.2,17.3,51.4,32,"cucchiaio","peanut butter, smooth style, with salt"],
+["Burro di cacao",884,0,0,100,100,"","oil, cocoa butter"],
+["Burro, montato",718,0.5,2.9,78.3,100,"","butter, whipped, with salt"],
+["Cacao solubile, in polvere",398,6.7,80,4,100,"","beverages, cocoa mix, powder"],
+["Cacao solubile, in polvere, preparato con acqua",55,0.9,11,0.6,100,"","beverages, cocoa mix, powder"],
+["Cacao solubile, senza zucchero, in polvere",377,15.5,64.4,3,100,"","beverages, cocoa mix, no sugar added"],
+["Cacao, in polvere, senza zucchero",228,19.6,20.9,13.7,100,"","cocoa, dry powder, unsweetened"],
+["Cachi, giapponesi, crudi",70,0.6,15,0.2,168,"pezzo","persimmons, japanese, raw"],
+["Cachi, giapponesi, essiccati",274,1.4,58.9,0.6,34,"pezzo","persimmons, japanese, dried"],
+["Caffè, istantaneo, decaffeinato, in polvere",351,11.6,76,0.2,100,"","beverages, coffee, instant"],
+["Caffè, istantaneo, decaffeinato, preparato con acqua",2,0.1,0.4,0,100,"","beverages, coffee, instant"],
+["Caffè, istantaneo, in polvere",353,12.2,75.4,0.5,100,"","beverages, coffee, instant"],
+["Caffè, istantaneo, preparato con acqua",2,0.1,0.3,0,100,"","beverages, coffee, instant"],
+["Caffè, preparato, preparato con acqua",1,0.1,0,0,100,"","beverages, coffee, brewed"],
+["Caffè, preparato, preparato con acqua, decaffeinato",0,0.1,0,0,100,"","beverages, coffee, brewed"],
+["Calamari, cotti, fritti",175,17.9,7.8,7.5,100,"","mollusks, squid, mixed species"],
+["Calamari, crudi",92,15.6,3.1,1.4,100,"","mollusks, squid, mixed species"],
+["Canditi",322,0.3,81.1,0.1,100,"","candied fruit"],
+["Capperi, in scatola",23,2.4,1.7,0.9,9,"cucchiaio","capers, canned"],
+["Capra, cruda",109,20.6,0,2.3,100,"","goat, raw"],
+["Carambola, cruda",31,1,3.9,0.3,100,"","carambola, (starfruit), raw"],
+["Caramelle mou",382,4.6,77,8.1,100,"","candies, caramels"],
+["Carciofi, cotti, bolliti",53,2.9,6.2,0.3,120,"pezzo","artichokes, (globe or french), cooked"],
+["Carciofi, crudi",47,3.3,5.1,0.1,128,"pezzo","artichokes, (globe or french), raw"],
+["Carciofi, surgelati",38,2.6,3.9,0.4,100,"","artichokes, (globe or french), frozen"],
+["Carciofi, surgelati, cotti, bolliti",45,3.1,4.6,0.5,100,"","artichokes, (globe or french), frozen"],
+["Cardamomo",311,10.8,40.5,6.7,100,"","spices, cardamom"],
+["Cardi, cotti, bolliti",22,0.8,3.6,0.1,100,"","cardoon, cooked, boiled"],
+["Cardi, crudi",17,0.7,2.5,0.1,100,"","cardoon, raw"],
+["Caribù, cotto, arrosto",167,29.8,0,4.4,100,"","game meat, caribou, cooked"],
+["Caribù, crudo",127,22.6,0,3.4,100,"","game meat, caribou, raw"],
+["Carote, baby, crude",35,0.6,5.3,0.1,15,"pezzo","carrots, baby, raw"],
+["Carote, cotte, bollite",35,0.8,5.2,0.2,10,"cucchiaio","carrots, cooked, boiled"],
+["Carote, crude",41,0.9,6.8,0.2,100,"","carrots, raw"],
+["Carote, in scatola",25,0.6,4,0.2,100,"","carrots, canned, regular pack"],
+["Carote, surgelate",36,0.8,4.6,0.5,100,"","carrots, frozen, unprepared"],
+["Carote, surgelate, cotte, bollite",37,0.6,4.4,0.7,100,"","carrots, frozen, cooked"],
+["Carpa, cotta",162,22.9,0,7.2,100,"","fish, carp, cooked"],
+["Carpa, cruda",127,17.8,0,5.6,100,"","fish, carp, raw"],
+["Castagne d'acqua, cinesi, crude",97,1.4,20.9,0.1,100,"","waterchestnuts, chinese, (matai)"],
+["Castagne d'acqua, cinesi, in scatola",50,0.9,9.8,0.1,100,"","waterchestnuts, chinese, canned"],
+["Castagne, cinesi, arroste",239,4.5,52.4,1.2,100,"","nuts, chestnuts, chinese"],
+["Castagne, cinesi, crude",224,4.2,49.1,1.1,100,"","nuts, chestnuts, chinese"],
+["Castagne, cinesi, essiccate",363,6.8,79.8,1.8,100,"","nuts, chestnuts, chinese"],
+["Castagne, europee, arroste",245,3.2,47.9,2.2,100,"","nuts, chestnuts, european"],
+["Castagne, europee, crude, sbucciate",196,1.6,44.2,1.2,100,"","nuts, chestnuts, european"],
+["Castagne, europee, essiccate, sbucciate",369,5,78.4,3.9,100,"","nuts, chestnuts, european"],
+["Castagne, giapponesi, arroste",201,3,45.1,0.8,100,"","nuts, chestnuts, japanese"],
+["Castagne, giapponesi, crude",154,2.2,34.9,0.5,100,"","nuts, chestnuts, japanese"],
+["Castagne, giapponesi, essiccate",360,5.2,81.4,1.2,100,"","nuts, chestnuts, japanese"],
+["Cavallo, cotto, arrosto",175,28.1,0,6,100,"","game meat, horse, cooked"],
+["Cavallo, crudo",133,21.4,0,4.6,100,"","game meat, horse, raw"],
+["Cavoletti di Bruxelles, cotti, bolliti",36,2.5,4.5,0.5,100,"","brussels sprouts, cooked, boiled"],
+["Cavoletti di Bruxelles, crudi",43,3.4,5.1,0.3,100,"","brussels sprouts, raw"],
+["Cavoletti di Bruxelles, surgelati",41,3.8,4.1,0.4,100,"","brussels sprouts, frozen, unprepared"],
+["Cavoletti di Bruxelles, surgelati, cotti, bolliti",42,3.6,4.2,0.4,100,"","brussels sprouts, frozen, cooked"],
+["Cavolfiore, cotto, bollito",23,1.8,1.8,0.5,100,"","cauliflower, cooked, boiled"],
+["Cavolfiore, crudo",25,1.9,3,0.3,100,"","cauliflower, raw"],
+["Cavolfiore, surgelato",24,2,2.4,0.3,100,"","cauliflower, frozen, unprepared"],
+["Cavolfiore, surgelato, cotto, bollito",19,1.6,1,0.2,100,"","cauliflower, frozen, cooked"],
+["Cavolfiore, verde, cotto",32,3,3,0.3,100,"","cauliflower, green, cooked"],
+["Cavolfiore, verde, crudo",31,3,2.9,0.3,100,"","cauliflower, green, raw"],
+["Cavolo nero americano, cotto, bollito",33,2.7,1.7,0.7,100,"","collards, cooked, boiled"],
+["Cavolo nero americano, crudo",32,3,1.4,0.6,100,"","collards, raw"],
+["Cavolo nero americano, surgelato, tritato",33,2.7,2.9,0.4,100,"","collards, frozen, chopped"],
+["Cavolo nero americano, surgelato, tritato, cotto, bollito",36,3,4.3,0.4,100,"","collards, frozen, chopped"],
+["Cavolo rapa, cotto, bollito",29,1.8,5.6,0.1,100,"","kohlrabi, cooked, boiled"],
+["Cavolo rapa, crudo",27,1.7,2.6,0.1,100,"","kohlrabi, raw"],
+["Cavolo riccio, cotto, bollito",28,1.9,3.6,0.4,100,"","kale, cooked, boiled"],
+["Cavolo riccio, crudo",49,4.3,5.2,0.9,100,"","kale, raw"],
+["Cavolo riccio, surgelato",28,2.7,2.9,0.5,100,"","kale, frozen, unprepared"],
+["Cavolo riccio, surgelato, cotto, bollito",30,2.8,3.2,0.5,100,"","kale, frozen, cooked"],
+["Cavolo, alla senape",28,1.1,2.5,0.1,100,"","cabbage, mustard, salted"],
+["Cavolo, cinese, cotto, bollito",14,1.5,0.7,0.2,100,"","cabbage, chinese (pe-tsai), cooked"],
+["Cavolo, cinese, crudo",16,1.2,2,0.2,100,"","cabbage, chinese (pe-tsai), raw"],
+["Cavolo, cotto, bollito",23,1.3,3.6,0.1,100,"","cabbage, cooked, boiled"],
+["Cavolo, crudo",25,1.3,3.3,0.1,100,"","cabbage, raw"],
+["Cavolo, kimchi",15,1.1,0.8,0.5,100,"","cabbage, kimchi"],
+["Cavolo, pak choi, cotto, bollito",12,1.6,0.8,0.2,100,"","cabbage, chinese (pak-choi), cooked"],
+["Cavolo, pak choi, crudo",13,1.5,1.2,0.2,100,"","cabbage, chinese (pak-choi), raw"],
+["Cavolo, rosso, cotto, bollito",29,1.5,4.3,0.1,22,"pezzo","cabbage, red, cooked"],
+["Cavolo, rosso, crudo",31,1.4,5.3,0.2,100,"","cabbage, red, raw"],
+["Cavolo, verza, cotto, bollito",24,1.8,2.6,0.1,100,"","cabbage, savoy, cooked"],
+["Cavolo, verza, crudo",27,2,3,0.1,100,"","cabbage, savoy, raw"],
+["Ceci, secchi, cotti, bolliti",164,8.9,19.8,2.6,100,"","chickpeas (garbanzo beans, bengal gram), mature seeds"],
+["Ceci, secchi, crudi",378,20.5,50.8,6,100,"","chickpeas (garbanzo beans, bengal gram), mature seeds"],
+["Ceci, secchi, in scatola",88,4.9,9.1,1.9,100,"","chickpeas (garbanzo beans, bengal gram), mature seeds"],
+["Cerfoglio, essiccato",237,23.2,37.8,3.9,100,"","spices, chervil, dried"],
+["Cernia, cotta",118,24.8,0,1.3,100,"","fish, grouper, mixed species"],
+["Cernia, cruda",92,19.4,0,1,100,"","fish, grouper, mixed species"],
+["Cervo, cotto, arrosto",158,30.2,0,3.2,100,"","game meat, deer, cooked"],
+["Cervo, crudo",120,23,0,2.4,100,"","game meat, deer, raw"],
+["Cervo, fesa, cotto, alla griglia",152,31.5,0,1.9,100,"","game meat, deer, top round"],
+["Cervo, filetto, cotto, alla griglia",149,29.9,0,2.4,100,"","game meat, deer, tenderloin"],
+["Cervo, lombata, cotto, alla griglia",150,30.2,0,2.4,100,"","game meat, deer, loin"],
+["Cervo, macinato, cotto, alla piastra",187,26.4,0,8.2,93,"pezzo","game meat, deer, ground"],
+["Cervo, macinato, crudo",157,21.8,0,7.1,100,"","game meat, deer, ground"],
+["Cetriolini sottaceto, cetriolo, acidi",11,0.3,1.1,0.2,100,"","pickles, cucumber, sour"],
+["Cetriolo, con buccia, crudo",15,0.7,3.1,0.1,100,"","cucumber, with peel, raw"],
+["Cetriolo, sbucciato, crudo",12,0.6,1.5,0.2,100,"","cucumber, peeled, raw"],
+["Chayote, alla frutta, cotto, bollito",24,0.6,2.3,0.5,100,"","chayote, fruit, cooked"],
+["Chayote, alla frutta, crudo",19,0.8,2.8,0.1,100,"","chayote, fruit, raw"],
+["Cheesecake",321,5.5,25.1,22.5,100,"","cheesecake commercially prepared"],
+["Cherimoya, cruda",75,1.6,14.7,0.7,100,"","cherimoya, raw"],
+["Chili con fagioli, in scatola",103,6.1,9.9,3.8,100,"","chili with beans, canned"],
+["Chiodi di garofano, macinati",274,6,31.6,13,100,"","spices, cloves, ground"],
+["Chorizo, maiale e manzo",455,24.1,1.9,38.3,100,"","chorizo, pork and beef"],
+["Cicoria, cruda",23,1.7,0.7,0.3,100,"","chicory greens, raw"],
+["Ciliegie al maraschino, in scatola",165,0.2,38.8,0.2,100,"","maraschino cherries, canned, drained"],
+["Ciliegie, acide, in scatola, al naturale",42,0.7,9.2,0.2,100,"","cherries, sour, canned"],
+["Ciliegie, acide, rosse, crude",50,1,10.6,0.3,100,"","cherries, sour, red"],
+["Ciliegie, acide, rosse, in scatola, in sciroppo leggero",75,0.7,18.5,0.1,100,"","cherries, sour, red"],
+["Ciliegie, acide, rosse, in scatola, sciroppate",114,0.7,28.4,0.1,100,"","cherries, sour, red"],
+["Ciliegie, acide, rosse, surgelate, senza zucchero",46,0.9,9.4,0.4,100,"","cherries, sour, red"],
+["Ciliegie, dolci, crude",63,1.1,13.9,0.2,100,"","cherries, sweet, raw"],
+["Ciliegie, dolci, in scatola, al naturale",46,0.8,10.3,0.1,100,"","cherries, sweet, canned"],
+["Ciliegie, dolci, in scatola, al succo",54,0.9,12.3,0,100,"","cherries, sweet, canned"],
+["Ciliegie, dolci, in scatola, in sciroppo leggero",67,0.6,15.8,0.1,100,"","cherries, sweet, canned"],
+["Ciliegie, dolci, in scatola, sciroppate",102,0.6,24.7,0.1,100,"","cherries, sweet, canned"],
+["Ciliegie, dolci, surgelate, zuccherate",89,1.1,20.3,0.1,100,"","cherries, sweet, frozen"],
+["Cime di rapa, cotte",33,3.8,0.3,0.5,100,"","broccoli raab, cooked"],
+["Cime di rapa, cotte, bollite",20,1.1,0.9,0.2,100,"","turnip greens, cooked, boiled"],
+["Cime di rapa, crude",32,1.5,3.9,0.3,100,"","broccoli raab, raw"],
+["Cime di rapa, in scatola",19,1.4,1.5,0.3,100,"","turnip greens, canned, solids and liquids"],
+["Cime di rapa, surgelate",22,2.5,1.2,0.3,100,"","turnip greens, frozen, unprepared"],
+["Cime di rapa, surgelate, cotte, bollite",29,3.4,1.6,0.4,100,"","turnip greens, frozen, cooked"],
+["Cinghiale, selvatico, cotto, arrosto",160,28.3,0,4.4,100,"","game meat, boar, wild"],
+["Cinghiale, selvatico, crudo",122,21.5,0,3.3,100,"","game meat, boar, wild"],
+["Cioccolato, fondente",579,6.1,44.4,38.3,100,"","chocolate, dark, 45- 59% cacao solids"],
+["Cipolla in polvere",341,10.4,63.9,1,100,"","spices, onion powder"],
+["Cipolle, cipollotti, crude",32,1.8,4.7,0.2,100,"","onions, spring or scallions (includes tops and bulb), raw"],
+["Cipolle, cotte, bollite",44,1.4,8.8,0.2,100,"","onions, cooked, boiled"],
+["Cipolle, crude",40,1.1,7.6,0.1,100,"","onions, raw"],
+["Cipolle, dolci, crude",32,0.8,6.6,0.1,100,"","onions, sweet, raw"],
+["Cipolle, gialle, saltate",132,0.9,6.2,10.8,100,"","onions, yellow, sauteed"],
+["Cipolle, in scatola",19,0.8,2.8,0.1,100,"","onions, canned, solids and liquids"],
+["Cipolle, surgelate, intere",35,0.9,6.7,0.1,100,"","onions, frozen, whole"],
+["Cipolle, surgelate, intere, cotte, bollite",28,0.7,5.3,0.1,100,"","onions, frozen, whole"],
+["Cipolle, surgelate, tritate",29,0.8,5,0.1,100,"","onions, frozen, chopped"],
+["Cipolle, surgelate, tritate, cotte, bollite",28,0.8,4.8,0.1,15,"cucchiaio","onions, frozen, chopped"],
+["Citronella, cruda",99,1.8,25.3,0.5,100,"","lemon grass (citronella), raw"],
+["Clementine, crude",47,0.8,10.3,0.1,74,"pezzo","clementines, raw"],
+["Condimento per insalata, agrodolce",15,0.1,3.7,0,16,"cucchiaio","salad dressing, sweet and sour"],
+["Condimento per insalata, caesar",131,1.5,30.5,0.2,100,"","salad dressing, caesar, low calorie"],
+["Condimento per insalata, condimento all'italiana",200,0.3,6.5,20,14,"cucchiaio","salad dressing, italian dressing, fat-free"],
+["Condimento per insalata, salsa french",233,0.6,28.2,13.5,100,"","salad dressing, french dressing, fat-free"],
+["Condimento per insalata, salsa ranch",196,1.2,20.2,12.4,100,"","salad dressing, ranch dressing, fat-free"],
+["Condimento per insalata, salsa thousand island",195,0.8,22.9,11.3,100,"","salad dressing, thousand island dressing, fat-free"],
+["Condimento per insalata, senape e miele",464,0.9,22.9,40.8,30,"cucchiaio","salad dressing, honey mustard, regular"],
+["Condimento per insalata, tipo maionese",680,1,0.6,74.8,14,"cucchiaio","salad dressing, mayonnaise, light"],
+["Coniglio, di allevamento, cotto, arrosto",197,29.1,0,8.1,100,"","game meat, rabbit, domesticated"],
+["Coniglio, di allevamento, cotto, in umido",206,30.4,0,8.4,100,"","game meat, rabbit, domesticated"],
+["Coniglio, di allevamento, crudo",136,20.1,0,5.5,100,"","game meat, rabbit, domesticated"],
+["Coniglio, selvatico, cotto, in umido",173,33,0,3.5,100,"","game meat, rabbit, wild"],
+["Coniglio, selvatico, crudo",114,21.8,0,2.3,100,"","game meat, rabbit, wild"],
+["Coregone, affumicato",108,23.4,0,0.9,100,"","fish, whitefish, mixed species"],
+["Coregone, cotto",172,24.5,0,7.5,100,"","fish, whitefish, mixed species"],
+["Coregone, crudo",134,19.1,0,5.9,100,"","fish, whitefish, mixed species"],
+["Coriandolo fresco, crudo",23,2.1,0.9,0.5,100,"","coriander (cilantro) leaves, raw"],
+["Coriandolo fresco, essiccato",279,21.9,41.7,4.8,100,"","spices, coriander leaf, dried"],
+["Coste di barbabietola, cotte, bollite",27,2.6,2.6,0.2,100,"","beet greens, cooked, boiled"],
+["Coste di barbabietola, crude",22,2.2,0.6,0.1,100,"","beet greens, raw"],
+["Cotenne fritte, al gusto barbecue",538,57.9,1.6,31.8,100,"","snacks, pork skins, barbecue-flavor"],
+["Cotenne fritte, semplici",544,61.3,0,31.3,100,"","snacks, pork skins, plain"],
+["Couscous, cotto",112,3.8,21.8,0.2,100,"","couscous, cooked"],
+["Couscous, secco",376,12.8,72.4,0.6,100,"","couscous, dry"],
+["Cracker, al formaggio",489,10.9,57.1,22.7,100,"","crackers, cheese, reduced fat"],
+["Cracker, al formaggio, integrali",412,9.6,50.9,16,100,"","crackers, cheese, whole grain"],
+["Cracker, di frumento",455,7.3,63.8,16.4,100,"","crackers, wheat, reduced fat"],
+["Cracker, di segale, wafer",381,9,52.9,9.2,100,"","crackers, rye, wafers"],
+["Cracker, di segale, wafer, semplici",334,9.6,57.5,0.9,100,"","crackers, rye, wafers"],
+["Cracker, integrali",427,10.6,59.2,14.1,100,"","crackers, whole-wheat, reduced fat"],
+["Cracker, multicereali",482,7.1,64.1,20.4,100,"","crackers, multigrain"],
+["Cracker, pane azzimo, all'uovo",391,12.3,75.8,2.1,100,"","crackers, matzo, egg"],
+["Cracker, pane azzimo, integrali",351,13.1,67.1,1.5,100,"","crackers, matzo, whole-wheat"],
+["Cracker, pane azzimo, semplici",395,10,80.7,1.4,100,"","crackers, matzo, plain"],
+["Crauti, in scatola",19,0.9,1.4,0.1,100,"","sauerkraut, canned, solids and liquids"],
+["Crema di anacardi, semplice",609,12.1,27.3,53,16,"cucchiaio","nuts, cashew butter, plain"],
+["Crema di cocco, in scatola, zuccherata",357,1.2,53,16.3,19,"cucchiaio","nuts, coconut cream, canned"],
+["Crema di mandorle, semplice",614,21,8.5,55.5,16,"cucchiaio","nuts, almond butter, plain"],
+["Crema di semi di girasole",617,17.3,17.6,55.2,16,"cucchiaio","seeds, sunflower seed butter, without salt"],
+["Cremos@",608,24.5,10.9,54.2,16,"cucchiaio","peanut butter with omega-3, creamy"],
+["Crescione, crudo",11,2.3,0.8,0.1,100,"","watercress, raw"],
+["Croissant, al burro",406,8.2,43.2,21,100,"","croissants, butter"],
+["Croissant, al formaggio",414,9.2,44.4,20.9,100,"","croissants, cheese"],
+["Croissant, alla mela",254,7.4,34.6,8.7,100,"","croissants, apple"],
+["Crostini di pane",465,10.8,58.5,18.3,100,"","croutons, seasoned"],
+["Crostini di pane, semplici",407,11.9,68.4,6.6,100,"","croutons, plain"],
+["Crusca d'avena, cotta",40,3.2,8.8,0.9,100,"","oat bran, cooked"],
+["Crusca d'avena, cruda",246,17.3,50.8,7,100,"","oat bran, raw"],
+["Crusca di riso",884,0,0,100,100,"","oil, rice bran"],
+["Crème de menthe",371,0,41.6,0.3,100,"","alcoholic beverage, creme de menthe, 72 proof"],
+["Cumino",375,17.8,33.7,22.3,100,"","spices, cumin seed"],
+["Cumino dei prati",333,19.8,11.9,14.6,100,"","spices, caraway seed"],
+["Cuori di palma, crudi",115,2.7,24.1,0.2,100,"","hearts of palm, raw"],
+["Cuori di palma, in scatola",28,2.5,2.2,0.6,100,"","hearts of palm, canned"],
+["Curcuma, macinata",312,9.7,44.4,3.2,100,"","spices, turmeric, ground"],
+["Curry in polvere",325,14.3,2.6,14,100,"","spices, curry powder"],
+["Daiquiri",186,0.1,6.8,0.1,100,"","alcoholic beverage, daiquiri, prepared-from-recipe"],
+["Daiquiri, in scatola",125,0,15.7,0,100,"","alcoholic beverage, daiquiri, canned"],
+["Danese, al formaggio",374,8,36.2,21.9,100,"","danish pastry, cheese"],
+["Danese, al limone",371,5.4,45.9,18.5,100,"","danish pastry, lemon, unenriched"],
+["Danese, alla cannella",403,7,43.4,22.4,100,"","danish pastry, cinnamon, enriched"],
+["Datteri, deglet nour",282,2.5,67,0.4,100,"","dates, deglet noor"],
+["Datteri, medjool",277,1.8,68.3,0.1,24,"pezzo","dates, medjool"],
+["Dentice, cotto",128,26.3,0,1.7,100,"","fish, snapper, mixed species"],
+["Dentice, crudo",100,20.5,0,1.3,100,"","fish, snapper, mixed species"],
+["Distillat@, gin",263,0,0,0,100,"","alcoholic beverage, distilled, gin"],
+["Distillat@, rum",231,0,0,0,100,"","alcoholic beverage, distilled, rum"],
+["Distillat@, rum, vodka",263,0,0,0,100,"","alcoholic beverage, distilled, all (gin"],
+["Distillat@, vodka",231,0,0,0,100,"","alcoholic beverage, distilled, vodka"],
+["Distillat@, whisky",250,0,0.1,0,100,"","alcoholic beverage, distilled, whiskey"],
+["Dragoncello, essiccato",295,22.8,42.8,7.2,100,"","spices, tarragon, dried"],
+["Dulce de leche",315,6.8,55.4,7.3,19,"cucchiaio","dulce de leche"],
+["Dur@",394,0,98,0.2,100,"","candies, hard"],
+["Edamame, surgelati",109,11.2,2.8,4.7,100,"","edamame, frozen, unprepared"],
+["Edamame, surgelati, preparati",121,11.9,3.7,5.2,100,"","edamame, frozen, prepared"],
+["Eggnog",88,4.5,8.1,4.2,100,"","eggnog"],
+["Eglefino, affumicato",116,25.2,0,1,100,"","fish, haddock, smoked"],
+["Eglefino, cotto",90,20,0,0.6,100,"","fish, haddock, cooked"],
+["Eglefino, crudo",74,16.3,0,0.5,100,"","fish, haddock, raw"],
+["Emù, controfiletto, cotto, alla griglia",152,29.1,0,3.1,100,"","emu, top loin, cooked"],
+["Emù, macinato, cotto, alla piastra",163,28.4,0,4.7,109,"pezzo","emu, ground, cooked"],
+["Emù, macinato, crudo",134,22.8,0,4,117,"pezzo","emu, ground, raw"],
+["Emù, ostriche, crudo",141,22.8,0,4.9,100,"","emu, oyster, raw"],
+["Energy drink",4,0.4,0.4,0,100,"","beverages, energy drink, sugar free"],
+["Erba cipollina, cruda",30,3.3,1.8,0.7,100,"","chives, raw"],
+["Erba cipollina, liofilizzata",311,21.2,38.1,3.5,100,"","chives, freeze-dried"],
+["Estratto di vaniglia",288,0.1,12.7,0.1,100,"","vanilla extract"],
+["Fagiano, coscia, solo carne, crudo",134,22.2,0,4.3,100,"","pheasant, leg, meat only"],
+["Fagiano, crudo, con pelle",181,22.7,0,9.3,100,"","pheasant, raw, meat and skin"],
+["Fagiano, crudo, solo carne",133,23.6,0,3.6,100,"","pheasant, raw, meat only"],
+["Fagiano, petto, solo carne, crudo",133,24.4,0,3.2,100,"","pheasant, breast, meat only"],
+["Fagioli dall'occhio, freschi, cotti, bolliti",97,3.2,15.3,0.4,100,"","cowpeas (blackeyes), immature seeds, cooked"],
+["Fagioli dall'occhio, freschi, crudi",90,3,13.8,0.3,100,"","cowpeas (blackeyes), immature seeds, raw"],
+["Fagioli dall'occhio, freschi, surgelati",139,9,20.1,0.7,100,"","cowpeas (blackeyes), immature seeds, frozen"],
+["Fagioli dall'occhio, freschi, surgelati, cotti, bolliti",132,8.5,17.4,0.7,100,"","cowpeas (blackeyes), immature seeds, frozen"],
+["Fagioli di Lima, freschi, cotti, bolliti",123,6.8,18.3,0.3,100,"","lima beans, immature seeds, cooked"],
+["Fagioli di Lima, freschi, crudi",113,6.8,15.3,0.9,100,"","lima beans, immature seeds, raw"],
+["Fagioli di Lima, freschi, in scatola",71,4.1,9.7,0.3,100,"","lima beans, immature seeds, canned"],
+["Fagioli di Lima, freschi, surgelati, baby",132,7.6,19.1,0.4,100,"","lima beans, immature seeds, frozen"],
+["Fagioli di Lima, freschi, surgelati, baby, cotti, bolliti",105,6.7,14.6,0.3,100,"","lima beans, immature seeds, frozen"],
+["Fagioli mung, secchi, cotti, bolliti",105,7,11.5,0.4,100,"","mung beans, mature seeds, cooked"],
+["Fagioli mung, secchi, crudi",347,23.9,46.3,1.1,100,"","mung beans, mature seeds, raw"],
+["Fagioli mung, secchi, germogliati, cotti, bolliti",21,2,3.4,0.1,100,"","mung beans, mature seeds, sprouted"],
+["Fagioli mung, secchi, germogliati, cotti, saltati in padella",50,4.3,8.7,0.2,100,"","mung beans, mature seeds, sprouted"],
+["Fagioli mung, secchi, germogliati, crudi",30,3,4.1,0.2,100,"","mung beans, mature seeds, sprouted"],
+["Fagioli mungo, secchi, cotti, bolliti",105,7.5,11.9,0.6,100,"","mungo beans, mature seeds, cooked"],
+["Fagioli mungo, secchi, crudi",341,25.2,40.7,1.6,100,"","mungo beans, mature seeds, raw"],
+["Fagioli refritos, in scatola",79,5.3,8.8,0.5,100,"","refried beans, canned, fat-free"],
+["Fagioli, al forno",155,5.5,16.1,5.2,100,"","beans, baked, home prepared"],
+["Fagioli, al forno, in scatola",105,4.8,15,0.4,100,"","beans, baked, canned"],
+["Fagioli, azuki, secchi, cotti, bolliti",128,7.5,17.5,0.1,100,"","beans, adzuki, mature seeds"],
+["Fagioli, azuki, secchi, crudi",329,19.9,50.2,0.5,100,"","beans, adzuki, mature seeds"],
+["Fagioli, azuki, secchi, in scatola, zuccherati",237,3.8,55,0,100,"","beans, adzuki, mature seeds"],
+["Fagioli, bianchi, secchi, cotti, bolliti",139,9.7,18.8,0.3,100,"","beans, white, mature seeds"],
+["Fagioli, bianchi, secchi, crudi",333,23.4,45.1,0.8,100,"","beans, white, mature seeds"],
+["Fagioli, bianchi, secchi, in scatola",114,7.3,16.4,0.3,100,"","beans, white, mature seeds"],
+["Fagioli, borlotti, secchi, cotti, bolliti",136,9.3,15.9,0.5,100,"","beans, cranberry (roman), mature seeds"],
+["Fagioli, borlotti, secchi, crudi",335,23,35.3,1.2,100,"","beans, cranberry (roman), mature seeds"],
+["Fagioli, borlotti, secchi, in scatola",83,5.5,8.8,0.3,100,"","beans, cranberry (roman), mature seeds"],
+["Fagioli, cannellini, secchi, cotti, bolliti",140,8.2,15.6,0.6,100,"","beans, navy, mature seeds"],
+["Fagioli, cannellini, secchi, crudi",337,22.3,45.5,1.5,100,"","beans, navy, mature seeds"],
+["Fagioli, cannellini, secchi, germogliati, cotti, bolliti",78,7.1,15,0.8,100,"","beans, navy, mature seeds"],
+["Fagioli, cannellini, secchi, germogliati, crudi",67,6.2,13.1,0.7,100,"","beans, navy, mature seeds"],
+["Fagioli, cannellini, secchi, in scatola",113,7.5,15.3,0.4,100,"","beans, navy, mature seeds"],
+["Fagioli, gialli, secchi, cotti, bolliti",144,9.2,14.9,1.1,100,"","beans, yellow, mature seeds"],
+["Fagioli, gialli, secchi, crudi",345,22,35.6,2.6,100,"","beans, yellow, mature seeds"],
+["Fagioli, neri, secchi, cotti, bolliti",132,8.9,15,0.5,100,"","beans, black turtle, mature seeds"],
+["Fagioli, neri, secchi, crudi",341,21.6,46.9,1.4,100,"","beans, black turtle, mature seeds"],
+["Fagioli, neri, secchi, in scatola",91,6,9.7,0.3,100,"","beans, black turtle, mature seeds"],
+["Fagioli, pinto, freschi, surgelati",170,9.8,26.8,0.5,100,"","beans, pinto, immature seeds"],
+["Fagioli, pinto, freschi, surgelati, cotti, bolliti",162,9.3,25.5,0.5,100,"","beans, pinto, immature seeds"],
+["Fagioli, pinto, in scatola",114,7,14.7,0.9,100,"","beans, pinto, canned"],
+["Fagioli, pinto, secchi, cotti, bolliti",143,9,17.2,0.7,100,"","beans, pinto, mature seeds"],
+["Fagioli, pinto, secchi, crudi",347,21.4,47,1.2,100,"","beans, pinto, mature seeds"],
+["Fagioli, pinto, secchi, germogliati, cotti, bolliti",22,1.9,4.1,0.3,100,"","beans, pinto, mature seeds"],
+["Fagioli, pinto, secchi, germogliati, crudi",62,5.2,11.6,0.9,100,"","beans, pinto, mature seeds"],
+["Fagioli, pinto, secchi, in scatola",82,4.6,10.6,0.6,100,"","beans, pinto, mature seeds"],
+["Fagioli, rosa, secchi, cotti, bolliti",149,9.1,22.6,0.5,100,"","beans, pink, mature seeds"],
+["Fagioli, rosa, secchi, crudi",343,21,51.5,1.1,100,"","beans, pink, mature seeds"],
+["Fagiolo asparago, cotto, bollito",47,2.5,9.2,0.1,100,"","yardlong bean, cooked, boiled"],
+["Fagiolo asparago, crudo",47,2.8,8.3,0.4,100,"","yardlong bean, raw"],
+["Falafel",333,13.3,31.8,17.8,17,"pezzo","falafel, home-prepared"],
+["Faraona, con pelle, cruda",158,23.4,0,6.5,100,"","guinea hen, meat and skin, raw"],
+["Faraona, solo carne, cruda",110,20.6,0,2.5,100,"","guinea hen, meat only, raw"],
+["Farina di arachidi",428,33.8,15.5,21.9,100,"","peanut flour, low fat"],
+["Farina di ceci",387,22.4,47,6.7,100,"","chickpea flour (besan)"],
+["Farina di frumento, bianca, 00",364,10.3,73.6,1,100,"","wheat flour, white, all-purpose"],
+["Farina di frumento, integrale",340,13.2,61.3,2.5,100,"","wheat flour, whole-grain"],
+["Farina di mais, integrale, bianca",362,8.1,69.6,3.6,100,"","corn flour, whole-grain, white"],
+["Farina di mais, integrale, gialla",362,8.1,69.6,3.6,100,"","corn flour, whole-grain, yellow"],
+["Farina di riso, bianca",366,6,77.7,1.4,100,"","rice flour, white, unenriched"],
+["Farina di segale",357,9.8,68.7,1.3,100,"","rye flour, light"],
+["Farina di segale, fondente",325,15.9,44.8,2.2,100,"","rye flour, dark"],
+["Farina di soia",372,49.8,14.6,8.9,100,"","soy flour, low-fat"],
+["Farina di soia, arrosta",439,38.1,20.7,21.9,100,"","soy flour, full-fat, roasted"],
+["Farina di soia, cruda",434,37.8,22.3,20.6,100,"","soy flour, full-fat, raw"],
+["Farina di sorgo, integrale",359,8.4,70,3.3,100,"","sorghum flour, whole-grain"],
+["Farro spelta, cotto",127,5.5,22.5,0.8,100,"","spelt, cooked"],
+["Farro spelta, crudo",338,14.6,59.5,2.4,100,"","spelt, uncooked"],
+["Fave, fresche, cotte, bollite",62,4.8,10.1,0.5,100,"","broadbeans, immature seeds, cooked"],
+["Fave, fresche, crude",72,5.6,7.5,0.6,100,"","broadbeans, immature seeds, raw"],
+["Fave, secche, cotte, bollite",110,7.6,14.2,0.4,100,"","broadbeans (fava beans), mature seeds, cooked"],
+["Fave, secche, crude",341,26.1,33.3,1.5,100,"","broadbeans (fava beans), mature seeds, raw"],
+["Fave, secche, in scatola",71,5.5,8.7,0.2,100,"","broadbeans (fava beans), mature seeds, canned"],
+["Feijoa, cruda",61,0.7,8.8,0.4,100,"","feijoa, raw"],
+["Fichi d'India, crudi",41,0.7,6,0.5,100,"","prickly pears, raw"],
+["Fichi, crudi",74,0.8,16.3,0.3,64,"pezzo","figs, raw"],
+["Fichi, essiccati, crudi",249,3.3,54.1,0.9,100,"","figs, dried, uncooked"],
+["Fichi, essiccati, in umido",107,1.4,23.4,0.4,100,"","figs, dried, stewed"],
+["Fichi, in scatola, al naturale",53,0.4,11.8,0.1,100,"","figs, canned, water pack"],
+["Fichi, in scatola, in sciroppo leggero",69,0.4,16.1,0.1,100,"","figs, canned, light syrup pack"],
+["Fichi, in scatola, sciroppati",107,0.4,27.9,0.1,100,"","figs, canned, heavy syrup pack"],
+["Fieno greco",323,23,33.8,6.4,100,"","spices, fenugreek seed"],
+["Fiori di zucca, cotti, bolliti",15,1.1,2.4,0.1,100,"","pumpkin flowers, cooked, boiled"],
+["Fiori di zucca, crudi",15,1,3.3,0.1,100,"","pumpkin flowers, raw"],
+["Foglie di amaranto, cotte, bollite",21,2.1,4.1,0.2,100,"","amaranth leaves, cooked, boiled"],
+["Foglie di amaranto, crude",23,2.5,4,0.3,100,"","amaranth leaves, raw"],
+["Foglie di moringa, cotte, bollite",60,5.3,9.2,0.9,100,"","drumstick leaves, cooked, boiled"],
+["Foglie di moringa, crude",64,9.4,6.3,1.4,100,"","drumstick leaves, raw"],
+["Foglie di vite, crude",93,5.6,6.3,2.1,100,"","grape leaves, raw"],
+["Foglie di vite, in scatola",69,4.3,1.8,2,100,"","grape leaves, canned"],
+["Fondente",480,4.2,58,30,100,"","candies, semisweet chocolate"],
+["Formaggio spalmabile, fuso, americano",290,16.4,8.7,21.2,100,"","cheese spread, pasteurized process, american"],
+["Formaggio, alla panna",201,7.8,8.1,15.3,15,"cucchiaio","cheese, cream, fat free"],
+["Formaggio, bianco, queso blanco",310,20.4,2.5,24.3,100,"","cheese, white, queso blanco"],
+["Formaggio, brie",334,20.8,0.5,27.7,100,"","cheese, brie"],
+["Formaggio, camembert",300,19.8,0.5,24.3,100,"","cheese, camembert"],
+["Formaggio, cheddar",404,22.9,3.1,33.3,100,"","cheese, cheddar, reduced fat"],
+["Formaggio, cheshire",387,23.4,4.8,30.6,100,"","cheese, cheshire"],
+["Formaggio, colby",394,23.8,2.6,32.1,100,"","cheese, colby"],
+["Formaggio, cottage",81,10.4,4.8,2.3,100,"","cheese, cottage, lowfat"],
+["Formaggio, edam",357,25,1.4,27.8,100,"","cheese, edam"],
+["Formaggio, emmental",374,28.4,3.4,27.4,28,"fetta","cheese, swiss, low fat"],
+["Formaggio, feta",264,14.2,4.1,21.3,100,"","cheese, feta"],
+["Formaggio, fontina",389,25.6,1.6,31.1,100,"","cheese, fontina"],
+["Formaggio, fuso, americano",366,18.1,4.8,30.7,100,"","cheese, pasteurized process, american"],
+["Formaggio, fuso, emmental",334,24.7,2.1,25,100,"","cheese, pasteurized process, swiss"],
+["Formaggio, gouda",356,24.9,2.2,27.4,100,"","cheese, gouda"],
+["Formaggio, gruyère",413,29.8,0.4,32.3,100,"","cheese, gruyere"],
+["Formaggio, limburger",327,20.1,0.5,27.2,100,"","cheese, limburger"],
+["Formaggio, messicano, cotija",366,20,4,30,5,"cucchiaino","cheese, mexican, queso cotija"],
+["Formaggio, monterey jack",373,24.5,0.7,30.3,100,"","cheese, monterey, low fat"],
+["Formaggio, mozzarella",280,27.5,3.1,17.1,100,"","cheese, mozzarella, nonfat"],
+["Formaggio, mozzarella, latte intero",300,22.2,2.2,22.4,100,"","cheese, mozzarella, whole milk"],
+["Formaggio, mozzarella, parzialmente scremato",254,24.3,2.8,15.9,100,"","cheese, mozzarella, part skim milk"],
+["Formaggio, munster",368,23.4,1.1,30,100,"","cheese, muenster, low fat"],
+["Formaggio, neufchâtel",253,9.2,3.6,22.8,100,"","cheese, neufchatel"],
+["Formaggio, parmigiano",451,41.6,3.7,30,100,"","cheese, parmesan, low sodium"],
+["Formaggio, parmigiano, duro",392,35.8,3.2,25.8,100,"","cheese, parmesan, hard"],
+["Formaggio, parmigiano, grattugiato",420,28.4,13.9,27.8,100,"","cheese, parmesan, shredded"],
+["Formaggio, pecorino romano",387,31.8,3.6,26.9,100,"","cheese, romano"],
+["Formaggio, port salut",352,23.8,0.6,28.2,100,"","cheese, port de salut"],
+["Formaggio, provolone",351,25.6,2.1,26.6,100,"","cheese, provolone, reduced fat"],
+["Formaggio, queso fresco",299,18.1,3,23.8,100,"","cheese, fresh, queso fresco"],
+["Formaggio, ricotta, latte intero",174,11.3,3,13,100,"","cheese, ricotta, whole milk"],
+["Formaggio, ricotta, parzialmente scremato",138,11.4,5.1,7.9,100,"","cheese, ricotta, part skim milk"],
+["Formaggio, roquefort",369,21.5,2,30.6,100,"","cheese, roquefort"],
+["Formaggio, tilsit",340,24.4,1.9,26,100,"","cheese, tilsit"],
+["Fragole, crude",32,0.7,5.7,0.3,100,"","strawberries, raw"],
+["Fragole, in scatola, sciroppate",92,0.6,21.8,0.3,100,"","strawberries, canned, heavy syrup pack"],
+["Fragole, surgelate, senza zucchero",35,0.4,7,0.1,100,"","strawberries, frozen, unsweetened"],
+["Fragole, surgelate, zuccherate, a fette",96,0.5,24,0.1,100,"","strawberries, frozen, sweetened"],
+["Fragole, surgelate, zuccherate, intere",78,0.5,19.1,0.1,100,"","strawberries, frozen, sweetened"],
+["French toast",229,7.7,25,10.8,100,"","french toast, prepared from recipe, made with low fat (2%) milk"],
+["French toast, surgelato, da riscaldare",213,7.4,31,6.1,100,"","french toast, frozen, ready-to-heat"],
+["Frittelle di patate",268,6.1,24.5,14.8,22,"pezzo","potato pancakes"],
+["Frozen yogurt, al cioccolato",127,3,19.3,3.6,100,"","frozen yogurts, chocolate"],
+["Frozen yogurt, al cioccolato, soft",160,4,22.7,6,100,"","frozen yogurts, chocolate, soft-serve"],
+["Frozen yogurt, alla vaniglia, soft",159,4,24.2,5.6,100,"","frozen yogurts, vanilla, soft-serve"],
+["Frumento, germogliato",198,7.5,41.4,1.3,100,"","wheat, sprouted"],
+["Frutta secca mista, tostata con olio, con arachidi",607,20,14.1,54,100,"","nuts, mixed nuts, oil roasted"],
+["Frutta secca mista, tostata, con arachidi",607,19.5,16,53.5,100,"","nuts, mixed nuts, dry roasted"],
+["Frutto del pane, crudo",103,1.1,22.2,0.2,100,"","breadfruit, raw"],
+["Frutto della passione, viola, crudo",97,2.2,13,0.7,100,"","passion-fruit, (granadilla), purple"],
+["Funghi orecchio di Giuda, crudi",25,0.5,6.8,0,100,"","jew's ear, (pepeao), raw"],
+["Funghi, bianchi, al microonde",35,3.9,3.5,0.5,100,"","mushrooms, white, microwaved"],
+["Funghi, bianchi, cotti, bolliti",28,2.2,3.1,0.5,100,"","mushrooms, white, cooked"],
+["Funghi, bianchi, crudi",22,3.1,2.3,0.3,100,"","mushrooms, white, raw"],
+["Funghi, bianchi, saltati in padella",26,3.6,2.2,0.3,100,"","mushrooms, white, stir-fried"],
+["Funghi, enoki, crudi",37,2.7,5.1,0.3,5,"pezzo","mushrooms, enoki, raw"],
+["Funghi, finferli, crudi",38,1.5,3.1,0.5,100,"","mushrooms, chanterelle, raw"],
+["Funghi, in scatola",25,1.9,2.7,0.3,100,"","mushrooms, canned, drained solids"],
+["Funghi, maitake, crudi",31,1.9,4.3,0.2,100,"","mushrooms, maitake, raw"],
+["Funghi, ostriche, crudi",33,3.3,3.8,0.4,148,"pezzo","mushrooms, oyster, raw"],
+["Funghi, portobello, alla griglia",29,3.3,2.2,0.6,100,"","mushrooms, portabella, grilled"],
+["Funghi, portobello, crudi",22,2.1,2.6,0.3,100,"","mushrooms, portabella, raw"],
+["Funghi, shiitake, cotti",56,1.6,12.3,0.2,100,"","mushrooms, shiitake, cooked"],
+["Funghi, shiitake, crudi",34,2.2,4.3,0.5,19,"pezzo","mushrooms, shiitake, raw"],
+["Funghi, shiitake, essiccati",296,9.6,63.9,1,100,"","mushrooms, shiitake, dried"],
+["Funghi, shiitake, saltati in padella",39,3.5,4.1,0.3,100,"","mushrooms, shiitake, stir-fried"],
+["Funghi, spugnole, crudi",31,3.1,2.3,0.6,100,"","mushrooms, morel, raw"],
+["Gallette di mais",387,8.1,81.5,2.4,100,"","snacks, corn cakes"],
+["Gallette di riso, riso integrale, al sesamo",392,7.6,81.5,3.8,100,"","snacks, rice cakes, brown rice"],
+["Gallette di riso, riso integrale, di grano saraceno",380,9,80.1,3.5,100,"","snacks, rice cakes, brown rice"],
+["Gallette di riso, riso integrale, di mais",385,8.4,78.3,3.2,100,"","snacks, rice cakes, brown rice"],
+["Gallette di riso, riso integrale, di segale",386,8.1,75.9,3.8,100,"","snacks, rice cakes, brown rice"],
+["Gallette di riso, riso integrale, multicereali",387,8.5,80.1,3.5,100,"","snacks, rice cakes, brown rice"],
+["Gallette di riso, riso integrale, semplici",387,8.2,77.3,2.8,100,"","snacks, rice cakes, brown rice"],
+["Gamberi di fiume, d'allevamento, cotti",87,17.5,0,1.3,100,"","crustaceans, crayfish, mixed species"],
+["Gamberi di fiume, d'allevamento, crudi",72,14.8,0,1,100,"","crustaceans, crayfish, mixed species"],
+["Gamberi di fiume, selvatici, cotti",82,16.8,0,1.2,100,"","crustaceans, crayfish, mixed species"],
+["Gamberi di fiume, selvatici, crudi",77,16,0,0.9,100,"","crustaceans, crayfish, mixed species"],
+["Gamberi, cotti, impanati e fritt@",242,21.4,11.1,12.3,100,"","crustaceans, shrimp, mixed species"],
+["Gamberi, in scatola",100,20.4,0,1.4,100,"","crustaceans, shrimp, mixed species"],
+["Gassat@, acqua di seltz",0,0,0,0,100,"","beverages, carbonated, club soda"],
+["Gassat@, acqua tonica",34,0,8.8,0,100,"","beverages, carbonated, tonic water"],
+["Gassat@, arancioni",48,0,12.3,0,100,"","beverages, carbonated, orange"],
+["Gassat@, cola",42,0,10.4,0.2,100,"","beverages, carbonated, cola"],
+["Gassat@, cola, senza caffeina",41,0,10.6,0,100,"","beverages, carbonated, cola"],
+["Gassat@, ginger ale",34,0,8.8,0,100,"","beverages, carbonated, ginger ale"],
+["Gassat@, root beer",41,0,10.6,0,100,"","beverages, carbonated, root beer"],
+["Gelatina di frutta",266,0.1,69,0,100,"","jellies"],
+["Gelatina dolce, preparato in polvere",381,7.8,90.5,0,100,"","gelatin desserts, dry mix, reduced calorie"],
+["Gelatina dolce, preparato in polvere, preparata con acqua",62,1.2,14.2,0,100,"","gelatin desserts, dry mix, reduced calorie"],
+["Gelato, al cioccolato",216,3.8,27,11,100,"","ice creams, chocolate, light"],
+["Gelato, al cioccolato, senza zucchero",173,3.5,25.9,5.7,100,"","ice creams, chocolate, light"],
+["Gelato, alla fragola",192,3.2,26.7,8.4,100,"","ice creams, strawberry"],
+["Gelato, alla vaniglia",180,4.8,29.2,4.8,100,"","ice creams, vanilla, fat free"],
+["Gelato, alla vaniglia, senza zucchero",169,4,21.4,7.5,100,"","ice creams, vanilla, light"],
+["Gelato, alla vaniglia, soft",126,4.9,21.8,2.6,100,"","ice creams, vanilla, light"],
+["Gelato, soft, al cioccolato",222,4.1,21.5,13,100,"","ice cream, light, soft serve"],
+["Germe di grano",884,0,0,100,100,"","oil, wheat germ"],
+["Germogli di bambù, cotti, bolliti",12,1.5,0.9,0.2,100,"","bamboo shoots, cooked, boiled"],
+["Germogli di bambù, crudi",27,2.6,3,0.3,100,"","bamboo shoots, raw"],
+["Germogli di bambù, in scatola",19,1.7,1.8,0.4,100,"","bamboo shoots, canned, drained solids"],
+["Germogli di erba medica, germogliati, crudi",23,4,0.2,0.7,100,"","alfalfa seeds, sprouted, raw"],
+["Giuggiole, crude",79,1.2,20.2,0.2,100,"","jujube, raw"],
+["Glassa, al cioccolato, cremosa, preparato in polvere",389,1.3,89.6,5.2,100,"","frostings, chocolate, creamy"],
+["Glassa, al cioccolato, cremosa, pronto",397,1.1,62.3,17.6,41,"cucchiaio","frostings, chocolate, creamy"],
+["Glassa, alla vaniglia, cremosa, preparato in polvere",410,0.3,93.7,4.9,100,"","frostings, vanilla, creamy"],
+["Glassa, alla vaniglia, cremosa, pronto",418,0,67.9,16.2,100,"","frostings, vanilla, creamy"],
+["Gomma da masticare",360,0,94.3,0.3,100,"","chewing gum"],
+["Granchio, granchio reale, cotto",97,19.4,0,1.5,100,"","crustaceans, crab, alaska king"],
+["Granchio, granchio reale, crudo",84,18.3,0,0.6,100,"","crustaceans, crab, alaska king"],
+["Grano saraceno, arrosto, cotto",92,3.4,17.2,0.6,100,"","buckwheat groats, roasted, cooked"],
+["Grano saraceno, arrosto, secco",346,11.7,64.7,2.7,100,"","buckwheat groats, roasted, dry"],
+["Grissini, semplici",412,12,65.4,9.5,100,"","bread sticks, plain"],
+["Guanabana, cruda",66,1,13.5,0.3,100,"","soursop, raw"],
+["Guava, alla fragola, cruda",69,0.6,12,0.6,100,"","guavas, strawberry, raw"],
+["Hummus",177,4.9,16.1,8.6,100,"","hummus, commercial"],
+["Igname, crudo",118,1.5,23.8,0.2,100,"","yam, raw"],
+["Indivia, cruda",17,1.2,0.2,0.2,100,"","endive, raw"],
+["Insalata di patate",143,2.7,9.9,8.2,100,"","potato salad, home-prepared"],
+["Insalata di tonno",187,16,9.4,9.3,100,"","fish, tuna salad"],
+["Involtini primavera, vegetali, surgelati, preparati",214,6,29.4,7,68,"pezzo","egg rolls, vegetable, frozen"],
+["Jackfruit, crudo",95,1.7,21.8,0.6,100,"","jackfruit, raw"],
+["Jackfruit, in scatola, sciroppato",92,0.4,23,0.1,100,"","jackfruit, canned, syrup pack"],
+["Jicama, cotta, bollita",38,0.7,8.8,0.1,100,"","yambean (jicama), cooked, boiled"],
+["Jicama, cruda",38,0.7,3.9,0.1,100,"","yambean (jicama), raw"],
+["Ketchup",101,1,27.1,0.1,17,"cucchiaio","catsup"],
+["Kiwano",44,1.8,7.6,1.3,100,"","horned melon (kiwano)"],
+["Kiwi, verde, crudo",61,1.1,11.7,0.5,100,"","kiwifruit, green, raw"],
+["Kumquat, crudi",71,1.9,9.4,0.9,19,"pezzo","kumquats, raw"],
+["Lamponi, crudi",52,1.2,5.4,0.7,100,"","raspberries, raw"],
+["Lamponi, in scatola, rossi, sciroppati",91,0.8,20.1,0.1,100,"","raspberries, canned, red"],
+["Lamponi, surgelati, rossi, zuccherati",103,0.7,21.8,0.2,100,"","raspberries, frozen, red"],
+["Lamponi, surgelati, senza zucchero",52,1.2,5.4,0.7,100,"","raspberries, frozen, unsweetened"],
+["Lampuga (mahi mahi), cotta",109,23.7,0,0.9,100,"","fish, mahimahi, cooked"],
+["Lampuga (mahi mahi), cruda",85,18.5,0,0.7,100,"","fish, mahimahi, raw"],
+["Lasagne, al formaggio, surgelate",145,5.1,19.9,4.2,100,"","lasagna, cheese, frozen"],
+["Lasagne, al formaggio, surgelate, preparate",130,6.5,12.1,5.3,100,"","lasagna, cheese, frozen"],
+["Latte, al cioccolato",67,3.4,13.5,0,100,"","milk, chocolate, lowfat"],
+["Latte, al cioccolato, liquido",78,3,11.4,1.9,100,"","milk, chocolate, fluid"],
+["Latte, al cioccolato, liquido, intero",83,3.2,9.5,3.4,100,"","milk, chocolate, fluid"],
+["Latte, al cioccolato, meno zuccheri",54,3.4,7.7,1,100,"","milk, chocolate, lowfat"],
+["Latte, al latticello, essiccato",387,34.3,49,5.8,100,"","milk, buttermilk, dried"],
+["Latte, al latticello, liquido, intero",62,3.2,4.9,3.3,100,"","milk, buttermilk, fluid"],
+["Latte, di bufala, liquido",97,3.8,5.2,6.9,100,"","milk, indian buffalo, fluid"],
+["Latte, di capra, liquido",69,3.6,4.5,4.1,100,"","milk, goat, fluid"],
+["Latte, di pecora, liquido",108,6,5.4,7,100,"","milk, sheep, fluid"],
+["Latte, evaporato",107,6.7,15.7,2,100,"","milk, evaporated, 2% fat"],
+["Latte, in scatola, condensato, zuccherato",321,7.9,54.4,8.7,100,"","milk, canned, condensed"],
+["Latte, in scatola, evaporato",134,6.8,10,7.6,100,"","milk, canned, evaporated"],
+["Latte, intero",61,3.1,4.8,3.3,100,"","milk, whole, 3.25% milkfat"],
+["Latte, liquido",50,3.3,4.8,2,100,"","milk, nonfat, fluid"],
+["Latte, secco",362,36.2,52,0.8,100,"","milk, dry, nonfat"],
+["Latte, secco, intero",496,26.3,38.4,26.7,100,"","milk, dry, whole"],
+["Latte, secco, istantaneo",358,35.1,52.2,0.7,100,"","milk, dry, nonfat"],
+["Lattuga, cappuccina, cruda",13,1.4,1.1,0.2,100,"","lettuce, butterhead (includes boston and bibb types), raw"],
+["Lattuga, iceberg, cruda",14,0.9,1.8,0.1,100,"","lettuce, iceberg (includes crisphead types), raw"],
+["Lattuga, romana, cruda",17,1.2,1.2,0.3,100,"","lettuce, cos or romaine, raw"],
+["Lattuga, rossa, cruda",16,1.3,1.4,0.2,100,"","lettuce, red leaf, raw"],
+["Lattuga, verde, cruda",15,1.4,1.6,0.1,100,"","lettuce, green leaf, raw"],
+["Lenticchie, crude",352,24.6,52.7,1.1,100,"","lentils, raw"],
+["Lenticchie, germogliate, cotte, saltate in padella",101,8.8,21.2,0.5,100,"","lentils, sprouted, cooked"],
+["Lenticchie, germogliate, crude",106,9,22.1,0.6,100,"","lentils, sprouted, raw"],
+["Lenticchie, secche, cotte, bollite",116,9,12.2,0.4,100,"","lentils, mature seeds, cooked"],
+["Lime, crudo",30,0.7,7.7,0.2,67,"pezzo","limes, raw"],
+["Limonata, concentrato surgelato, bianca",196,0.2,49.6,0.7,100,"","lemonade, frozen concentrate, white"],
+["Limonata, concentrato surgelato, bianca, preparata con acqua",40,0.1,10.4,0,100,"","lemonade, frozen concentrate, white"],
+["Limonata, concentrato surgelato, rosa",192,0.2,48.6,0.7,100,"","lemonade, frozen concentrate, pink"],
+["Limonata, in polvere",376,0,97.2,1.1,100,"","beverages, lemonade, powder"],
+["Limonata, in polvere, preparata con acqua",14,0,3.6,0,100,"","lemonade, powder, prepared with water"],
+["Litchi, crudi",66,0.8,15.2,0.4,100,"","litchis, raw"],
+["Litchi, essiccati",277,3.8,66.1,1.2,100,"","litchis, dried"],
+["Longan, crudi",60,1.3,14,0.1,100,"","longans, raw"],
+["Longan, essiccati",286,4.9,74,0.4,100,"","longans, dried"],
+["Luccio, lucioperca, cotto",119,24.5,0,1.6,100,"","fish, pike, walleye"],
+["Luccio, lucioperca, crudo",93,19.1,0,1.2,100,"","fish, pike, walleye"],
+["Lupini, secchi, cotti, bolliti",119,15.6,7.1,2.9,100,"","lupins, mature seeds, cooked"],
+["Lupini, secchi, crudi",371,36.2,21.5,9.7,100,"","lupins, mature seeds, raw"],
+["Mac and cheese, piatto pronto surgelato",149,5.6,16.2,6.4,100,"","macaroni and cheese, frozen entree"],
+["Mac and cheese, preparato in polvere",190,4.9,22.7,8.3,100,"","macaroni and cheese, dry mix, prepared with 2% milk and 80% stick margarine from dry mix"],
+["Macedonia sciroppata, in scatola, al naturale",32,0.4,7.5,0.1,100,"","fruit cocktail, (peach and pineapple and pear and grape and cherry), canned"],
+["Macedonia sciroppata, in scatola, al succo",46,0.5,10.9,0,100,"","fruit cocktail, (peach and pineapple and pear and grape and cherry), canned"],
+["Macedonia sciroppata, in scatola, in sciroppo leggero",57,0.4,13.9,0.1,100,"","fruit cocktail, (peach and pineapple and pear and grape and cherry), canned"],
+["Macedonia sciroppata, in scatola, sciroppata",73,0.4,17.9,0.1,100,"","fruit cocktail, canned, heavy syrup"],
+["Macedonia, in scatola, al naturale",30,0.3,6.9,0.1,100,"","fruit salad, (peach and pear and apricot and pineapple and cherry), canned"],
+["Macedonia, in scatola, al succo",50,0.5,12.1,0,100,"","fruit salad, (peach and pear and apricot and pineapple and cherry), canned"],
+["Macedonia, in scatola, in sciroppo leggero",58,0.3,14.1,0.1,100,"","fruit salad, (peach and pear and apricot and pineapple and cherry), canned"],
+["Macedonia, in scatola, sciroppata",73,0.3,18.1,0.1,100,"","fruit salad, (peach and pear and apricot and pineapple and cherry), canned"],
+["Macis, macinato",475,6.7,30.3,32.4,100,"","spices, mace, ground"],
+["Maggiorana, essiccata",271,12.7,20.3,7,100,"","spices, marjoram, dried"],
+["Maiale, costine, cotto, arrosto",361,20.9,0,30.9,100,"","pork, fresh, backribs"],
+["Maiale, costine, cotto, brasato",397,29.1,0,30.3,100,"","pork, fresh, spareribs"],
+["Maiale, costine, crudo",277,15.5,0,23.4,100,"","pork, fresh, backribs"],
+["Maiale, in scatola",196,19.4,0.6,12.9,100,"","usda commodity, pork, canned"],
+["Maiale, lombata, filetto, cotto, alla griglia",201,29.9,0,8.1,100,"","pork, fresh, loin"],
+["Maiale, lombata, filetto, cotto, arrosto",143,26.2,0,3.5,100,"","pork, fresh, loin"],
+["Maiale, lombata, filetto, crudo",114,20.2,0,3.1,100,"","pork, fresh, loin"],
+["Maiale, lombata, intero, cotto, alla griglia",242,27.3,0,13.9,100,"","pork, fresh, loin"],
+["Maiale, lombata, intero, cotto, arrosto",248,27.1,0,14.7,100,"","pork, fresh, loin"],
+["Maiale, lombata, intero, cotto, brasato",239,27.2,0,13.6,100,"","pork, fresh, loin"],
+["Maiale, lombata, intero, crudo",198,19.7,0,12.6,100,"","pork, fresh, loin"],
+["Maiale, macinato, cotto",297,25.7,0,20.8,100,"","pork, fresh, ground"],
+["Maiale, macinato, cotto, alla piastra",301,27.1,0,21.4,100,"","pork, ground, 96% lean / 4% fat"],
+["Maiale, macinato, cotto, sbriciolato",289,26.7,0.6,20,100,"","pork, ground, 96% lean / 4% fat"],
+["Maiale, macinato, crudo",218,18,0.4,16,100,"","pork, ground, 96% lean / 4% fat"],
+["Maiale, pancetta, crudo",518,9.3,0,53,100,"","pork, fresh, belly"],
+["Maiale, spalla, intero, cotto, arrosto",292,23.3,0,21.4,100,"","pork, fresh, shoulder"],
+["Maiale, spalla, intero, crudo",236,17.2,0,18,100,"","pork, fresh, shoulder"],
+["Maiale, stagionate, prosciutto, cotte",149,18.8,0,7.6,100,"","usda commodity, pork, cured"],
+["Maiale, stagionato, bacon",417,12.6,1.3,39.7,28,"fetta","pork, cured, bacon"],
+["Maiale, stagionato, bacon, cotto, al forno",548,35.7,1.4,43.3,8,"fetta","pork, cured, bacon"],
+["Maiale, stagionato, bacon, cotto, al microonde",476,39,0.5,34.1,9,"fetta","pork, cured, bacon"],
+["Maiale, stagionato, prosciutto, a fette",173,22.4,0.2,9.2,100,"","pork, cured, ham"],
+["Maiale, stagionato, prosciutto, a fette, alla piastra",181,25.5,0.7,8.5,100,"","pork, cured, ham"],
+["Maiale, stagionato, prosciutto, arrosto",145,20.9,1.5,5.5,100,"","pork, cured, ham"],
+["Maiale, stagionato, prosciutto, in scatola",120,18.5,0,4.6,100,"","pork, cured, ham"],
+["Maiale, stagionato, prosciutto, in scatola, arrosto",226,20.5,0.4,15.2,100,"","pork, cured, ham"],
+["Maiale, stagionato, prosciutto, intero",246,18.5,0.1,18.5,100,"","pork, cured, ham"],
+["Maiale, stagionato, prosciutto, intero, arrosto",157,25.1,0,5.5,100,"","pork, cured, ham"],
+["Maiale, stagionato, prosciutto, scamone",176,22.3,0.5,9.4,100,"","pork, cured, ham"],
+["Maiale, stagionato, prosciutto, scamone, arrosto",177,23.9,0.6,8.9,100,"","pork, cured, ham"],
+["Maiale, stagionato, prosciutto, stinco",177,21.6,0.4,9.8,100,"","pork, cured, ham"],
+["Maiale, stagionato, prosciutto, stinco, arrosto",191,24.4,0.6,9.3,100,"","pork, cured, ham"],
+["Mais, dolce, bianco, cotto, bollito",97,3.3,19,1.4,89,"pezzo","corn, sweet, white"],
+["Mais, dolce, bianco, crudo",86,3.2,16.3,1.2,73,"pezzo","corn, sweet, white"],
+["Mais, dolce, bianco, in scatola, in chicchi",64,1.9,14.7,0.5,100,"","corn, sweet, white"],
+["Mais, dolce, bianco, surgelato, in chicchi",88,3,17.8,0.8,100,"","corn, sweet, white"],
+["Mais, dolce, bianco, surgelato, in chicchi, bollito",80,2.8,17.2,0.4,100,"","corn, sweet, white"],
+["Mais, dolce, bianco, surgelato, pannocchia",98,3.3,20.7,0.8,100,"","corn, sweet, white"],
+["Mais, dolce, bianco, surgelato, pannocchia, cotto, bollito",94,3.1,19.5,0.7,100,"","corn, sweet, white"],
+["Mais, dolce, giallo, cotto, bollito",96,3.4,18.6,1.5,89,"pezzo","corn, sweet, yellow"],
+["Mais, dolce, giallo, crudo",86,3.3,16.7,1.4,100,"","corn, sweet, yellow"],
+["Mais, dolce, giallo, in scatola",61,1.9,12.2,0.8,100,"","corn, sweet, yellow"],
+["Mais, dolce, giallo, in scatola, in chicchi",67,2.3,12.3,1.2,100,"","corn, sweet, yellow"],
+["Mais, dolce, giallo, surgelato, in chicchi",88,3,18.6,0.8,100,"","corn, sweet, yellow"],
+["Mais, dolce, giallo, surgelato, in chicchi, bollito",81,2.5,16.9,0.7,100,"","corn, sweet, yellow"],
+["Mais, dolce, giallo, surgelato, pannocchia",98,3.3,20.7,0.8,100,"","corn, sweet, yellow"],
+["Mais, dolce, giallo, surgelato, pannocchia, cotto, bollito",94,3.1,19.5,0.7,100,"","corn, sweet, yellow"],
+["Mais, giallo, in chicchi, surgelato, al microonde",131,3.6,23.3,1.4,100,"","corn, yellow, whole kernel"],
+["Mandarini, crudi",53,0.8,11.5,0.3,100,"","tangerines, (mandarin oranges), raw"],
+["Mandarini, in scatola, al succo",38,0.8,8.2,0,100,"","tangerines, (mandarin oranges), canned"],
+["Mandarini, in scatola, in sciroppo leggero",61,0.5,15.5,0.1,100,"","tangerines, (mandarin oranges), canned"],
+["Mandorle",579,21.1,9.1,49.9,100,"","nuts, almonds"],
+["Mandorle, pelate",590,21.4,8.8,52.5,100,"","nuts, almonds, blanched"],
+["Mandorle, tostate",598,21,10.1,52.5,100,"","nuts, almonds, dry roasted"],
+["Mandorle, tostate con olio",607,21.2,7.2,55.2,100,"","nuts, almonds, oil roasted"],
+["Mango, crudo",60,0.8,13.4,0.4,100,"","mangos, raw"],
+["Mango, essiccato, zuccherato",319,2.5,76.2,1.2,100,"","mango, dried, sweetened"],
+["Mangostano, in scatola, sciroppato",73,0.4,16.1,0.6,100,"","mangosteen, canned, syrup pack"],
+["Manioca, cruda",160,1.4,36.3,0.3,100,"","cassava, raw"],
+["Manzo, bavetta, bistecca, cotto, alla griglia",192,27.7,0,8.2,100,"","beef, flank, steak"],
+["Manzo, bavetta, bistecca, cotto, brasato",263,27,0,16.4,100,"","beef, flank, steak"],
+["Manzo, bavetta, bistecca, crudo",149,21.7,0,6.3,100,"","beef, flank, steak"],
+["Manzo, bavetta, cotto, brasato",208,30.1,0,9.7,100,"","beef, new zealand, imported"],
+["Manzo, bavetta, crudo",161,20.1,0,8.9,100,"","beef, new zealand, imported"],
+["Manzo, coscia, fesa, bistecca, cotto, alla griglia",201,30.6,0,7.7,100,"","beef, round, top round"],
+["Manzo, coscia, fesa, bistecca, crudo",164,22.2,0,7.7,100,"","beef, round, top round"],
+["Manzo, coscia, fesa, cotto, alla griglia",166,30.2,0,4.1,100,"","beef, round, top round steak"],
+["Manzo, coscia, fesa, cotto, brasato",216,35.6,0,7.1,100,"","beef, round, top round"],
+["Manzo, coscia, fesa, cotto, in padella",266,33,0,13.8,100,"","beef, round, top round"],
+["Manzo, coscia, fesa, crudo",124,23.5,0,3.3,100,"","beef, round, top round steak"],
+["Manzo, coscia, girello, arrosto, cotto",204,28.1,0,9.3,100,"","beef, round, eye of round"],
+["Manzo, coscia, girello, arrosto, crudo",159,21.3,0,7.6,100,"","beef, round, eye of round"],
+["Manzo, coscia, sottofesa, arrosto, cotto",185,27.2,0,7.6,100,"","beef, round, bottom round"],
+["Manzo, coscia, sottofesa, arrosto, crudo",128,22.2,0,3.7,100,"","beef, round, bottom round"],
+["Manzo, coscia, sottofesa, bistecca, cotto, brasato",223,33.1,0,9,100,"","beef, round, bottom round"],
+["Manzo, coscia, sottofesa, bistecca, crudo",192,20.7,0,11.5,100,"","beef, round, bottom round"],
+["Manzo, costata, costine, cotto, brasato",341,25.6,0,26.6,100,"","beef, rib, back ribs"],
+["Manzo, costata, costine, crudo",305,16.8,0.6,26.2,100,"","beef, rib, shortribs"],
+["Manzo, costata, cotto, alla griglia",304,24.5,0,22.1,100,"","beef, rib, small end (ribs 10-12)"],
+["Manzo, costata, cotto, arrosto",351,22.8,0,28.1,100,"","beef, rib, large end (ribs 6-9)"],
+["Manzo, costata, crudo",295,16.5,0,24.9,100,"","beef, rib, small end (ribs 10-12)"],
+["Manzo, cotto",206,29.5,0,8.9,100,"","beef, composite of trimmed retail cuts, separable lean only"],
+["Manzo, crudo",157,21.2,0,8,100,"","beef, composite of trimmed retail cuts, separable lean only"],
+["Manzo, entrecôte, cotto, alla griglia",248,26.3,0,15.9,100,"","beef, rib eye steak, boneless"],
+["Manzo, entrecôte, crudo",162,21.4,0,8.5,100,"","beef, rib eye steak, boneless"],
+["Manzo, filetto, arrosto, cotto",331,23.9,0,25.4,100,"","beef, tenderloin, roast"],
+["Manzo, filetto, bistecca, cotto, alla griglia",262,26.5,0,16.5,100,"","beef, tenderloin, steak"],
+["Manzo, filetto, bistecca, crudo",246,19.8,0,17.9,100,"","beef, tenderloin, steak"],
+["Manzo, filetto, crudo",146,21,0,6.9,100,"","beef, new zealand, imported"],
+["Manzo, in scatola",246,20.5,0,17.6,100,"","usda commodity, beef, canned"],
+["Manzo, lombata, controfiletto, bistecca, cotto, alla griglia",201,29.2,0,8.4,100,"","beef, short loin, top loin"],
+["Manzo, lombata, controfiletto, bistecca, crudo",228,20.6,0,15.5,100,"","beef, short loin, top loin"],
+["Manzo, lombata, controfiletto, cotto, alla griglia",223,28.6,0,11.2,100,"","beef, loin, top loin steak"],
+["Manzo, lombata, controfiletto, crudo",151,22.8,0,6.7,100,"","beef, loin, top loin steak"],
+["Manzo, lombata, filetto, cotto, alla griglia",211,30.5,0,8.9,100,"","beef, loin, tenderloin steak"],
+["Manzo, lombata, filetto, crudo",143,21.8,0,6.2,100,"","beef, loin, tenderloin steak"],
+["Manzo, lombata, fiorentina, cotto, alla griglia",230,24.4,0,14,100,"","beef, short loin, t-bone steak"],
+["Manzo, lombata, fiorentina, crudo",208,20.7,0,13.3,100,"","beef, short loin, t-bone steak"],
+["Manzo, macinato, crudo",215,18.6,0,15,100,"","beef, ground, 97% lean meat / 3% fat"],
+["Manzo, ossobuco, cotto, sobbollito",201,33.7,0,6.4,100,"","beef, shank crosscuts, separable lean only"],
+["Manzo, ossobuco, crudo",128,21.8,0,3.9,100,"","beef, shank crosscuts, separable lean only"],
+["Manzo, punta di petto, intero, cotto, brasato",291,26.8,0,19.5,100,"","beef, brisket, whole"],
+["Manzo, punta di petto, intero, crudo",251,18.4,0,19.1,100,"","beef, brisket, whole"],
+["Manzo, scamone, bistecca, cotto, alla griglia",206,29.6,0,8.8,100,"","beef, top sirloin, steak"],
+["Manzo, scamone, bistecca, cotto, in padella",313,28.8,0,21.1,100,"","beef, top sirloin, steak"],
+["Manzo, scamone, bistecca, crudo",189,20.7,0,11.1,100,"","beef, top sirloin, steak"],
+["Manzo, spalla, costine, cotto, brasato",287,25.8,0,20.4,100,"","beef, chuck, short ribs"],
+["Manzo, spalla, costine, crudo",227,17.9,0,17.3,100,"","beef, chuck, short ribs"],
+["Manzo, spezzatino, cotto, brasato",191,32.4,0,6.8,100,"","beef, chuck for stew, separable lean and fat"],
+["Manzo, spezzatino, crudo",128,21.8,0.2,4.5,100,"","beef, chuck for stew, separable lean and fat"],
+["Manzo, stagionato, corned beef, in scatola",250,27.1,0,14.9,100,"","beef, cured, corned beef"],
+["Manzo, stagionato, corned beef, punta di petto, cotto",251,18.2,0.5,19,100,"","beef, cured, corned beef"],
+["Manzo, stagionato, corned beef, punta di petto, crudo",198,14.7,0.1,14.9,100,"","beef, cured, corned beef"],
+["Manzo, stagionato, essiccato",153,31.1,2.8,1.9,28,"fetta","beef, cured, dried"],
+["Manzo, surgelato, cotto",249,23,0.9,16.4,64,"pezzo","usda commodity, beef, patties (100%)"],
+["Manzo, surgelato, crudo",204,14.6,0,15.7,100,"","usda commodity, beef, patties (100%)"],
+["Margarina",717,0.2,0.7,80.7,14,"cucchiaio","margarine, regular, 80% fat"],
+["Marmellata",278,0.4,67.8,0.1,20,"cucchiaio","jams and preserves"],
+["Melagrana, cruda",83,1.7,14.7,1.2,100,"","pomegranates, raw"],
+["Melanzane, cotte, bollite",35,0.8,6.2,0.2,100,"","eggplant, cooked, boiled"],
+["Melanzane, crude",25,1,2.9,0.2,100,"","eggplant, raw"],
+["Melanzane, sott'aceto",49,0.9,7.3,0.7,100,"","eggplant, pickled"],
+["Mele cotogne, crude",57,0.4,13.4,0.1,92,"pezzo","quinces, raw"],
+["Mele, crude, con buccia",52,0.3,11.4,0.2,100,"","apples, raw, with skin"],
+["Mele, crude, fuji, con buccia",63,0.2,13.1,0.2,100,"","apples, raw, fuji"],
+["Mele, crude, gala, con buccia",57,0.2,11.4,0.1,100,"","apples, raw, gala"],
+["Mele, crude, golden delicious, con buccia",57,0.3,11.2,0.1,100,"","apples, raw, golden delicious"],
+["Mele, crude, granny smith, con buccia",58,0.4,10.8,0.2,100,"","apples, raw, granny smith"],
+["Mele, crude, red delicious, con buccia",59,0.3,11.8,0.2,100,"","apples, raw, red delicious"],
+["Mele, crude, senza buccia",48,0.3,11.5,0.1,100,"","apples, raw, without skin"],
+["Mele, crude, senza buccia, cotte, al microonde",56,0.3,11.6,0.4,100,"","apples, raw, without skin"],
+["Mele, crude, senza buccia, cotte, bollite",53,0.3,11.2,0.4,100,"","apples, raw, without skin"],
+["Mele, essiccate, solforate, crude",243,0.9,57.2,0.3,100,"","apples, dried, sulfured"],
+["Mele, essiccate, solforate, in umido",83,0.2,18.8,0.1,100,"","apples, dried, sulfured"],
+["Mele, in scatola, zuccherate, a fette",67,0.2,14.8,0.4,100,"","apples, canned, sweetened"],
+["Mele, surgelate, senza zucchero",48,0.3,11,0.3,100,"","apples, frozen, unsweetened"],
+["Melone amaro, baccelli, cotto, bollito",19,0.8,2.3,0.2,100,"","balsam-pear (bitter gourd), pods, cooked"],
+["Melone amaro, baccelli, crudo",17,1,0.9,0.2,100,"","balsam-pear (bitter gourd), pods, raw"],
+["Melone, cantalupo, crudo",34,0.8,7.3,0.2,100,"","melons, cantaloupe, raw"],
+["Melone, retato bianco, crudo",36,0.5,8.3,0.1,100,"","melons, honeydew, raw"],
+["Menta piperita",70,3.8,6.9,0.9,100,"","peppermint, fresh"],
+["Menta romana",44,3.3,1.6,0.7,100,"","spearmint, fresh"],
+["Menta romana, essiccata",285,19.9,22.2,6,100,"","spearmint, dried"],
+["Merlano, cotto",116,23.5,0,1.7,100,"","fish, whiting, mixed species"],
+["Merlano, crudo",90,18.3,0,1.3,100,"","fish, whiting, mixed species"],
+["Merluzzo d'Alaska, atlantico, cotto",118,24.9,0,1.3,100,"","fish, pollock, atlantic"],
+["Merluzzo d'Alaska, atlantico, crudo",92,19.4,0,1,100,"","fish, pollock, atlantic"],
+["Merluzzo, atlantico, cotto",105,22.8,0,0.9,100,"","fish, cod, atlantic"],
+["Merluzzo, atlantico, crudo",82,17.8,0,0.7,100,"","fish, cod, atlantic"],
+["Miglio, cotto",119,3.5,22.4,1,100,"","millet, cooked"],
+["Miglio, crudo",378,11,64.3,4.2,100,"","millet, raw"],
+["Mirtilli rossi, crudi",46,0.5,8.4,0.1,100,"","cranberries, raw"],
+["Mirtilli rossi, essiccati, zuccherati",308,0.2,77.5,1.1,100,"","cranberries, dried, sweetened"],
+["Mirtilli, crudi",57,0.7,12.1,0.3,100,"","blueberries, raw"],
+["Mirtilli, essiccati, zuccherati",317,2.5,72.5,2.5,100,"","blueberries, dried, sweetened"],
+["Mirtilli, in scatola, in sciroppo leggero",88,1,20.1,0.4,100,"","blueberries, canned, light syrup"],
+["Mirtilli, in scatola, sciroppati",88,0.7,20.5,0.3,100,"","blueberries, canned, heavy syrup"],
+["Mirtilli, selvatici, in scatola, sciroppati",107,0.6,23.4,0.3,100,"","blueberries, wild, canned"],
+["Mirtilli, selvatici, surgelati",57,0,9.4,0.2,100,"","blueberries, wild, frozen"],
+["Mirtilli, surgelati, senza zucchero",51,0.4,9.5,0.6,100,"","blueberries, frozen, unsweetened"],
+["Mirtilli, surgelati, zuccherati",85,0.4,19.8,0.1,100,"","blueberries, frozen, sweetened"],
+["Miso",198,12.8,20,6,17,"cucchiaio","miso"],
+["Mist@, in scatola",49,2.6,6.3,0.2,100,"","vegetables, mixed, canned"],
+["Mist@, surgelato",72,3.3,9.5,0.5,100,"","vegetables, mixed, frozen"],
+["Mist@, surgelato, cotto, bollito",65,2.9,8.7,0.1,100,"","vegetables, mixed, frozen"],
+["Molva, cotta",111,24.4,0,0.8,100,"","fish, ling, cooked"],
+["Molva, cruda",87,19,0,0.6,100,"","fish, ling, raw"],
+["More di gelso, crude",43,1.4,8.1,0.4,100,"","mulberries, raw"],
+["More, crude",43,1.4,4.3,0.5,100,"","blackberries, raw"],
+["More, in scatola, sciroppate",92,1.3,19.7,0.1,100,"","blackberries, canned, heavy syrup"],
+["More, surgelate, senza zucchero",64,1.2,10.7,0.4,100,"","blackberries, frozen, unsweetened"],
+["Mortadella americana, maiale",247,15.3,0.7,19.9,100,"","bologna, pork"],
+["Mortadella americana, manzo",299,10.9,4.3,26.1,30,"fetta","bologna, beef, low fat"],
+["Mortadella americana, manzo e maiale",308,15.2,5.5,24.6,100,"","bologna, beef and pork, low fat"],
+["Mortadella americana, pollo, maiale",336,10.3,4.2,30.6,100,"","bologna, chicken, pork"],
+["Mortadella americana, pollo, maiale, manzo",272,11.3,5.6,22.7,100,"","bologna, chicken, pork"],
+["Mortadella americana, pollo, tacchino, maiale",298,9.9,5.7,26.2,100,"","bologna, chicken, turkey"],
+["Mortadella americana, tacchino",209,11.4,4.2,16.1,100,"","bologna, turkey"],
+["Mortadella, manzo, maiale",311,16.4,3,25.4,100,"","mortadella, beef, pork"],
+["Muffin inglesi, di frumento",223,8.7,40.2,2,100,"","english muffins, wheat"],
+["Muffin inglesi, di frumento, tostati",243,9.4,43.7,2.1,100,"","english muffins, wheat, toasted"],
+["Muffin inglesi, integrali",203,8.8,33.7,2.1,100,"","english muffins, whole-wheat"],
+["Muffin inglesi, integrali, tostati",221,9.6,36.8,2.3,100,"","english muffins, whole-wheat, toasted"],
+["Muffin, ai mirtilli",285,6.5,40.7,10.8,100,"","muffins, blueberry, prepared from recipe"],
+["Muffin, ai mirtilli, preparato in polvere",293,3.5,59.6,3.2,100,"","muffins, blueberry, dry mix"],
+["Muffin, crusca d'avena",270,7,43.7,7.4,100,"","muffins, oat bran"],
+["Muffin, crusca di frumento, preparato in polvere",396,7.1,73,12,100,"","muffins, wheat bran, dry mix"],
+["Muffin, di mais",316,7.1,44.2,12.3,100,"","muffins, corn, commercially prepared"],
+["Muffin, di mais, preparato in polvere, preparati",321,7.4,46.7,10.2,100,"","muffins, corn, dry mix"],
+["Muffin, semplici",296,6.9,38.7,11.4,100,"","muffins, plain, prepared from recipe"],
+["Natto",211,19.4,7.3,11,100,"","natto"],
+["Nespole, crude",47,0.4,10.4,0.2,100,"","loquats, raw"],
+["Nocciole",628,14.9,7,60.8,100,"","nuts, hazelnuts or filberts"],
+["Nocciole, pelate",629,13.7,6,61.1,100,"","nuts, hazelnuts or filberts, blanched"],
+["Nocciole, tostate",646,15,8.2,62.4,100,"","nuts, hazelnuts or filberts, dry roasted"],
+["Noce moscata, macinate",525,5.8,28.5,36.3,100,"","spices, nutmeg, ground"],
+["Noci di ginkgo, crude",182,4.3,37.6,1.7,100,"","nuts, ginkgo nuts, raw"],
+["Noci di ginkgo, essiccate",348,10.3,72.5,2,100,"","nuts, ginkgo nuts, dried"],
+["Noci di ginkgo, in scatola",111,2.3,12.8,1.6,100,"","nuts, ginkgo nuts, canned"],
+["Noci di macadamia, crude",718,7.9,5.2,75.8,100,"","nuts, macadamia nuts, raw"],
+["Noci di macadamia, tostate",718,7.8,5.4,76.1,100,"","nuts, macadamia nuts, dry roasted"],
+["Noci pecan",691,9.2,4.3,72,100,"","nuts, pecans"],
+["Noci pecan, tostate",710,9.5,4.2,74.3,100,"","nuts, pecans, dry roasted"],
+["Noci pecan, tostate con olio",715,9.2,3.5,75.2,100,"","nuts, pecans, oil roasted"],
+["Noci, glassate",500,8.3,44,35.7,100,"","nuts, walnuts, glazed"],
+["Noci, nere, essiccate",619,24.1,2.8,59.3,100,"","nuts, walnuts, black"],
+["Noci, tostate",643,14.3,10.8,60.7,100,"","nuts, walnuts, dry roasted"],
+["Noodles, all'uovo, cotti",138,4.5,24,2.1,100,"","noodles, egg, enriched"],
+["Noodles, all'uovo, secchi",384,14.2,68,4.4,100,"","noodles, egg, dry"],
+["Noodles, all'uovo, spinaci, cotti",132,5,21.9,1.6,100,"","noodles, egg, spinach"],
+["Noodles, all'uovo, spinaci, secchi",382,14.6,63.5,4.5,100,"","noodles, egg, spinach"],
+["Noodles, giapponesi, soba, cotti",99,5.1,21.4,0.1,100,"","noodles, japanese, soba"],
+["Noodles, giapponesi, soba, secchi",336,14.4,74.6,0.7,100,"","noodles, japanese, soba"],
+["Noodles, giapponesi, somen, cotti",131,4,27.5,0.2,100,"","noodles, japanese, somen"],
+["Noodles, giapponesi, somen, secchi",356,11.3,69.8,0.8,100,"","noodles, japanese, somen"],
+["Nopales, cotti",15,1.4,1.3,0.1,100,"","nopales, cooked, without salt"],
+["Nopales, crudi",16,1.3,1.1,0.1,100,"","nopales, raw"],
+["Oca, di allevamento, con pelle, cotta, arrosta",305,25.2,0,21.9,100,"","goose, domesticated, meat and skin"],
+["Oca, di allevamento, con pelle, cruda",371,15.9,0,33.6,100,"","goose, domesticated, meat and skin"],
+["Oca, di allevamento, solo carne, cotta, arrosta",238,29,0,12.7,100,"","goose, domesticated, meat only"],
+["Oca, di allevamento, solo carne, cruda",161,22.8,0,7.1,100,"","goose, domesticated, meat only"],
+["Oca, fegato, cruda",133,16.4,6.3,4.3,100,"","goose, liver, raw"],
+["Okara",76,3.5,12.2,1.7,100,"","okara"],
+["Okra, cotta, bollita",22,1.9,2,0.2,100,"","okra, cooked, boiled"],
+["Okra, cruda",33,1.9,4.2,0.2,100,"","okra, raw"],
+["Okra, surgelata",30,1.7,4.4,0.2,100,"","okra, frozen, unprepared"],
+["Okra, surgelata, cotta, bollita",34,1.6,4.3,0.2,100,"","okra, frozen, cooked"],
+["Olio di pesce, aringa",902,0,0,100,14,"cucchiaio","fish oil, herring"],
+["Olio di pesce, di fegato di merluzzo",902,0,0,100,100,"","fish oil, cod liver"],
+["Olio di pesce, salmone",902,0,0,100,14,"cucchiaio","fish oil, salmon"],
+["Olio di pesce, sardine",902,0,0,100,14,"cucchiaio","fish oil, sardine"],
+["Olive, sott'aceto, verdi",145,1,0.5,15.3,100,"","olives, pickled, canned or bottled"],
+["Origano, essiccato",265,9,26.4,4.3,100,"","spices, oregano, dried"],
+["Orso, cotto, sobbollito",259,32.4,0,13.4,100,"","game meat, bear, cooked"],
+["Orso, crudo",161,20.1,0,8.3,100,"","game meat, bear, raw"],
+["Orzo, decorticato",354,12.5,56.2,2.3,100,"","barley, hulled"],
+["Orzo, perlato, cotto",123,2.3,24.4,0.4,100,"","barley, pearled, cooked"],
+["Orzo, perlato, crudo",352,9.9,62.1,1.2,100,"","barley, pearled, raw"],
+["Ostriche, del Pacifico, cotte",163,18.9,9.9,4.6,25,"pezzo","mollusks, oyster, pacific"],
+["Ostriche, del Pacifico, crude",81,9.4,5,2.3,50,"pezzo","mollusks, oyster, pacific"],
+["Pancake, ai mirtilli",222,6.1,29,9.2,100,"","pancakes, blueberry, prepared from recipe"],
+["Pancake, al latticello",227,6.8,28.7,9.3,100,"","pancakes, buttermilk, prepared from recipe"],
+["Pancake, semplici",269,5.7,56.3,1.9,100,"","pancakes, plain, prepared from recipe"],
+["Pancake, senza glutine, surgelati, da riscaldare",215,3.3,38.8,4.5,48,"pezzo","pancakes, gluten-free, frozen"],
+["Pane, al formaggio",408,10.4,42.7,20.8,48,"fetta","bread, cheese"],
+["Pane, all'avena",269,8.4,44.5,4.4,100,"","bread, reduced-calorie, oatmeal"],
+["Pane, all'avena, tostato",292,9.2,48.4,4.8,100,"","bread, oatmeal, toasted"],
+["Pane, all'uovo",287,9.5,45.5,6,100,"","bread, egg"],
+["Pane, all'uovo, tostato",315,10.5,50.1,6.6,100,"","bread, egg, toasted"],
+["Pane, all'uvetta",274,7.9,48,4.4,100,"","bread, raisin, enriched"],
+["Pane, all'uvetta, tostato",297,8.6,52.2,4.8,100,"","bread, raisin, enriched"],
+["Pane, alla cannella",253,7,40.9,5.3,100,"","bread, cinnamon"],
+["Pane, bianco",285,7.9,47.6,5.7,100,"","bread, reduced-calorie, white"],
+["Pane, bianco, tostato",290,9,51.6,4,100,"","bread, white, commercially prepared"],
+["Pane, chapati, integrale, surgelato",299,7.8,36.4,9.2,43,"pezzo","bread, chapati or roti, whole wheat"],
+["Pane, chapati, semplice",297,11.2,41.5,7.5,68,"pezzo","bread, chapati or roti, plain"],
+["Pane, crusca d'avena",236,10.4,35.3,4.4,100,"","bread, reduced-calorie, oat bran"],
+["Pane, crusca d'avena, tostato",259,11.4,38.8,4.8,100,"","bread, reduced-calorie, oat bran"],
+["Pane, crusca di frumento",248,8.8,43.8,3.4,100,"","bread, wheat bran"],
+["Pane, crusca di riso",243,8.9,38.6,4.6,100,"","bread, rice bran"],
+["Pane, crusca di riso, tostato",264,9.7,42,5,100,"","bread, rice bran, toasted"],
+["Pane, di frumento",267,10.7,44.7,3.2,100,"","bread, reduced-calorie, wheat"],
+["Pane, di frumento, germogliato",188,13.2,28.6,0,100,"","bread, wheat, sprouted"],
+["Pane, di frumento, germogliato, tostato",205,14.3,31.1,0,100,"","bread, wheat, sprouted"],
+["Pane, di frumento, tostato",313,13,51.1,4.3,100,"","bread, wheat, toasted"],
+["Pane, di segale",259,8.5,42.5,3.3,100,"","bread, reduced-calorie, rye"],
+["Pane, di segale, tostato",284,9.4,46.7,3.6,100,"","bread, rye, toasted"],
+["Pane, francese, integrale",239,8.3,44.9,1,100,"","bread, french or vienna, whole wheat"],
+["Pane, germe di grano, tostato",293,10.7,52,3.3,100,"","bread, wheat germ, toasted"],
+["Pane, integrale",278,8.4,45.4,5.4,100,"","bread, whole-wheat, commercially prepared"],
+["Pane, integrale, tostato",306,16.3,43.7,4.1,100,"","bread, whole-wheat, prepared from recipe"],
+["Pane, pane di mais",266,6.7,43.5,7.1,100,"","bread, cornbread, prepared from recipe"],
+["Pane, pita, bianco",275,9.1,53.5,1.2,100,"","bread, pita, white"],
+["Pane, pita, integrale",262,9.8,49.8,1.7,64,"pezzo","bread, pita, whole-wheat"],
+["Pane, pumpernickel",250,8.7,41,3.1,100,"","bread, pumpernickel"],
+["Pane, pumpernickel, tostato",275,9.5,45.1,3.4,100,"","bread, pumpernickel, toasted"],
+["Pangrattato, secco, grattugiato",383,14.1,63.6,5.5,100,"","bread crumbs, dry, grated"],
+["Pangrattato, secco, grattugiato, semplice",395,13.3,67.5,5.3,100,"","bread crumbs, dry, grated"],
+["Panini, all'uovo",307,9.5,48.3,6.4,100,"","rolls, dinner, egg"],
+["Panini, crusca d'avena",236,9.5,36.1,4.6,100,"","rolls, dinner, oat bran"],
+["Panini, di frumento",273,8.6,42.2,6.3,100,"","rolls, dinner, wheat"],
+["Panini, di segale",286,10.3,48.2,3.4,43,"pezzo","rolls, dinner, rye"],
+["Panini, dolci",321,10,50.5,7.4,30,"pezzo","rolls, dinner, sweet"],
+["Panini, integrali",266,8.7,43.6,4.7,100,"","rolls, dinner, whole-wheat"],
+["Panini, per hamburger",196,8.3,35.9,2,100,"","rolls, hamburger or hotdog, reduced-calorie"],
+["Panini, per hamburger, multicereali",263,9.6,40.8,6,100,"","rolls, hamburger or hotdog, mixed-grain"],
+["Panini, per hamburger, semplici",279,9.8,48.3,3.9,100,"","rolls, hamburger or hotdog, plain"],
+["Panini, pumpernickel",276,10.8,46.5,2.8,36,"pezzo","rolls, pumpernickel"],
+["Panini, semplici",316,8.5,51.5,7.3,100,"","rolls, dinner, plain"],
+["Panna acida",136,3.5,7.1,10.6,100,"","sour cream, fat free"],
+["Panna, liquida, da caffè",191,3,2.8,19.1,100,"","cream, fluid, light (coffee cream or table cream)"],
+["Panna, liquida, da montare",340,2.8,2.7,36.1,100,"","cream, fluid, heavy whipping"],
+["Panna, liquida, da montare light",292,2.2,3,30.9,100,"","cream, fluid, light whipping"],
+["Papaya, cruda",43,0.5,9.1,0.3,100,"","papayas, raw"],
+["Papaya, in scatola, sciroppata",206,0.1,54.3,0.6,39,"pezzo","papaya, canned, heavy syrup"],
+["Paprika",282,14.1,19.1,12.9,100,"","spices, paprika"],
+["Pasta corta, vegetale, cotta",128,4.5,22.3,0.1,100,"","macaroni, vegetable, enriched"],
+["Pasta corta, vegetale, secca",367,13.1,70.6,1,100,"","macaroni, vegetable, enriched"],
+["Pasta di mandorle",458,9,43,27.7,100,"","nuts, almond paste"],
+["Pasta fillo",299,7.1,50.7,6,100,"","phyllo dough"],
+["Pasta frolla, al forno",527,6.4,45.8,34.6,23,"pezzo","pie crust, standard-type, prepared from recipe"],
+["Pasta frolla, preparato in polvere",518,6.9,52.1,31.4,100,"","pie crust, standard-type, dry mix"],
+["Pasta frolla, preparato in polvere, preparata, al forno",501,6.7,48.6,30.4,20,"pezzo","pie crust, standard-type, dry mix"],
+["Pasta, cotta",158,5.8,29.1,0.9,100,"","pasta, cooked, enriched"],
+["Pasta, fresca, semplice",288,11.3,54.7,2.3,100,"","pasta, fresh-refrigerated, plain"],
+["Pasta, fresca, semplice, cotta",131,5.2,24.9,1.1,100,"","pasta, fresh-refrigerated, plain"],
+["Pasta, fresca, spinaci",289,11.3,55.7,2.1,100,"","pasta, fresh-refrigerated, spinach"],
+["Pasta, fresca, spinaci, cotta",130,5.1,25,0.9,100,"","pasta, fresh-refrigerated, spinach"],
+["Pasta, integrale, cotta",149,6,26.2,1.7,100,"","pasta, whole-wheat, cooked"],
+["Pasta, integrale, secca",352,13.9,64.2,2.9,100,"","pasta, whole-wheat, dry"],
+["Pasta, secca",371,13,71.5,1.5,100,"","pasta, dry, enriched"],
+["Pasta, senza glutine, di mais, cotta",126,2.6,23.1,0.7,100,"","pasta, gluten-free, corn"],
+["Pasta, senza glutine, di mais, secca",357,7.5,68.3,2.1,100,"","pasta, gluten-free, corn"],
+["Pastinaca, cotta, bollita",71,1.3,13,0.3,100,"","parsnips, cooked, boiled"],
+["Pastinaca, cruda",75,1.2,13.1,0.3,100,"","parsnips, raw"],
+["Pastrami, manzo",95,19.6,1.5,1.2,100,"","pastrami, beef, 98% fat-free"],
+["Pastrami, tacchino",139,16.3,3.2,6.2,57,"fetta","pastrami, turkey"],
+["Patata dolce, cotta, bollita, senza buccia",76,1.4,15.2,0.1,100,"","sweet potato, cooked, boiled"],
+["Patata dolce, cruda",86,1.6,17.1,0.1,100,"","sweet potato, raw, unprepared"],
+["Patata dolce, in scatola, purè",101,2,21.5,0.2,100,"","sweet potato, canned, mashed"],
+["Patata dolce, in scatola, sciroppata",108,1.3,22.4,0.3,100,"","sweet potato, canned, syrup pack"],
+["Patata dolce, surgelata",96,1.7,20.5,0.2,100,"","sweet potato, frozen, unprepared"],
+["Patata dolce, surgelata, cotta, al forno",100,1.7,21.6,0.1,100,"","sweet potato, frozen, cooked"],
+["Patate, al forno, con buccia",93,2.5,18.9,0.1,100,"","potatoes, baked, flesh and skin"],
+["Patate, al forno, polpa",93,2,20.1,0.1,100,"","potatoes, baked, flesh"],
+["Patate, al microonde, cotte con la buccia, con buccia",105,2.4,21.9,0.1,100,"","potatoes, microwaved, cooked in skin"],
+["Patate, al microonde, cotte con la buccia, polpa",100,2.1,21.7,0.1,100,"","potatoes, microwaved, cooked in skin"],
+["Patate, arroste, surgelate",130,2.2,23.5,1.8,100,"","potatoes, roasted, salt added in processing"],
+["Patate, bianche, con buccia, al forno",94,2.1,19,0.1,299,"pezzo","potatoes, white, flesh and skin"],
+["Patate, bianche, con buccia, crude",69,1.7,13.3,0.1,100,"","potatoes, white, flesh and skin"],
+["Patate, bollite, cotte con la buccia, polpa",87,1.9,18.1,0.1,100,"","potatoes, boiled, cooked in skin"],
+["Patate, con buccia, crude",77,2,15.4,0.1,100,"","potatoes, flesh and skin, raw"],
+["Patate, fritte, surgelate",150,2.2,22.9,4.7,100,"","potatoes, french fried, all types"],
+["Patate, gratinate, preparato in polvere",314,8.9,70.2,3.7,100,"","potatoes, au gratin, dry mix"],
+["Patate, gratinate, preparato in polvere, preparate con acqua, con latte e burro",93,2.3,11.9,4.1,100,"","potatoes, au gratin, dry mix"],
+["Patate, in scatola",60,1.4,11.3,0.2,100,"","potatoes, canned, solids and liquids"],
+["Patate, purè, con latte e burro",113,1.9,15.3,4.2,100,"","potatoes, mashed, home-prepared"],
+["Patate, purè, pronto",106,2,11.4,5,100,"","potatoes, mashed, ready-to-eat"],
+["Patate, rosse, con buccia, al forno",89,2.3,17.8,0.1,299,"pezzo","potatoes, red, flesh and skin"],
+["Patate, rosse, con buccia, crude",70,1.9,14.2,0.1,100,"","potatoes, red, flesh and skin"],
+["Patate, rösti",265,3,31.9,12.5,100,"","potatoes, hash brown, home-prepared"],
+["Patate, rösti, surgelate, semplici",82,2.1,16.3,0.6,100,"","potatoes, hash brown, frozen"],
+["Patate, surgelate, intere",78,2.4,16.3,0.2,100,"","potatoes, frozen, whole"],
+["Patate, surgelate, intere, cotte, bollite",65,2,13.1,0.1,100,"","potatoes, frozen, whole"],
+["Patatine in busta",471,7.1,61,20.8,100,"","snacks, potato chips, fat free"],
+["Patatine in busta, al gusto barbecue",487,6.5,52.1,31.1,100,"","snacks, potato chips, barbecue-flavor"],
+["Patatine in busta, al gusto formaggio",496,8.5,52.5,27.2,100,"","snacks, potato chips, cheese-flavor"],
+["Patatine in busta, semplici",536,7,48.1,34.6,100,"","snacks, potato chips, plain"],
+["Pepe, bianco",296,10.4,42.4,2.1,100,"","spices, pepper, white"],
+["Pepe, di Cayenna",318,12,29.4,17.3,100,"","spices, pepper, red or cayenne"],
+["Pepe, nero",251,10.4,38.7,3.3,100,"","spices, pepper, black"],
+["Peperoncino in polvere",282,13.5,14.9,14.3,100,"","spices, chili powder"],
+["Peperoni, ancho, essiccati",281,11.9,29.8,8.2,17,"pezzo","peppers, ancho, dried"],
+["Peperoni, chili, verdi, in scatola",21,0.7,2.9,0.3,100,"","peppers, chili, green"],
+["Peperoni, dolci, gialli, crudi",27,1,5.4,0.2,186,"pezzo","peppers, sweet, yellow"],
+["Peperoni, dolci, rossi, cotti, bolliti",28,0.9,5.5,0.2,100,"","peppers, sweet, red"],
+["Peperoni, dolci, rossi, crudi",31,1,3.9,0.3,100,"","peppers, sweet, red"],
+["Peperoni, dolci, rossi, in scatola",18,0.8,2.7,0.3,100,"","peppers, sweet, red"],
+["Peperoni, dolci, rossi, liofilizzati",314,17.9,47.4,3,100,"","peppers, sweet, red"],
+["Peperoni, dolci, rossi, saltati",133,1,4.8,12.8,100,"","peppers, sweet, red"],
+["Peperoni, dolci, rossi, surgelati, tritati",20,1.1,2.9,0.2,100,"","peppers, sweet, red"],
+["Peperoni, dolci, rossi, surgelati, tritati, bolliti",16,0.9,2.5,0.2,100,"","peppers, sweet, red"],
+["Peperoni, dolci, verdi, cotti, bolliti",28,0.9,5.5,0.2,100,"","peppers, sweet, green"],
+["Peperoni, dolci, verdi, crudi",20,0.9,2.9,0.2,100,"","peppers, sweet, green"],
+["Peperoni, dolci, verdi, in scatola",18,0.8,2.7,0.3,100,"","peppers, sweet, green"],
+["Peperoni, dolci, verdi, liofilizzati",314,17.9,47.4,3,100,"","peppers, sweet, green"],
+["Peperoni, dolci, verdi, saltati",127,0.8,2.4,11.8,100,"","peppers, sweet, green"],
+["Peperoni, dolci, verdi, surgelati, tritati",20,1.1,2.9,0.2,100,"","peppers, sweet, green"],
+["Peperoni, dolci, verdi, surgelati, tritati, bolliti",18,0.9,3,0.2,100,"","peppers, sweet, green"],
+["Peperoni, dolci, verdi, surgelati, tritati, cotti, bolliti",16,0.9,2.4,0.2,100,"","peppers, sweet, green"],
+["Peperoni, jalapeño, crudi",29,0.9,3.7,0.4,100,"","peppers, jalapeno, raw"],
+["Peperoni, jalapeño, in scatola",27,0.9,2.1,0.9,100,"","peppers, jalapeno, canned"],
+["Peperoni, pasilla, essiccati",345,12.3,24.3,15.8,7,"pezzo","peppers, pasilla, dried"],
+["Peperoni, serrano, crudi",32,1.7,3,0.4,100,"","peppers, serrano, raw"],
+["Peperoni, ungheresi, crudi",29,0.8,5.7,0.4,27,"pezzo","peppers, hungarian, raw"],
+["Pere, asiatiche, crude",42,0.5,7.1,0.2,122,"pezzo","pears, asian, raw"],
+["Pere, crude",57,0.4,12.1,0.1,100,"","pears, raw"],
+["Pere, essiccate, solforate, crude",262,1.9,62.2,0.6,100,"","pears, dried, sulfured"],
+["Pere, essiccate, solforate, in umido",140,0.9,31.3,0.3,100,"","pears, dried, sulfured"],
+["Pere, in scatola, al naturale",29,0.2,6.2,0,100,"","pears, canned, water pack"],
+["Pere, in scatola, al succo",50,0.3,11.3,0.1,100,"","pears, canned, juice pack"],
+["Pere, in scatola, in sciroppo leggero",57,0.2,13.6,0,100,"","pears, canned, light syrup pack"],
+["Pere, in scatola, sciroppate",74,0.2,16.4,0.2,100,"","pears, canned, heavy syrup pack"],
+["Pesce persico, cotto",117,24.9,0,1.2,100,"","fish, perch, mixed species"],
+["Pesce persico, crudo",91,19.4,0,0.9,100,"","fish, perch, mixed species"],
+["Pesce serra, cotto",159,25.7,0,5.4,100,"","fish, bluefish, cooked"],
+["Pesce serra, crudo",124,20,0,4.2,100,"","fish, bluefish, raw"],
+["Pesce spada, cotto",172,23.4,0,7.9,100,"","fish, swordfish, cooked"],
+["Pesce spada, crudo",144,19.7,0,6.7,100,"","fish, swordfish, raw"],
+["Pesche noci, crude",44,1.1,8.9,0.3,100,"","nectarines, raw"],
+["Pesche, essiccate, solforate, crude",239,3.6,53.1,0.8,100,"","peaches, dried, sulfured"],
+["Pesche, essiccate, solforate, in umido",103,1.1,24.2,0.2,100,"","peaches, dried, sulfured"],
+["Pesche, gialle, crude",39,0.9,8,0.2,100,"","peaches, yellow, raw"],
+["Pesche, in scatola, al naturale",24,0.4,4.8,0.1,100,"","peaches, canned, water pack"],
+["Pesche, in scatola, al succo",44,0.6,10.3,0,100,"","peaches, canned, juice pack"],
+["Pesche, in scatola, in sciroppo leggero",54,0.5,13.2,0,100,"","peaches, canned, light syrup pack"],
+["Pesche, in scatola, sciroppate",74,0.5,18.6,0.1,100,"","peaches, canned, heavy syrup"],
+["Pesche, surgelate, a fette, zuccherate",94,0.6,22.2,0.1,100,"","peaches, frozen, sliced"],
+["Piccione, con pelle, crudo",294,18.5,0,23.8,100,"","squab, (pigeon), meat and skin"],
+["Piccione, solo carne, crudo",142,17.5,0,7.5,100,"","squab, (pigeon), meat only"],
+["Pimento, macinato",263,6.1,50.5,8.7,100,"","spices, allspice, ground"],
+["Pinoli, essiccati",673,13.7,9.4,68.4,100,"","nuts, pine nuts, dried"],
+["Piselli e carote, in scatola",38,2.2,5.2,0.3,100,"","peas and carrots, canned, regular pack"],
+["Piselli e carote, surgelati",53,3.4,7.8,0.5,100,"","peas and carrots, frozen, unprepared"],
+["Piselli e carote, surgelati, cotti, bolliti",48,3.1,7,0.4,100,"","peas and carrots, frozen, cooked"],
+["Piselli, secchi, germogliati, cotti, bolliti",98,7,17.1,0.5,100,"","peas, mature seeds, sprouted"],
+["Piselli, secchi, germogliati, crudi",124,8.8,27.1,0.7,100,"","peas, mature seeds, sprouted"],
+["Piselli, spezzati, secchi, cotti, bolliti",118,8.3,12.8,0.4,100,"","peas, split, mature seeds"],
+["Piselli, taccole, bolliti",42,3.3,4.2,0.2,100,"","peas, edible-podded, boiled"],
+["Piselli, taccole, cotti, bolliti",40,3.3,3.7,0.2,100,"","peas, edible-podded, cooked"],
+["Piselli, taccole, crudi",42,2.8,4.9,0.2,100,"","peas, edible-podded, raw"],
+["Piselli, taccole, surgelati",42,2.8,4.1,0.3,100,"","peas, edible-podded, frozen"],
+["Piselli, taccole, surgelati, cotti, bolliti",52,3.5,5.9,0.4,100,"","peas, edible-podded, frozen"],
+["Piselli, verdi, cotti, bolliti",84,5.4,10.1,0.2,100,"","peas, green, cooked"],
+["Piselli, verdi, crudi",81,5.4,8.8,0.4,100,"","peas, green, raw"],
+["Piselli, verdi, in scatola",58,3,7.3,0.5,100,"","peas, green, canned"],
+["Piselli, verdi, spezzati, secchi, crudi",352,23.8,38.2,1.2,100,"","peas, green, split"],
+["Piselli, verdi, surgelati",77,5.2,9.1,0.4,100,"","peas, green, frozen"],
+["Piselli, verdi, surgelati, cotti, bolliti",78,5.2,9.8,0.3,100,"","peas, green, frozen"],
+["Pistacchi, crudi",560,20.2,16.6,45.3,100,"","nuts, pistachio nuts, raw"],
+["Pistacchi, tostati",572,21.1,18,45.8,100,"","nuts, pistachio nuts, dry roasted"],
+["Piña colada",174,0.4,22.4,1.9,100,"","alcoholic beverage, pina colada, prepared-from-recipe"],
+["Piña colada, in scatola",237,0.6,27.5,7.6,100,"","alcoholic beverage, pina colada, canned"],
+["Platano da cuocere, cotto",116,0.8,28.8,0.2,100,"","plantains, cooked"],
+["Platano da cuocere, crudo",122,1.3,29.6,0.4,100,"","plantains, raw"],
+["Platano da cuocere, verde, fritto",309,1.5,45.7,11.8,100,"","plantains, green, fried"],
+["Pollo",900,0,0,99.8,13,"cucchiaio","fat, chicken"],
+["Pollo, ali, con pelle, cotto, allo spiedo",266,24.3,0,18.8,100,"","chicken, broilers or fryers, wing"],
+["Pollo, ali, con pelle, cotto, arrosto",254,23.8,0,16.9,85,"pezzo","chicken, broilers or fryers, wing"],
+["Pollo, ali, con pelle, cotto, fritto, farina",321,26.1,2.3,22.2,100,"","chicken, broilers or fryers, wing"],
+["Pollo, ali, con pelle, cotto, fritto, pastella",324,19.9,10.6,21.8,100,"","chicken, broilers or fryers, wing"],
+["Pollo, ali, con pelle, cotto, in umido",249,22.8,0,16.8,100,"","chicken, broilers or fryers, wing"],
+["Pollo, ali, con pelle, crudo",191,17.5,0,12.8,107,"pezzo","chicken, broilers or fryers, wing"],
+["Pollo, ali, solo carne, cotto, allo spiedo",197,27.7,0,9.5,100,"","chicken, broilers or fryers, wing"],
+["Pollo, ali, solo carne, cotto, arrosto",203,30.5,0,8.1,100,"","chicken, broilers or fryers, wing"],
+["Pollo, ali, solo carne, cotto, fritto",211,30.1,0,9.2,100,"","chicken, broilers or fryers, wing"],
+["Pollo, ali, solo carne, cotto, in umido",181,27.2,0,7.2,100,"","chicken, broilers or fryers, wing"],
+["Pollo, ali, solo carne, crudo",126,22,0,3.5,100,"","chicken, broilers or fryers, wing"],
+["Pollo, carne bianca, con pelle, cotto, arrosto",222,29,0,10.8,100,"","chicken, broilers or fryers, light meat"],
+["Pollo, carne bianca, con pelle, cotto, fritto, farina",246,30.4,1.7,12.1,100,"","chicken, broilers or fryers, light meat"],
+["Pollo, carne bianca, con pelle, cotto, fritto, pastella",277,23.6,9.5,15.4,100,"","chicken, broilers or fryers, light meat"],
+["Pollo, carne bianca, con pelle, cotto, in umido",201,26.1,0,10,100,"","chicken, broilers or fryers, light meat"],
+["Pollo, carne bianca, con pelle, crudo",186,20.3,0,11.1,100,"","chicken, broilers or fryers, light meat"],
+["Pollo, carne bianca, solo carne, cotto, arrosto",173,30.9,0,4.5,100,"","chicken, broilers or fryers, light meat"],
+["Pollo, carne bianca, solo carne, cotto, fritto",192,32.8,0.4,5.5,100,"","chicken, broilers or fryers, light meat"],
+["Pollo, carne bianca, solo carne, cotto, in umido",159,28.9,0,4,100,"","chicken, broilers or fryers, light meat"],
+["Pollo, carne bianca, solo carne, crudo",114,23.2,0,1.6,100,"","chicken, broilers or fryers, light meat"],
+["Pollo, carne scura, con pelle, cotto, arrosto",253,26,0,15.8,100,"","chicken, broilers or fryers, dark meat"],
+["Pollo, carne scura, con pelle, cotto, fritto, farina",285,27.2,4.1,16.9,100,"","chicken, broilers or fryers, dark meat"],
+["Pollo, carne scura, con pelle, cotto, fritto, pastella",298,21.9,9.4,18.6,100,"","chicken, broilers or fryers, dark meat"],
+["Pollo, carne scura, con pelle, cotto, in umido",233,23.5,0,14.7,100,"","chicken, broilers or fryers, dark meat"],
+["Pollo, carne scura, con pelle, crudo",237,16.7,0,18.3,100,"","chicken, broilers or fryers, dark meat"],
+["Pollo, carne scura, fusello, con pelle, cotto, arrosto",180,24.7,0.1,9,100,"","chicken, dark meat, drumstick"],
+["Pollo, carne scura, fusello, con pelle, cotto, brasato",187,22.7,0,10.7,100,"","chicken, dark meat, drumstick"],
+["Pollo, carne scura, fusello, con pelle, crudo",146,18,0,8.2,100,"","chicken, dark meat, drumstick"],
+["Pollo, carne scura, fusello, solo carne, cotto, arrosto",155,24.2,0,5.7,100,"","chicken, dark meat, drumstick"],
+["Pollo, carne scura, fusello, solo carne, cotto, brasato",149,23,0,6.3,100,"","chicken, dark meat, drumstick"],
+["Pollo, carne scura, fusello, solo carne, crudo",116,19.4,0,3.7,100,"","chicken, dark meat, drumstick"],
+["Pollo, carne scura, solo carne, cotto, arrosto",205,27.4,0,9.7,100,"","chicken, broilers or fryers, dark meat"],
+["Pollo, carne scura, solo carne, cotto, fritto",239,29,2.6,11.6,100,"","chicken, broilers or fryers, dark meat"],
+["Pollo, carne scura, solo carne, cotto, in umido",192,26,0,9,100,"","chicken, broilers or fryers, dark meat"],
+["Pollo, carne scura, solo carne, crudo",125,20.1,0,4.3,100,"","chicken, broilers or fryers, dark meat"],
+["Pollo, carne scura, sovracoscia, con pelle, cotto, arrosto",214,23.5,0.1,13.8,100,"","chicken, dark meat, thigh"],
+["Pollo, carne scura, sovracoscia, con pelle, cotto, brasato",229,22.6,0,15.4,100,"","chicken, dark meat, thigh"],
+["Pollo, carne scura, sovracoscia, con pelle, crudo",197,16.6,0,14.6,100,"","chicken, dark meat, thigh"],
+["Pollo, carne scura, sovracoscia, solo carne, cotto, arrosto",164,24.2,0,7.7,100,"","chicken, dark meat, thigh"],
+["Pollo, carne scura, sovracoscia, solo carne, cotto, brasato",176,24.6,0,8.6,100,"","chicken, dark meat, thigh"],
+["Pollo, carne scura, sovracoscia, solo carne, crudo",121,19.7,0,4.1,100,"","chicken, dark meat, thigh"],
+["Pollo, collo, con pelle, cotto, fritto, farina",332,24,4.2,23.6,100,"","chicken, broilers or fryers, neck"],
+["Pollo, collo, con pelle, cotto, fritto, pastella",330,19.8,8.7,23.5,100,"","chicken, broilers or fryers, neck"],
+["Pollo, collo, con pelle, crudo",297,14.1,0,26.2,100,"","chicken, broilers or fryers, neck"],
+["Pollo, collo, solo carne, cotto, fritto",229,26.9,1.8,11.9,100,"","chicken, broilers or fryers, neck"],
+["Pollo, collo, solo carne, cotto, sobbollito",179,24.6,0,8.2,100,"","chicken, broilers or fryers, neck"],
+["Pollo, collo, solo carne, crudo",154,17.6,0,8.8,100,"","chicken, broilers or fryers, neck"],
+["Pollo, con pelle, cotto, arrosto",239,27.3,0,13.6,100,"","chicken, broilers or fryers, meat and skin"],
+["Pollo, con pelle, cotto, fritto, farina",269,28.6,3,14.9,100,"","chicken, broilers or fryers, meat and skin"],
+["Pollo, con pelle, cotto, fritto, pastella",289,22.5,9.1,17.4,100,"","chicken, broilers or fryers, meat and skin"],
+["Pollo, con pelle, cotto, in umido",219,24.7,0,12.6,100,"","chicken, broilers or fryers, meat and skin"],
+["Pollo, con pelle, crudo",215,18.6,0,15.1,100,"","chicken, broilers or fryers, meat and skin"],
+["Pollo, coscia, con pelle, cotto, arrosto",184,24,0,9,100,"","chicken, broilers or fryers, leg"],
+["Pollo, coscia, con pelle, cotto, fritto, farina",254,26.8,2.4,14.4,100,"","chicken, broilers or fryers, leg"],
+["Pollo, coscia, con pelle, cotto, fritto, pastella",273,21.8,8.4,16.2,100,"","chicken, broilers or fryers, leg"],
+["Pollo, coscia, con pelle, cotto, in umido",220,24.2,0,12.9,100,"","chicken, broilers or fryers, leg"],
+["Pollo, coscia, con pelle, crudo",214,16.4,0.2,15.9,100,"","chicken, broilers or fryers, leg"],
+["Pollo, coscia, solo carne, cotto, arrosto",174,24.2,0,7.8,100,"","chicken, broilers or fryers, leg"],
+["Pollo, coscia, solo carne, cotto, fritto",208,28.4,0.7,9.3,100,"","chicken, broilers or fryers, leg"],
+["Pollo, coscia, solo carne, cotto, in umido",185,26.3,0,8.1,100,"","chicken, broilers or fryers, leg"],
+["Pollo, coscia, solo carne, crudo",120,19.2,0,4.2,100,"","chicken, broilers or fryers, leg"],
+["Pollo, fegato, cotto, in padella",172,25.8,1.1,6.4,100,"","chicken, liver, all classes"],
+["Pollo, fegato, cotto, sobbollito",167,24.5,0.9,6.5,100,"","chicken, liver, all classes"],
+["Pollo, fegato, crudo",119,16.9,0.7,4.8,100,"","chicken, liver, all classes"],
+["Pollo, fusello, con pelle, cotto, allo spiedo",215,26.9,0,12,100,"","chicken, broilers or fryers, drumstick"],
+["Pollo, fusello, con pelle, cotto, arrosto",191,23.4,0,10.2,100,"","chicken, broilers or fryers, drumstick"],
+["Pollo, fusello, con pelle, cotto, fritto, farina",245,27,1.5,13.7,100,"","chicken, broilers or fryers, drumstick"],
+["Pollo, fusello, con pelle, cotto, fritto, pastella",268,21.9,8,15.8,100,"","chicken, broilers or fryers, drumstick"],
+["Pollo, fusello, con pelle, cotto, in umido",204,25.3,0,10.6,100,"","chicken, broilers or fryers, drumstick"],
+["Pollo, fusello, con pelle, crudo",161,18.1,0.1,9.2,100,"","chicken, broilers or fryers, drumstick"],
+["Pollo, fusello, solo carne, cotto, allo spiedo",176,28.7,0,6.8,100,"","chicken, broilers or fryers, drumstick"],
+["Pollo, fusello, solo carne, cotto, fritto",195,28.6,0,8.1,100,"","chicken, broilers or fryers, drumstick"],
+["Pollo, fusello, solo carne, cotto, in umido",169,27.5,0,5.7,100,"","chicken, broilers or fryers, drumstick"],
+["Pollo, galletto, con pelle, cotto, arrosto",259,22.3,0,18.2,100,"","chicken, cornish game hens, meat and skin"],
+["Pollo, galletto, con pelle, crudo",200,17.1,0,14,100,"","chicken, cornish game hens, meat and skin"],
+["Pollo, galletto, solo carne, cotto, arrosto",134,23.3,0,3.9,100,"","chicken, cornish game hens, meat only"],
+["Pollo, galletto, solo carne, crudo",116,20,0,3.3,100,"","chicken, cornish game hens, meat only"],
+["Pollo, macinato, crudo",143,17.4,0,8.1,100,"","chicken, ground, raw"],
+["Pollo, petto, con pelle, cotto, allo spiedo",184,27.5,0,8.2,100,"","chicken, broilers or fryers, breast"],
+["Pollo, petto, con pelle, cotto, arrosto",197,29.8,0,7.8,100,"","chicken, broilers or fryers, breast"],
+["Pollo, petto, con pelle, cotto, fritto, farina",222,31.8,1.5,8.9,100,"","chicken, broilers or fryers, breast"],
+["Pollo, petto, con pelle, cotto, fritto, pastella",260,24.8,8.7,13.2,100,"","chicken, broilers or fryers, breast"],
+["Pollo, petto, con pelle, cotto, in umido",184,27.4,0,7.4,100,"","chicken, broilers or fryers, breast"],
+["Pollo, petto, con pelle, crudo",172,20.9,0,9.2,100,"","chicken, broilers or fryers, breast"],
+["Pollo, petto, senza pelle, solo carne, cotto, alla griglia",151,30.5,0,3.2,100,"","chicken, broiler or fryers, breast"],
+["Pollo, petto, senza pelle, solo carne, cotto, brasato",157,32.1,0,3.2,100,"","chicken, broiler or fryers, breast"],
+["Pollo, petto, senza pelle, solo carne, crudo",120,22.5,0,2.6,100,"","chicken, broilers or fryers, breast"],
+["Pollo, petto, solo carne, cotto, allo spiedo",137,28,0,2.8,100,"","chicken, broilers or fryers, breast"],
+["Pollo, petto, solo carne, cotto, arrosto",165,31,0,3.6,100,"","chicken, broilers or fryers, breast"],
+["Pollo, petto, solo carne, cotto, fritto",187,33.4,0.5,4.7,100,"","chicken, broilers or fryers, breast"],
+["Pollo, petto, solo carne, cotto, in umido",151,29,0,3,100,"","chicken, broilers or fryers, breast"],
+["Pollo, schiena, con pelle, cotto, allo spiedo",260,23.2,0,18.6,100,"","chicken, broilers or fryers, back"],
+["Pollo, schiena, con pelle, cotto, arrosto",300,25.9,0,21,100,"","chicken, broilers or fryers, back"],
+["Pollo, schiena, con pelle, cotto, fritto, farina",331,27.8,6.5,20.7,100,"","chicken, broilers or fryers, back"],
+["Pollo, schiena, con pelle, cotto, fritto, pastella",331,22,10.2,21.9,100,"","chicken, broilers or fryers, back"],
+["Pollo, schiena, con pelle, cotto, in umido",258,22.2,0,18.1,100,"","chicken, broilers or fryers, back"],
+["Pollo, schiena, con pelle, crudo",319,14.1,0,28.7,100,"","chicken, broilers or fryers, back"],
+["Pollo, schiena, solo carne, cotto, allo spiedo",205,25.3,0,11.5,100,"","chicken, broilers or fryers, back"],
+["Pollo, schiena, solo carne, cotto, arrosto",239,28.2,0,13.2,100,"","chicken, broilers or fryers, back"],
+["Pollo, schiena, solo carne, cotto, fritto",288,30,5.7,15.3,100,"","chicken, broilers or fryers, back"],
+["Pollo, schiena, solo carne, cotto, in umido",209,25.3,0,11.2,100,"","chicken, broilers or fryers, back"],
+["Pollo, schiena, solo carne, crudo",137,19.6,0,5.9,100,"","chicken, broilers or fryers, back"],
+["Pollo, solo carne, arrosto",190,28.9,0,7.4,100,"","chicken, broilers or fryers, meat only"],
+["Pollo, solo carne, cotto, fritto",219,30.6,1.6,9.1,100,"","chicken, broilers or fryers, meat only"],
+["Pollo, solo carne, crudo",119,21.4,0,3.1,100,"","chicken, broilers or fryers, meat only"],
+["Pollo, solo carne, in umido",177,27.3,0,6.7,100,"","chicken, broilers or fryers, meat only"],
+["Pollo, sovracoscia, con pelle, cotto, allo spiedo",233,22.9,0,15.7,100,"","chicken, broilers or fryers, thigh"],
+["Pollo, sovracoscia, con pelle, cotto, arrosto",232,23.3,0,14.7,100,"","chicken, broilers or fryers, thigh"],
+["Pollo, sovracoscia, con pelle, cotto, fritto, farina",262,26.8,3.1,15,100,"","chicken, broilers or fryers, thigh"],
+["Pollo, sovracoscia, con pelle, cotto, fritto, pastella",277,21.6,8.8,16.5,100,"","chicken, broilers or fryers, thigh"],
+["Pollo, sovracoscia, con pelle, cotto, in umido",232,23.3,0,14.7,100,"","chicken, broilers or fryers, thigh"],
+["Pollo, sovracoscia, con pelle, crudo",221,16.5,0.2,16.6,100,"","chicken, broilers or fryers, thigh"],
+["Pollo, sovracoscia, solo carne, cotto, allo spiedo",196,24.1,0,11.1,100,"","chicken, broilers or fryers, thigh"],
+["Pollo, sovracoscia, solo carne, cotto, arrosto",179,24.8,0,8.2,100,"","chicken, broilers or fryers, thigh"],
+["Pollo, sovracoscia, solo carne, cotto, fritto",218,28.2,1.2,10.3,100,"","chicken, broilers or fryers, thigh"],
+["Pollo, sovracoscia, solo carne, cotto, in umido",195,25,0,9.8,100,"","chicken, broilers or fryers, thigh"],
+["Pollo, vegetariano",224,23.6,0,12.7,100,"","chicken, meatless"],
+["Pollo, vegetariano, impanato, fritto",234,21.3,4.2,12.8,100,"","chicken, meatless, breaded"],
+["Polpa di cocco, cruda",354,3.3,6.2,33.5,100,"","nuts, coconut meat, raw"],
+["Polpa di cocco, essiccata, tostata",592,5.3,44.4,47,100,"","nuts, coconut meat, dried (desiccated)"],
+["Polpa di cocco, essiccata, zuccherata, grattugiata",501,2.9,43.2,35.5,100,"","nuts, coconut meat, dried (desiccated)"],
+["Polpa di cocco, essiccata, zuccherata, in fiocchi, in scatola",443,3.4,36.4,31.7,100,"","nuts, coconut meat, dried (desiccated)"],
+["Polpette, vegetariane",197,21,3.4,9,100,"","meatballs, meatless"],
+["Pomelo, crudo",38,0.8,8.6,0,100,"","pummelo, raw"],
+["Pomodori, arancioni, crudi",16,1.2,2.3,0.2,100,"","tomatoes, orange, raw"],
+["Pomodori, gialli, crudi",15,1,2.3,0.3,100,"","tomatoes, yellow, raw"],
+["Pomodori, rossi, maturi, cotti",18,0.9,3.3,0.1,100,"","tomatoes, red, ripe"],
+["Pomodori, rossi, maturi, cotti, in umido",79,2,11.4,2.7,100,"","tomatoes, red, ripe"],
+["Pomodori, rossi, maturi, in scatola, in umido",26,0.9,5.2,0.2,100,"","tomatoes, red, ripe"],
+["Pomodori, secchi",258,14.1,43.5,3,100,"","tomatoes, sun-dried"],
+["Pomodori, secchi, sott'olio",213,5.1,17.5,14.1,100,"","tomatoes, sun-dried, packed in oil"],
+["Pomodori, verdi, crudi",23,1.2,4,0.2,100,"","tomatoes, green, raw"],
+["Pomodoro, in scatola, concentrato",82,4.3,14.8,0.5,100,"","tomato products, canned, paste"],
+["Pomodoro, in scatola, passata",38,1.6,7.1,0.2,100,"","tomato products, canned, puree"],
+["Pomodoro, in scatola, salsa",24,1.2,3.8,0.3,100,"","tomato products, canned, sauce"],
+["Pompelmo, crudo, bianco",33,0.7,7.3,0.1,100,"","grapefruit, raw, white"],
+["Popcorn, al gusto formaggio",526,9.3,41.7,33.2,100,"","snacks, popcorn, cheese-flavor"],
+["Popcorn, al microonde",424,12.6,57.8,9.5,100,"","snacks, popcorn, microwave"],
+["Popcorn, caramellato, con arachidi",400,6.4,76.9,7.8,100,"","snacks, popcorn, caramel-coated"],
+["Porri, cotti, bolliti",31,0.8,6.6,0.2,100,"","leeks, (bulb and lower leaf-portion), cooked"],
+["Porri, crudi",61,1.5,12.3,0.3,100,"","leeks, (bulb and lower leaf-portion), raw"],
+["Porri, liofilizzati",321,15.2,64.2,2.1,100,"","leeks, (bulb and lower-leaf portion), freeze-dried"],
+["Portulaca, cotta, bollita",18,1.5,3.5,0.2,100,"","purslane, cooked, boiled"],
+["Portulaca, cruda",20,2,3.4,0.4,100,"","purslane, raw"],
+["Pretzel, duro, semplice",384,10,77,2.9,100,"","snacks, pretzels, hard"],
+["Pretzel, morbidi",345,8.2,69.3,3.1,143,"pezzo","pretzels, soft"],
+["Prezzemolo",36,3,3,0.8,100,"","parsley, fresh"],
+["Prezzemolo, essiccato",292,26.6,23.9,5.5,100,"","spices, parsley, dried"],
+["Prezzemolo, liofilizzato",271,31.3,9.7,5.2,100,"","parsley, freeze-dried"],
+["Prosciutto cotto, a fette",163,16.6,2.5,8.6,100,"","ham, sliced, regular (approximately 11% fat)"],
+["Prosciutto cotto, tritato, in scatola",239,16.1,0.3,18.8,100,"","ham, chopped, canned"],
+["Proteine di soia in polvere",388,55.6,22.2,5.6,100,"","beverages, protein powder soy based"],
+["Proteine isolate di soia",335,88.3,0,3.4,100,"","soy protein isolate"],
+["Proteine whey",352,78.1,3.1,1.6,100,"","beverages, protein powder whey based"],
+["Proteine whey isolate",359,58.1,29.1,1.2,100,"","beverages, whey protein powder isolate"],
+["Prugne secche, in scatola, sciroppate",105,0.9,24,0.2,100,"","prunes, canned, heavy syrup pack"],
+["Prugne, crude",46,0.7,10,0.3,100,"","plums, raw"],
+["Prugne, in scatola, sciroppate",89,0.4,21.6,0.1,100,"","plums, canned, heavy syrup"],
+["Prugne, in scatola, viola, al naturale",41,0.4,10.1,0,100,"","plums, canned, purple"],
+["Prugne, in scatola, viola, al succo",58,0.5,14.2,0,100,"","plums, canned, purple"],
+["Prugne, in scatola, viola, in sciroppo leggero",63,0.4,15.4,0.1,100,"","plums, canned, purple"],
+["Prugne, in scatola, viola, sciroppate",101,0.4,25.3,0.1,100,"","plums, canned, purple"],
+["Purea di mele, in scatola, senza zucchero",42,0.2,10.2,0.1,100,"","applesauce, canned, unsweetened"],
+["Purea di mele, in scatola, zuccherata",76,0.2,18.7,0.2,100,"","applesauce, canned, sweetened"],
+["Quaglia, con pelle, cruda",192,19.6,0,12.1,100,"","quail, meat and skin, raw"],
+["Quaglia, petto, solo carne, cruda",123,22.6,0,3,100,"","quail, breast, meat only"],
+["Quaglia, solo carne, cruda",134,21.8,0,4.5,100,"","quail, meat only, raw"],
+["Quinoa, cotta",120,4.4,18.5,1.9,100,"","quinoa, cooked"],
+["Quinoa, cruda",368,14.1,57.2,6.1,100,"","quinoa, uncooked"],
+["Rabarbaro, crudo",21,0.9,2.7,0.2,100,"","rhubarb, raw"],
+["Rabarbaro, surgelato, crudo",21,0.6,3.3,0.1,100,"","rhubarb, frozen, uncooked"],
+["Radicchio, crudo",23,1.4,3.6,0.2,100,"","radicchio, raw"],
+["Radice di bardana, cotta, bollita",88,2.1,19.3,0.1,100,"","burdock root, cooked, boiled"],
+["Radice di bardana, cruda",72,1.5,14,0.1,100,"","burdock root, raw"],
+["Radice di loto, cotta, bollita",66,1.6,12.9,0.1,100,"","lotus root, cooked, boiled"],
+["Radice di loto, cruda",74,2.6,12.3,0.1,81,"fetta","lotus root, raw"],
+["Rafano, preparato",48,1.2,8,0.7,5,"cucchiaino","horseradish, prepared"],
+["Rambutan, in scatola, sciroppato",82,0.7,20,0.2,100,"","rambutan, canned, syrup pack"],
+["Rana pescatrice, cotta",97,18.6,0,1.9,100,"","fish, monkfish, cooked"],
+["Rana pescatrice, cruda",76,14.5,0,1.5,100,"","fish, monkfish, raw"],
+["Rape, cotte, bollite",22,0.7,3.1,0.1,100,"","turnips, cooked, boiled"],
+["Rape, crude",28,0.9,4.6,0.1,100,"","turnips, raw"],
+["Rape, surgelate",16,1,1.1,0.2,100,"","turnips, frozen, unprepared"],
+["Rape, surgelate, cotte, bollite",23,1.5,2.3,0.2,100,"","turnips, frozen, cooked"],
+["Ravanelli, crudi",16,0.7,1.8,0.1,100,"","radishes, raw"],
+["Ricciola, cotta",187,29.7,0,6.7,100,"","fish, yellowtail, mixed species"],
+["Ricciola, cruda",146,23.1,0,5.2,100,"","fish, yellowtail, mixed species"],
+["Ripieno di pane, pane di mais, preparato in polvere",389,10,62.4,4.2,100,"","bread stuffing, cornbread, dry mix"],
+["Ripieno di pane, pane di mais, preparato in polvere, preparato",179,2.9,19,8.8,100,"","bread stuffing, cornbread, dry mix"],
+["Ripieno per torte, ai mirtilli, in scatola",181,0.4,41.8,0.2,100,"","pie fillings, blueberry, canned"],
+["Ripieno per torte, alla ciliegia",53,0.8,10.8,0.2,100,"","pie fillings, cherry, low calorie"],
+["Ripieno per torte, alla mela, in scatola",100,0.1,25.1,0.1,100,"","pie fillings, apple, canned"],
+["Ripieno per torte, in scatola, alla ciliegia",115,0.4,27.4,0.1,100,"","pie fillings, canned, cherry"],
+["Riso selvatico, cotto",101,4,19.5,0.3,100,"","wild rice, cooked"],
+["Riso selvatico, crudo",357,14.7,68.7,1.1,100,"","wild rice, raw"],
+["Riso, bianco, a chicco lungo, cotto",130,2.7,27.8,0.3,100,"","rice, white, long-grain"],
+["Riso, bianco, a chicco lungo, crudo",365,7.1,78.7,0.7,100,"","rice, white, long-grain"],
+["Riso, bianco, a chicco lungo, parboiled, cotto",123,2.9,25.2,0.4,100,"","rice, white, long-grain"],
+["Riso, bianco, a chicco lungo, parboiled, secco",374,7.5,79.1,1,100,"","rice, white, long-grain"],
+["Riso, bianco, a chicco lungo, precotto, preparato",124,2.2,26.2,0.5,100,"","rice, white, long-grain"],
+["Riso, bianco, a chicco lungo, precotto, secco",380,7.8,80.4,0.9,100,"","rice, white, long-grain"],
+["Riso, bianco, a chicco medio, cotto",130,2.4,28.6,0.2,100,"","rice, white, medium-grain"],
+["Riso, bianco, a chicco medio, crudo",360,6.6,79.3,0.6,100,"","rice, white, medium-grain"],
+["Riso, bianco, a chicco tondo, cotto",130,2.4,28.7,0.2,100,"","rice, white, short-grain"],
+["Riso, bianco, a chicco tondo, crudo",358,6.5,79.2,0.5,100,"","rice, white, short-grain"],
+["Riso, bianco, al vapore, ristorante cinese",151,3.2,33,0.3,100,"","rice, white, steamed"],
+["Riso, bianco, glutinoso, cotto",97,2,20.1,0.2,100,"","rice, white, glutinous"],
+["Riso, bianco, glutinoso, crudo",370,6.8,78.9,0.6,100,"","rice, white, glutinous"],
+["Rombo, europeo, cotto",122,20.6,0,3.8,100,"","fish, turbot, european"],
+["Rombo, europeo, crudo",95,16.1,0,3,100,"","fish, turbot, european"],
+["Rosmarino",131,3.3,6.6,5.9,100,"","rosemary, fresh"],
+["Rosmarino, essiccato",331,4.9,21.5,15.2,100,"","spices, rosemary, dried"],
+["Rucola, cruda",25,2.6,2,0.7,100,"","arugula, raw"],
+["Rutabaga, cotta, bollita",30,0.9,5,0.2,100,"","rutabagas, cooked, boiled"],
+["Rutabaga, cruda",37,1.1,6.3,0.2,100,"","rutabagas, raw"],
+["Salame piccante americano, manzo e maiale, a fette",504,19.2,1.2,46.3,100,"","pepperoni, beef and pork, sliced"],
+["Salame, cotto, manzo",261,12.6,1.9,22.2,26,"fetta","salami, cooked, beef"],
+["Salame, cotto, manzo e maiale",336,21.9,2.4,25.9,12,"fetta","salami, cooked, beef and pork"],
+["Salame, cotto, tacchino",172,19.2,1.4,9.2,100,"","salami, cooked, turkey"],
+["Sale, da tavola",0,0,0,0,6,"cucchiaino","salt, table"],
+["Salmone, argentato (coho), d'allevamento, cotto",178,24.3,0,8.2,100,"","fish, salmon, coho"],
+["Salmone, argentato (coho), d'allevamento, crudo",160,21.3,0,7.7,100,"","fish, salmon, coho"],
+["Salmone, argentato (coho), selvatico, cotto",184,27.4,0,7.5,100,"","fish, salmon, coho"],
+["Salmone, argentato (coho), selvatico, crudo",146,21.6,0,5.9,100,"","fish, salmon, coho"],
+["Salmone, atlantico, d'allevamento, cotto",206,22.1,0,12.3,100,"","fish, salmon, atlantic"],
+["Salmone, atlantico, d'allevamento, crudo",208,20.4,0,13.4,100,"","fish, salmon, atlantic"],
+["Salmone, atlantico, selvatico, cotto",182,25.4,0,8.1,100,"","fish, salmon, atlantic"],
+["Salmone, atlantico, selvatico, crudo",142,19.8,0,6.3,100,"","fish, salmon, atlantic"],
+["Salmone, keta, cotto",154,25.8,0,4.8,100,"","fish, salmon, chum"],
+["Salmone, keta, crudo",120,20.1,0,3.8,100,"","fish, salmon, chum"],
+["Salmone, reale (chinook), affumicato",117,18.3,0,4.3,100,"","fish, salmon, chinook"],
+["Salmone, reale (chinook), cotto",231,25.7,0,13.4,100,"","fish, salmon, chinook"],
+["Salmone, reale (chinook), crudo",179,19.9,0,10.4,100,"","fish, salmon, chinook"],
+["Salmone, rosa, cotto",153,24.6,0,5.3,100,"","fish, salmon, pink"],
+["Salmone, rosa, crudo",127,20.5,0,4.4,100,"","fish, salmon, pink"],
+["Salmone, rosa, in scatola",138,23.1,0,5,100,"","fish, salmon, pink"],
+["Salmone, rosa, in scatola, senza pelle e lische",136,24.6,0,4.2,100,"","fish, salmon, pink"],
+["Salmone, rosso (sockeye), cotto",156,26.5,0,5.6,100,"","fish, salmon, sockeye"],
+["Salmone, rosso (sockeye), crudo",131,22.2,0,4.7,100,"","fish, salmon, sockeye"],
+["Salmone, rosso (sockeye), in scatola",167,23.6,0,7.4,100,"","fish, salmon, sockeye"],
+["Salmone, rosso (sockeye), in scatola, senza pelle e lische",158,26.3,0,5.9,100,"","salmon, sockeye, canned"],
+["Salsa al formaggio",197,10.3,5.4,14.9,30,"cucchiaio","cheese sauce, prepared from recipe"],
+["Salsa di soia",57,9.1,4.9,0.3,14,"cucchiaio","soy sauce made from soy and wheat (shoyu)"],
+["Salsa messicana",36,1.5,5.6,0.2,100,"","usda commodity, salsa"],
+["Salsa, agrodolce",150,0.3,38.1,0,35,"cucchiaio","sauce, sweet and sour, prepared-from-recipe"],
+["Salsa, al formaggio",174,6.7,6.3,13.3,100,"","sauce, cheese, ready-to-serve"],
+["Salsa, barbecue",172,0.8,39.9,0.6,17,"cucchiaio","sauce, barbecue"],
+["Salsa, di pesce",35,5.1,3.6,0,18,"cucchiaio","sauce, fish, ready-to-serve"],
+["Salsa, hoisin",220,3.3,41.3,3.4,16,"cucchiaio","sauce, hoisin, ready-to-serve"],
+["Salsa, ostriche",51,1.4,10.6,0.2,18,"cucchiaio","sauce, oyster, ready-to-serve"],
+["Salsa, per pizza, in scatola",54,2.2,6.7,1.1,100,"","sauce, pizza, canned"],
+["Salsa, salsa messicana",29,1.5,4.7,0.2,36,"cucchiaio","sauce, salsa, ready-to-serve"],
+["Salsa, sofrito",237,12.8,3.8,18.2,100,"","sauce, sofrito, prepared from recipe"],
+["Salsa, teriyaki",89,5.9,15.5,0,36,"cucchiaio","sauce, teriyaki, ready-to-serve"],
+["Salsa, worcestershire",78,0,19.5,0,17,"cucchiaio","sauce, worcestershire"],
+["Salsiccia di maiale",288,15.4,0.9,24.8,25,"pezzo","pork sausage, link/patty, reduced fat"],
+["Salsiccia di maiale, cotta",271,9.4,8.1,22.4,100,"","pork sausage, reduced sodium, cooked"],
+["Salsiccia di maiale, cotta, in padella",325,18.5,1.4,27.2,27,"pezzo","pork sausage, link/patty, reduced fat"],
+["Salsiccia di tacchino, cotta",196,23.9,0,10.4,100,"","turkey sausage, fresh, cooked"],
+["Salsiccia di tacchino, cruda",155,18.8,0.5,8.1,100,"","turkey sausage, fresh, raw"],
+["Salsiccia, pollo, manzo, maiale, senza pelle, affumicata",216,13.6,8.1,14.3,84,"pezzo","sausage, chicken, beef"],
+["Salsiccia, tacchino, piccanta, affumicata",158,15.1,4.4,8.8,100,"","sausage, turkey, hot"],
+["Salsiccia, vegetariana",255,20.3,5.3,18.2,25,"pezzo","sausage, meatless"],
+["Salvia, macinata",315,10.6,20.4,12.8,100,"","spices, sage, ground"],
+["Sanguinaccio",379,14.6,1.3,34.5,100,"fetta","blood sausage"],
+["Santoreggia, macinata",272,6.7,23,5.9,100,"","spices, savory, ground"],
+["Sapodilla, cruda",83,0.4,14.7,1.1,100,"","sapodilla, raw"],
+["Scalogno, crudo",72,2.5,13.6,0.1,10,"cucchiaio","shallots, raw"],
+["Scalogno, liofilizzato",348,12.3,65,0.5,100,"","shallots, freeze-dried"],
+["Scarola, cotta, bollita",19,1.1,0.3,0.2,100,"","escarole, cooked, boiled"],
+["Sciroppo",52,0.8,11.4,0,100,"","syrups, sugar free"],
+["Sciroppo, d'acero",260,0,67,0.1,20,"cucchiaio","syrups, maple"],
+["Sciroppo, di mais",283,0,76.8,0.2,100,"","syrups, corn, light"],
+["Sciroppo, di mais, fondente",286,0,77.6,0,100,"","syrups, corn, dark"],
+["Scorfano del Pacifico, del Pacifico, cotto",109,22.2,0,1.6,100,"","fish, rockfish, pacific"],
+["Scorfano del Pacifico, del Pacifico, crudo",90,18.4,0,1.3,100,"","fish, rockfish, pacific"],
+["Scorfano, atlantico, cotto",96,18.5,0,1.9,100,"","fish, ocean perch, atlantic"],
+["Scorfano, atlantico, crudo",79,15.3,0,1.5,100,"","fish, ocean perch, atlantic"],
+["Scorza d'arancia, cruda",97,1.5,14.4,0.2,6,"cucchiaio","orange peel, raw"],
+["Scorza di limone, cruda",47,1.5,5.4,0.3,6,"cucchiaio","lemon peel, raw"],
+["Scorzonera, cotta, bollita",68,2.7,12.3,0.2,100,"","salsify, cooked, boiled"],
+["Scorzonera, cruda",82,3.3,15.3,0.2,100,"","salsify, (vegetable oyster), raw"],
+["Sedano rapa, cotto, bollito",27,1,5.9,0.2,100,"","celeriac, cooked, boiled"],
+["Sedano rapa, crudo",42,1.5,7.4,0.3,100,"","celeriac, raw"],
+["Sedano, cotto, bollito",18,0.8,2.4,0.2,100,"","celery, cooked, boiled"],
+["Sedano, crudo",16,0.7,1.4,0.2,100,"","celery, raw"],
+["Semi di aneto",305,16,34.1,14.5,100,"","spices, dill seed"],
+["Semi di anice",337,17.6,35.4,15.9,100,"","spices, anise seed"],
+["Semi di canapa, decorticati",553,31.6,4.7,48.8,30,"cucchiaio","seeds, hemp seed, hulled"],
+["Semi di chia, essiccati",486,16.5,7.7,30.7,100,"","seeds, chia seeds, dried"],
+["Semi di coriandolo",298,12.4,13.1,17.8,100,"","spices, coriander seed"],
+["Semi di finocchio",345,15.8,12.5,14.9,100,"","spices, fennel seed"],
+["Semi di girasole, essiccati",584,20.8,11.4,51.5,100,"","seeds, sunflower seed kernels, dried"],
+["Semi di girasole, tostati",619,17.2,9.1,56.8,100,"","seeds, sunflower seed kernels, dry roasted"],
+["Semi di girasole, tostati con olio",592,20.1,12.3,51.3,100,"","seeds, sunflower seed kernels, oil roasted"],
+["Semi di loto, crudi",89,4.1,17.3,0.5,100,"","seeds, lotus seeds, raw"],
+["Semi di loto, essiccati",332,15.4,64.5,2,100,"","seeds, lotus seeds, dried"],
+["Semi di papavero",525,18,8.6,41.6,100,"","spices, poppy seed"],
+["Semi di sedano",392,18.1,29.6,25.3,100,"","spices, celery seed"],
+["Semi di senape, macinati",508,26.1,15.9,36.2,100,"","spices, mustard seed, ground"],
+["Semi di sesamo, interi, essiccati",573,17.7,11.6,49.7,100,"","seeds, sesame seeds, whole"],
+["Semi di zucca, arrosti",574,29.8,8.2,49,100,"","seeds, pumpkin and squash seed kernels, roasted"],
+["Semi di zucca, essiccati",559,30.2,4.7,49,100,"","seeds, pumpkin and squash seed kernels, dried"],
+["Semi di zucca, interi, arrosti",446,18.6,35.4,19.4,100,"","seeds, pumpkin and squash seeds, whole"],
+["Semola",360,12.7,68.9,1.1,100,"","semolina, enriched"],
+["Senape indiana, cotta, bollita",26,2.6,2.5,0.5,100,"","mustard greens, cooked, boiled"],
+["Senape indiana, cruda",27,2.9,1.5,0.4,100,"","mustard greens, raw"],
+["Senape indiana, surgelata",20,2.5,0.1,0.3,100,"","mustard greens, frozen, unprepared"],
+["Senape indiana, surgelata, cotta, bollita",19,2.3,0.3,0.2,100,"","mustard greens, frozen, cooked"],
+["Senape, preparata, gialla",60,3.7,1.8,3.3,5,"cucchiaino","mustard, prepared, yellow"],
+["Seppia, cotta",158,32.5,1.6,1.4,100,"","mollusks, cuttlefish, mixed species"],
+["Seppia, cruda",79,16.2,0.8,0.7,100,"","mollusks, cuttlefish, mixed species"],
+["Sgombro",305,18.5,0,25.1,80,"pezzo","fish, mackerel, salted"],
+["Sgombro, atlantico, cotto",262,23.9,0,17.8,100,"","fish, mackerel, atlantic"],
+["Sgombro, atlantico, crudo",205,18.6,0,13.9,100,"","fish, mackerel, atlantic"],
+["Sgombro, reale, cotto",134,26,0,2.6,100,"","fish, mackerel, king"],
+["Sgombro, reale, crudo",105,20.3,0,2,100,"","fish, mackerel, king"],
+["Sgombro, spagnolo, cotto",158,23.6,0,6.3,100,"","fish, mackerel, spanish"],
+["Sgombro, spagnolo, crudo",139,19.3,0,6.3,100,"","fish, mackerel, spanish"],
+["Siero di latte, dolce, essiccato",353,12.9,74.5,1.1,100,"","whey, sweet, dried"],
+["Siero di latte, dolce, liquido",27,0.8,5.1,0.4,100,"","whey, sweet, fluid"],
+["Sogliola, cotta",86,15.2,0,2.4,100,"","fish, flatfish (flounder and sole species), cooked"],
+["Sogliola, cruda",70,12.4,0,1.9,100,"","fish, flatfish (flounder and sole species), raw"],
+["Soia, seccha, arrosta",469,38.5,12.5,25.4,100,"","soybeans, mature seeds, roasted"],
+["Soia, seccha, cotta, bollita",172,18.2,2.4,9,100,"","soybeans, mature seeds, cooked"],
+["Soia, seccha, cruda",446,36.5,20.9,19.9,100,"","soybeans, mature seeds, raw"],
+["Soia, seccha, germogliata, cotta, al vapore",81,8.5,5.7,4.5,100,"","soybeans, mature seeds, sprouted"],
+["Soia, seccha, germogliata, cotta, saltata in padella",125,13.1,8.6,7.1,100,"","soybeans, mature seeds, sprouted"],
+["Soia, seccha, germogliata, cruda",122,13.1,8.5,6.7,100,"","soybeans, mature seeds, sprouted"],
+["Soia, seccha, tostata",449,43.3,20.9,21.6,100,"","soybeans, mature seeds, dry roasted"],
+["Soia, verde, cotta, bollita",141,12.3,6.9,6.4,100,"","soybeans, green, cooked"],
+["Soia, verde, cruda",147,12.9,6.9,6.8,100,"","soybeans, green, raw"],
+["Sostituto della panna, aromatizzato, in polvere",482,0.7,74.2,21.5,12,"cucchiaino","cream substitute, flavored, powdered"],
+["Sostituto della panna, aromatizzato, liquido",251,0.7,34,13.5,15,"cucchiaio","cream substitute, flavored, liquid"],
+["Sostituto della panna, in polvere",529,2.5,59.3,32.9,100,"","cream substitute, powdered, light"],
+["Sostituto della panna, liquido",71,0.8,9.1,3.5,100,"","cream substitute, liquid, light"],
+["Spaghetti di riso, cotti",108,1.8,23,0.2,100,"","rice noodles, cooked"],
+["Spaghetti di riso, secchi",364,6,78.6,0.6,100,"","rice noodles, dry"],
+["Spaghetti, spinaci, cotti",130,4.6,26.1,0.6,100,"","spaghetti, spinach, cooked"],
+["Spaghetti, spinaci, secchi",372,13.3,64.2,1.6,100,"","spaghetti, spinach, dry"],
+["Spigola, cotta",124,23.6,0,2.6,100,"","fish, sea bass, mixed species"],
+["Spigola, cruda",97,18.4,0,2,100,"","fish, sea bass, mixed species"],
+["Spinaci, cotti, bolliti",23,3,1.4,0.3,100,"","spinach, cooked, boiled"],
+["Spinaci, crudi",23,2.9,1.4,0.4,100,"","spinach, raw"],
+["Spinaci, in scatola",19,2.1,0.7,0.4,100,"","spinach, canned, regular pack"],
+["Squalo, crudo",130,21,0,4.5,100,"","fish, shark, mixed species"],
+["Storione, affumicato",173,31.2,0,4.4,100,"","fish, sturgeon, mixed species"],
+["Storione, cotto",135,20.7,0,5.2,100,"","fish, sturgeon, mixed species"],
+["Storione, crudo",105,16.1,0,4,100,"","fish, sturgeon, mixed species"],
+["Strutto",902,0,0,100,13,"cucchiaio","lard"],
+["Struzzo, controfiletto, cotto",155,28.1,0,3.9,100,"","ostrich, top loin, cooked"],
+["Struzzo, controfiletto, crudo",119,21.7,0,3,100,"","ostrich, top loin, raw"],
+["Struzzo, coscia, crudo",116,22,0,2.4,100,"","ostrich, round, raw"],
+["Struzzo, filetto, crudo",123,22.1,0,3.2,100,"","ostrich, tenderloin, raw"],
+["Struzzo, macinato, cotto, alla piastra",175,26.1,0,7.1,93,"pezzo","ostrich, ground, cooked"],
+["Struzzo, macinato, crudo",165,20.2,0,8.7,109,"pezzo","ostrich, ground, raw"],
+["Struzzo, ostriche, cotto",159,28.8,0,4,100,"","ostrich, oyster, cooked"],
+["Struzzo, ostriche, crudo",125,21.6,0,3.7,100,"","ostrich, oyster, raw"],
+["Succo d'ananas, concentrato surgelato, senza zucchero",179,1.3,43.6,0.1,100,"","pineapple juice, frozen concentrate, unsweetened"],
+["Succo d'ananas, senza zucchero",53,0.4,12.7,0.1,100,"","pineapple juice, canned or bottled, unsweetened"],
+["Succo d'arancia, concentrato surgelato, senza zucchero",147,2.4,32.9,0.2,100,"","orange juice, frozen concentrate, unsweetened"],
+["Succo d'arancia, crudo",45,0.7,10.2,0.2,100,"","orange juice, raw"],
+["Succo d'arancia, in scatola, senza zucchero",47,0.7,10.7,0.1,100,"","orange juice, canned, unsweetened"],
+["Succo d'uva, senza zucchero",60,0.4,14.6,0.1,100,"","grape juice, canned or bottled, unsweetened"],
+["Succo di albicocca, in scatola",56,0.4,13.8,0.1,100,"","apricot nectar, canned, without added ascorbic acid"],
+["Succo di frutto della passione, giallo, crudo",60,0.7,14.2,0.2,100,"","passion-fruit juice, yellow, raw"],
+["Succo di frutto della passione, viola, crudo",51,0.4,13.4,0.1,100,"","passion-fruit juice, purple, raw"],
+["Succo di lime, crudo",25,0.4,8,0.1,100,"","lime juice, raw"],
+["Succo di lime, senza zucchero",21,0.2,6.3,0.2,100,"","lime juice, canned or bottled, unsweetened"],
+["Succo di limone, crudo",22,0.3,6.6,0.2,100,"","lemon juice, raw"],
+["Succo di limone, surgelato, senza zucchero",22,0.5,6.1,0.3,100,"","lemon juice, frozen, unsweetened"],
+["Succo di mandarino, crudo",43,0.5,9.9,0.2,100,"","tangerine juice, raw"],
+["Succo di mandarino, in scatola, zuccherato",50,0.5,11.8,0.2,100,"","tangerine juice, canned, sweetened"],
+["Succo di mango, in scatola",51,0.1,12.8,0.1,100,"","mango nectar, canned"],
+["Succo di mela, concentrato surgelato, senza zucchero",166,0.5,40.6,0.4,100,"","apple juice, frozen concentrate, unsweetened"],
+["Succo di mela, senza zucchero",46,0.1,11.1,0.1,100,"","apple juice, canned or bottled, unsweetened"],
+["Succo di melagrana",54,0.1,13,0.3,100,"","pomegranate juice, bottled"],
+["Succo di mirtillo rosso",54,0,13.5,0.1,100,"","beverages, cranberry juice cocktail"],
+["Succo di mirtillo rosso, concentrato surgelato",201,0.1,51.2,0,100,"","cranberry juice cocktail, frozen concentrate"],
+["Succo di mirtillo rosso, concentrato surgelato, preparato con acqua",47,0,11.8,0,100,"","cranberry juice cocktail, frozen concentrate, prepared with water"],
+["Succo di pera, in scatola",60,0.1,15.2,0,100,"","pear nectar, canned, without added ascorbic acid"],
+["Succo di pesca, in scatola",54,0.3,13.3,0,100,"","peach nectar, canned, without added ascorbic acid"],
+["Succo di pomodoro, in scatola",17,0.8,3.1,0.3,100,"","tomato juice, canned, with salt added"],
+["Succo di pompelmo, bianco, concentrato surgelato, senza zucchero",146,2,34.2,0.5,100,"","grapefruit juice, white, frozen concentrate"],
+["Succo di pompelmo, bianco, crudo",39,0.5,9.1,0.1,100,"","grapefruit juice, white, raw"],
+["Succo di pompelmo, bianco, in scatola, zuccherato",46,0.6,11,0.1,100,"","grapefruit juice, white, canned"],
+["Succo di pompelmo, bianco, senza zucchero",34,0.6,7.1,0.1,100,"","grapefruit juice, white, canned or bottled"],
+["Succo di pompelmo, rosa, crudo",39,0.5,9.2,0.1,100,"","grapefruit juice, pink, raw"],
+["Succo di prugna, in scatola",71,0.6,16.4,0,100,"","prune juice, canned"],
+["Succo di verdure, in scatola",22,0.9,3.4,0.3,100,"","vegetable juice cocktail, low sodium, canned"],
+["Succotash, cotto, bollito",115,5.1,19.9,0.8,100,"","succotash, (corn and limas), cooked"],
+["Succotash, crudo",99,5,15.8,1,100,"","succotash, (corn and limas), raw"],
+["Succotash, surgelato",93,4.3,15.9,0.9,100,"","succotash, (corn and limas), frozen"],
+["Succotash, surgelato, cotto, bollito",93,4.3,15.8,0.9,100,"","succotash, (corn and limas), frozen"],
+["Sugo d'arrosto, ai funghi, in scatola",50,1.3,5.1,2.7,100,"","gravy, mushroom, canned"],
+["Sugo d'arrosto, ai funghi, secco, in polvere",328,10,59.9,4,100,"","gravy, mushroom, dry"],
+["Sugo d'arrosto, di cipolle, secco, preparato",322,9,61.6,3,100,"","gravy, onion, dry"],
+["Sugo d'arrosto, maiale, secco, in polvere",367,8.8,61.2,8.6,100,"","gravy, pork, dry"],
+["Sugo d'arrosto, manzo, in scatola",53,3.8,4.4,2.4,100,"","gravy, beef, canned"],
+["Sugo d'arrosto, pollo",48,0.7,5.2,2.6,100,"","gravy, chicken, canned or bottled"],
+["Sugo d'arrosto, pollo, secco",381,11.3,62.1,9.7,8,"cucchiaio","gravy, chicken, dry"],
+["Sugo d'arrosto, tacchino, in scatola",51,2.6,4.7,2.1,100,"","gravy, turkey, canned"],
+["Sugo d'arrosto, tacchino, secco",367,10.4,65.1,7.2,100,"","gravy, turkey, dry"],
+["Sugo pronto per pasta, vegetariano, in scatola",48,1.2,8.7,0.9,100,"","usda commodity, spaghetti sauce, meatless"],
+["Surimi",99,15.2,6.8,0.9,100,"","fish, surimi"],
+["Tacchino",900,0,0,99.8,13,"cucchiaio","fat, turkey"],
+["Tacchino macinato, cotto",203,27.4,0,10.4,100,"","ground turkey, cooked"],
+["Tacchino macinato, crudo",150,18.7,0,8.3,100,"","ground turkey, fat free, raw"],
+["Tacchino, ali, con pelle, cotto, arrosto",235,28.7,0.1,13.3,100,"","turkey, all classes, wing"],
+["Tacchino, ali, con pelle, crudo",202,19.5,0.1,13.8,100,"","turkey, all classes, wing"],
+["Tacchino, ali, solo carne, arrosto",147,30.1,0,2.1,100,"","turkey, wing, from whole bird"],
+["Tacchino, ali, solo carne, cotto, arrosto",170,30.2,0,5.5,100,"","turkey, retail parts, wing"],
+["Tacchino, ali, solo carne, crudo",112,22.5,0,2.5,100,"","turkey, wing, from whole bird"],
+["Tacchino, carne bianca, con pelle, cotto, arrosto",177,29.6,0.1,5.6,100,"","turkey from whole, light meat, meat and skin"],
+["Tacchino, carne bianca, con pelle, crudo",161,22,0.1,7.4,100,"","turkey from whole, light meat, meat and skin"],
+["Tacchino, carne bianca, cotto, arrosto",147,30.1,0,2.1,100,"","turkey, all classes, light meat"],
+["Tacchino, carne bianca, crudo",114,23.7,0.1,1.5,100,"","turkey from whole, light meat, raw"],
+["Tacchino, carne bianca, solo carne, cotto, arrosto",127,27,0,2.1,100,"","turkey from whole, light meat, meat only"],
+["Tacchino, carne bianca, solo carne, crudo",101,21.5,0,1.7,100,"","turkey from whole, light meat, meat only"],
+["Tacchino, carne scura, con pelle, crudo",161,19.8,0.1,9,100,"","turkey, dark meat, meat and skin"],
+["Tacchino, carne scura, solo carne, cotto, arrosto",158,26.1,0,6,100,"","turkey, dark meat, meat only"],
+["Tacchino, carne scura, solo carne, crudo",108,21.3,0.1,2.5,100,"","turkey from whole, dark meat, meat only"],
+["Tacchino, collo, solo carne, cotto, sobbollito",162,22.5,0,7.4,100,"","turkey from whole, neck, meat only"],
+["Tacchino, collo, solo carne, crudo",125,16.5,0,6,100,"","turkey from whole, neck, meat only"],
+["Tacchino, coscia, con pelle, cotto, arrosto",208,27.9,0,9.8,100,"","turkey, all classes, leg"],
+["Tacchino, coscia, con pelle, crudo",144,19.5,0,6.7,100,"","turkey, all classes, leg"],
+["Tacchino, fegato, cotto, sobbollito",189,27,0,8.2,100,"","turkey, liver, all classes"],
+["Tacchino, fegato, crudo",128,18.3,0,5.5,100,"","turkey, liver, all classes"],
+["Tacchino, fusello, con pelle, cotto, arrosto",197,28.2,0,9.4,100,"","turkey, retail parts, drumstick"],
+["Tacchino, fusello, con pelle, crudo",141,20,0,6.8,100,"","turkey, retail parts, drumstick"],
+["Tacchino, fusello, solo carne, arrosto",158,26.1,0,6,100,"","turkey, drumstick, from whole bird"],
+["Tacchino, fusello, solo carne, cotto, arrosto",173,28.6,0,6.5,100,"","turkey, retail parts, drumstick"],
+["Tacchino, fusello, solo carne, crudo",115,19.3,0.1,4.1,100,"","turkey, drumstick, from whole bird"],
+["Tacchino, intero, con pelle, arrosto",176,26.1,0,8,100,"","turkey, whole, meat and skin"],
+["Tacchino, intero, con pelle, cotto, arrosto",189,28.6,0.1,7.4,100,"","turkey, whole, meat and skin"],
+["Tacchino, intero, con pelle, crudo",158,19,0.1,9.1,100,"","turkey, whole, meat and skin"],
+["Tacchino, intero, solo carne, arrosto",140,26.6,0,3.7,100,"","turkey, whole, meat only"],
+["Tacchino, intero, solo carne, cotto, arrosto",159,29.1,0,3.8,100,"","turkey, whole, meat only"],
+["Tacchino, intero, solo carne, crudo",112,22.6,0.1,1.9,100,"","turkey, whole, meat only"],
+["Tacchino, petto, con pelle, cotto, arrosto",189,28.7,0,7.4,100,"","turkey, retail parts, breast"],
+["Tacchino, petto, con pelle, crudo",155,21.9,0,7.5,100,"","turkey, retail parts, breast"],
+["Tacchino, petto, solo carne, arrosto",147,30.1,0,2.1,100,"","turkey, breast, from whole bird"],
+["Tacchino, petto, solo carne, cotto, arrosto",136,29.5,0,2,100,"","turkey, retail parts, breast"],
+["Tacchino, petto, solo carne, crudo",114,23.7,0.1,1.5,100,"","turkey, breast, from whole bird"],
+["Tacchino, schiena, con pelle, arrosto",205,25.8,0,11.4,100,"","turkey, back, from whole bird"],
+["Tacchino, schiena, con pelle, cotto, arrosto",244,26.6,0.2,14.4,100,"","turkey, all classes, back"],
+["Tacchino, schiena, con pelle, crudo",206,16.9,0.1,15.4,100,"","turkey, back, from whole bird"],
+["Tacchino, schiena, solo carne, arrosto",173,27.7,0,6,100,"","turkey, back, from whole bird"],
+["Tacchino, schiena, solo carne, crudo",115,19.3,0.1,4.1,100,"","turkey, back, from whole bird"],
+["Tacchino, sovracoscia, con pelle, cotto, arrosto",183,23.9,0.4,9.5,100,"","turkey, retail parts, thigh"],
+["Tacchino, sovracoscia, con pelle, crudo",161,19.5,0,9.2,100,"","turkey, retail parts, thigh"],
+["Tacchino, sovracoscia, solo carne, arrosto",165,27.7,0,6,100,"","turkey, thigh, from whole bird"],
+["Tacchino, sovracoscia, solo carne, cotto, arrosto",159,25.1,0.5,6.2,100,"","turkey, retail parts, thigh"],
+["Tacchino, sovracoscia, solo carne, crudo",115,19.3,0.1,4.1,100,"","turkey, thigh, from whole bird"],
+["Tahina, concentrato",586,18.1,18.6,50.9,16,"cucchiaio","seeds, sesame butter, paste"],
+["Tamari",60,10.5,4.8,0.1,18,"cucchiaio","soy sauce made from soy (tamari)"],
+["Tamarindo, crudo",239,2.8,57.4,0.6,100,"","tamarinds, raw"],
+["Tarassaco, cotto, bollito",33,2,3.5,0.6,100,"","dandelion greens, cooked, boiled"],
+["Tarassaco, crudo",45,2.7,5.7,0.7,100,"","dandelion greens, raw"],
+["Taro, cotto",142,0.5,29.5,0.1,100,"","taro, cooked, without salt"],
+["Taro, crudo",112,1.5,22.4,0.2,100,"","taro, raw"],
+["Taro, foglie, cotto, al vapore",24,2.7,1.9,0.4,100,"","taro, leaves, cooked"],
+["Teff, cotto",101,3.9,17.1,0.7,100,"","teff, cooked"],
+["Teff, crudo",367,13.3,65.1,2.4,100,"","teff, uncooked"],
+["Tempeh",192,20.3,7.6,10.8,100,"","tempeh"],
+["Tempeh, cotto",195,19.9,7.6,11.4,100,"","tempeh, cooked"],
+["Tequila sunrise, in scatola",110,0.3,11.3,0.1,100,"","alcoholic beverage, tequila sunrise, canned"],
+["Tilapia, cotta",128,26.1,0,2.6,100,"","fish, tilapia, cooked"],
+["Tilapia, cruda",96,20.1,0,1.7,100,"","fish, tilapia, raw"],
+["Timo",101,5.6,10.4,1.7,100,"","thyme, fresh"],
+["Timo, essiccato",276,9.1,26.9,7.4,100,"","spices, thyme, dried"],
+["Tofu, fritto",270,18.8,5,20.2,100,"","tofu, fried"],
+["Tomatillo, crudo",32,1,3.9,1,34,"pezzo","tomatillos, raw"],
+["Tonno, al naturale",116,25.5,0,0.8,100,"","fish, tuna, light"],
+["Tonno, bianco, al naturale",128,23.6,0,3,100,"","fish, tuna, white"],
+["Tonno, bianco, sott'olio",186,26.5,0,8.1,100,"","fish, tuna, white"],
+["Tonno, pinna blu, cotto",184,29.9,0,6.3,100,"","fish, tuna, fresh"],
+["Tonno, pinna blu, crudo",144,23.3,0,4.9,100,"","fish, tuna, fresh"],
+["Tonno, pinna gialla, cotto",130,29.1,0,0.6,100,"","fish, tuna, yellowfin"],
+["Tonno, pinna gialla, crudo",109,24.4,0,0.5,100,"","fish, tuna, fresh"],
+["Tonno, sott'olio",198,29.1,0,8.2,100,"","fish, tuna, light"],
+["Tonno, tonnetto striato, cotto",132,28.2,0,1.3,100,"","fish, tuna, skipjack"],
+["Tonno, tonnetto striato, crudo",103,22,0,1,100,"","fish, tuna, fresh"],
+["Topinambur, crudo",73,2,15.8,0,100,"","jerusalem-artichokes, raw"],
+["Topping per dolci, in polvere",577,4.9,52.5,39.9,100,"","dessert topping, powdered, 1.5 ounce prepared with 1/2 cup milk"],
+["Topping per dolci, spray",264,1,16.1,22.3,100,"","dessert topping, pressurized"],
+["Topping, alla fragola",254,0.2,65.6,0.1,42,"cucchiaio","toppings, strawberry"],
+["Torta da colazione, al formaggio",339,7,43.3,15.2,100,"","coffeecake, cheese"],
+["Torta da colazione, alla frutta",311,5.2,49,10.2,100,"","coffeecake, fruit"],
+["Torta, ai mirtilli",245,2.7,33.5,11.9,100,"","pie, blueberry, commercially prepared"],
+["Torta, al limone meringata",285,3.8,39.1,12.9,100,"","pie, lemon meringue, commercially prepared"],
+["Torta, alla ciliegia",270,2.8,38.5,12.2,100,"","pie, cherry, commercially prepared"],
+["Torta, alla mela",265,2.4,37.1,12.5,100,"","pie, apple, prepared from recipe"],
+["Torta, alla pesca",224,1.9,32.1,10,100,"","pie, peach"],
+["Torta, alla zucca",243,3.9,33,9.8,100,"","pie, pumpkin, prepared from recipe"],
+["Torta, alle noci pecan",412,4.9,52.2,22.2,100,"","pie, pecan, commercially prepared"],
+["Torta, gialla, preparato in polvere",404,4.7,82.8,5.5,100,"","cake, yellow, enriched"],
+["Torta, pan di Spagna",297,7.3,57.7,4.3,100,"","cake, sponge, commercially prepared"],
+["Torta, pan di zenzero",356,3.9,49.2,16.4,100,"","cake, gingerbread, prepared from recipe"],
+["Torta, pan di zenzero, preparato in polvere",437,4.4,72.9,13.8,100,"","cake, gingerbread, dry mix"],
+["Torta, plumcake",283,5.4,59.9,1.2,100,"","cake, pound, commercially prepared"],
+["Tortilla chips",416,11,74.8,5.7,100,"","snacks, tortilla chips, low fat"],
+["Tortilla chips, gialle, semplici",497,6.6,62.7,22.3,100,"","tortilla chips, yellow, plain"],
+["Tortillas per taco, al forno",476,6.4,56.8,21.8,100,"","taco shells, baked, without added salt"],
+["Trail mix",462,13.8,44.9,29.4,100,"","snacks, trail mix, regular"],
+["Trota, cotta",190,26.6,0,8.5,100,"","fish, trout, mixed species"],
+["Trota, cruda",148,20.8,0,6.6,100,"","fish, trout, mixed species"],
+["Trota, iridea, d'allevamento, cotta",168,23.8,0,7.4,100,"","fish, trout, rainbow"],
+["Trota, iridea, d'allevamento, cruda",141,19.9,0,6.2,100,"","fish, trout, rainbow"],
+["Trota, iridea, selvatica, cotta",150,22.9,0,5.8,100,"","fish, trout, rainbow"],
+["Trota, iridea, selvatica, cruda",119,20.5,0,3.5,100,"","fish, trout, rainbow"],
+["Tè, alle erbe, preparato, camomilla",1,0,0.2,0,100,"","beverages, tea, herb"],
+["Tè, ibisco, preparato",0,0,0,0,100,"","beverages, tea, hibiscus"],
+["Tè, istantaneo, al limone",385,0.6,97.6,0.3,100,"","beverages, tea, instant"],
+["Tè, istantaneo, al limone, senza zucchero",345,7.4,73.5,0.2,100,"","beverages, tea, instant"],
+["Tè, istantaneo, al limone, zuccherato, in polvere",401,0.1,97.8,0.7,100,"","beverages, tea, instant"],
+["Tè, istantaneo, al limone, zuccherato, preparato con acqua",35,0,8.5,0.1,100,"","beverages, tea, instant"],
+["Tè, istantaneo, decaffeinato, al limone",338,3.3,85.4,0.6,100,"","beverages, tea, instant"],
+["Tè, istantaneo, decaffeinato, al limone, zuccherato",401,0.1,98.5,0.7,100,"","beverages, tea, instant"],
+["Tè, istantaneo, decaffeinato, senza zucchero",315,20.2,50.2,0,100,"","beverages, tea, instant"],
+["Tè, istantaneo, senza zucchero, in polvere",315,20.2,50.2,0,100,"","beverages, tea, instant"],
+["Tè, istantaneo, senza zucchero, preparato con acqua",1,0.1,0.2,0,100,"","beverages, tea, instant"],
+["Tè, nero, preparato, preparato con acqua",1,0,0.3,0,100,"","beverages, tea, black"],
+["Tè, nero, preparato, preparato con acqua, decaffeinato",1,0,0.3,0,100,"","beverages, tea, black"],
+["Tè, nero, pronto da bere",0,0,0,0,100,"","beverages, tea, black"],
+["Tè, nero, pronto da bere, al limone",1,0,0.2,0,100,"","beverages, tea, black"],
+["Tè, nero, pronto da bere, al limone, zuccherato",45,0,10.8,0.2,100,"","beverages, tea, black"],
+["Tè, nero, pronto da bere, alla pesca",1,0,0.2,0,100,"","beverages, tea, black"],
+["Tè, nero, pronto da bere, decaffeinato",38,0,8.8,0,100,"","beverages, tea, black"],
+["Tè, oolong, preparato",1,0,0.1,0,100,"","beverages, tea, oolong"],
+["Tè, pronto da bere, al limone",2,0,0.4,0,100,"","beverages, tea, ready-to-drink"],
+["Tè, verde, istantaneo, decaffeinato, al limone, senza zucchero",378,0,94.5,0,100,"","beverages, tea, green"],
+["Tè, verde, preparato",1,0.2,0,0,100,"","beverages, tea, green"],
+["Tè, verde, preparato, decaffeinato",0,0,0,0,100,"","beverages, tea, green"],
+["Tè, verde, pronto da bere",0,0,0,0,100,"","beverages, tea, green"],
+["Tè, verde, pronto da bere, senza zucchero",0,0,0,0,100,"","beverages, tea, green"],
+["Tè, verde, pronto da bere, zuccherato",27,0,6.2,0.2,100,"","beverages, tea, green"],
+["Uova, cotta",204,28.6,1.9,8.2,100,"","fish, roe, mixed species"],
+["Uova, cruda",143,22.3,1.5,6.4,14,"cucchiaio","fish, roe, mixed species"],
+["Uovo, bianco, crudo",52,10.9,0.7,0.2,33,"pezzo","egg, white, raw"],
+["Uovo, bianco, crudo, surgelato, pastorizzato",48,10.2,1,0,100,"","egg, white, raw"],
+["Uovo, bianco, essiccato",382,81.1,7.8,0,100,"","egg, white, dried"],
+["Uovo, di quaglia, intero, crudo",158,13.1,0.4,11.1,9,"pezzo","egg, quail, whole"],
+["Uovo, intero, cotto, fritto",196,13.6,0.8,14.8,46,"pezzo","egg, whole, cooked"],
+["Uovo, intero, cotto, in camicia",143,12.5,0.7,9.5,50,"pezzo","egg, whole, cooked"],
+["Uovo, intero, cotto, omelette",154,10.6,0.6,11.7,15,"cucchiaio","egg, whole, cooked"],
+["Uovo, intero, cotto, sodo",155,12.6,1.1,10.6,100,"","egg, whole, cooked"],
+["Uovo, intero, cotto, strapazzato",149,10,1.6,11,61,"pezzo","egg, whole, cooked"],
+["Uovo, intero, crudo",143,12.6,0.7,9.5,50,"pezzo","egg, whole, raw"],
+["Uovo, intero, crudo, surgelato, pastorizzato",147,12.3,1,9.9,100,"","egg, whole, raw"],
+["Uovo, intero, essiccato",592,48,1.1,43.9,100,"","egg, whole, dried"],
+["Uovo, tacchino, intero, crudo",171,13.7,1.1,11.9,79,"pezzo","egg, turkey, whole"],
+["Uovo, tuorlo, crudo",322,15.9,3.6,26.5,17,"pezzo","egg, yolk, raw"],
+["Uovo, tuorlo, crudo, surgelato, pastorizzato",296,15.5,0.8,25.6,100,"","egg, yolk, raw"],
+["Uovo, tuorlo, essiccato",669,33.6,0.7,59.1,100,"","egg, yolk, dried"],
+["Uva spina, cruda",44,0.9,5.9,0.6,100,"","gooseberries, raw"],
+["Uva spina, in scatola, in sciroppo leggero",73,0.7,16.4,0.2,100,"","gooseberries, canned, light syrup pack"],
+["Uvetta, senza semi",299,3.1,75.5,0.5,100,"","raisins, seedless"],
+["Valeriana, cruda",21,2,3.6,0.4,100,"","cornsalad, raw"],
+["Vino",49,0.1,1.2,0,100,"","alcoholic beverage, wine, light"],
+["Vino, da dessert, dolce",160,0.2,13.7,0,100,"","alcoholic beverage, wine, dessert"],
+["Vino, da dessert, secco",152,0.2,11.7,0,100,"","alcoholic beverage, wine, dessert"],
+["Vino, da tavola",83,0.1,2.7,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, bianco",82,0.1,2.6,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, bianco, chardonnay",84,0.1,2.2,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, bianco, moscato",82,0.1,5.2,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, bianco, pinot grigio",83,0.1,2.1,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, bianco, riesling",80,0.1,3.7,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, bianco, sauvignon blanc",81,0.1,2,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, rosso",85,0.1,2.6,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, rosso, cabernet sauvignon",83,0.1,2.6,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, rosso, merlot",83,0.1,2.5,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, rosso, pinot nero",82,0.1,2.3,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, rosso, sangiovese",86,0.1,2.6,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, rosso, syrah",83,0.1,2.6,0,100,"","alcoholic beverage, wine, table"],
+["Vino, da tavola, rosso, zinfandel",88,0.1,2.9,0,100,"","alcoholic beverage, wine, table"],
+["Vitello, costata, cotto, arrosto",228,24,0,14,100,"","veal, rib, separable lean only"],
+["Vitello, costata, cotto, brasato",251,32.4,0,12.5,100,"","veal, rib, separable lean only"],
+["Vitello, costata, crudo",162,18.9,0,9,100,"","veal, rib, separable lean only"],
+["Vitello, cotto",231,30.1,0,11.4,100,"","veal, composite of trimmed retail cuts, separable lean only"],
+["Vitello, crudo",144,19.4,0,6.8,100,"","veal, composite of trimmed retail cuts, separable lean only"],
+["Vitello, lombata, cotto, arrosto",217,24.8,0,12.3,100,"","veal, loin, separable lean only"],
+["Vitello, lombata, cotto, brasato",284,30.2,0,17.2,100,"","veal, loin, separable lean only"],
+["Vitello, lombata, crudo",177,20.1,0.1,10.1,100,"","veal, loin, separable lean only"],
+["Vitello, macinato, cotto, alla griglia",172,24.4,0,7.6,100,"","veal, ground, cooked"],
+["Vitello, macinato, cotto, in padella",215,25.8,1.5,11.8,100,"","veal, ground, cooked"],
+["Vitello, macinato, crudo",197,18.6,0,13.1,100,"","veal, ground, raw"],
+["Vitello, petto, intero, cotto, brasato",266,27,0,16.8,100,"","veal, breast, whole"],
+["Vitello, petto, intero, crudo",208,17.5,0,14.8,100,"","veal, breast, whole"],
+["Vitello, scamone, cotto, arrosto",202,25.1,0,10.4,100,"","veal, sirloin, separable lean only"],
+["Vitello, scamone, cotto, brasato",252,31.3,0,13.1,100,"","veal, sirloin, separable lean only"],
+["Vitello, scamone, crudo",152,19.1,0,7.8,100,"","veal, sirloin, separable lean only"],
+["Vitello, spalla, cotto, arrosto",184,25.3,0,8.4,100,"","veal, shoulder, whole (arm and blade)"],
+["Vitello, spalla, cotto, brasato",228,32.1,0,10.1,100,"","veal, shoulder, whole (arm and blade)"],
+["Vitello, spalla, crudo",130,19.3,0,5.3,100,"","veal, shoulder, whole (arm and blade)"],
+["Vitello, stinco, crudo",107,19.3,0,3.3,100,"","veal, shank, separable lean only"],
+["Vongole, cotte",148,25.6,5.1,1.9,100,"","mollusks, clam, mixed species"],
+["Vongole, cotte, impanate e fritt@",202,14.2,10.3,11.2,100,"","mollusks, clam, mixed species"],
+["Vongole, crude",86,14.7,3.6,1,100,"","mollusks, clam, mixed species"],
+["Vongole, in scatola",142,24.2,5.9,1.6,100,"","mollusks, clam, mixed species"],
+["Vongole, in scatola, liquide",2,0.4,0.1,0,100,"","mollusks, clam, mixed species"],
+["Waffle, al latticello, surgelati, da riscaldare",273,6.6,38.8,9.2,39,"pezzo","waffles, buttermilk, frozen"],
+["Waffle, con gocce di cioccolato, surgelati, da riscaldare",297,5.8,44.2,10.1,100,"","waffles, chocolate chip, frozen"],
+["Waffle, integrali, surgelati, da riscaldare",257,7.1,44.9,3.6,100,"","waffles, whole wheat, lowfat"],
+["Waffle, semplici",291,7.9,32.9,14.1,100,"","waffles, plain, prepared from recipe"],
+["Waffle, semplici, surgelati, da riscaldare",285,6.5,40.8,9.7,100,"","waffles, plain, frozen"],
+["Waffle, senza glutine, surgelati, da riscaldare",263,2.7,41.6,8.8,45,"pezzo","waffles, gluten-free, frozen"],
+["Wapiti, coscia, cotti, alla griglia",156,30.9,0,2.6,100,"","game meat, elk, round"],
+["Wapiti, cotti, arrosti",146,30.2,0,1.9,100,"","game meat, elk, cooked"],
+["Wapiti, crudi",111,22.9,0,1.4,100,"","game meat, elk, raw"],
+["Wapiti, filetto, cotti, alla griglia",162,30.8,0,3.4,100,"","game meat, elk, tenderloin"],
+["Wapiti, lombata, cotti, alla griglia",167,31,0,3.8,100,"","game meat, elk, loin"],
+["Wapiti, macinati, cotti, alla piastra",193,26.6,0,8.7,95,"pezzo","game meat, elk, ground"],
+["Wapiti, macinati, crudi",172,21.8,0,8.8,102,"pezzo","game meat, elk, ground"],
+["Wasabi",292,2.2,40,10.9,100,"","wasabi"],
+["Whiskey sour",153,0.1,12.8,0.1,100,"","alcoholic beverage, whiskey sour"],
+["Whiskey sour, in scatola",119,0,13.3,0,100,"","alcoholic beverage, whiskey sour, canned"],
+["Würstel",312,12,1.8,28.5,100,"","frankfurter, low sodium"],
+["Würstel, maiale",269,12.8,0.2,23.7,76,"pezzo","frankfurter, pork"],
+["Würstel, manzo",316,11.2,3.4,28.3,100,"","frankfurter, beef, low fat"],
+["Würstel, pollo",223,15.5,2.7,16.2,100,"","frankfurter, chicken"],
+["Würstel, tacchino",223,12.2,3.8,17.3,100,"","frankfurter, turkey"],
+["Würstel, vegetariani",233,19.6,3.8,13.7,100,"","frankfurter, meatless"],
+["Yogurt, al cioccolato, latte scremato",112,3.5,22.3,0,100,"","yogurt, chocolate, nonfat milk"],
+["Yogurt, alla frutta",99,4,18.6,1.1,100,"","yogurt, fruit variety, nonfat"],
+["Yogurt, alla vaniglia",85,4.9,13.8,1.2,100,"","yogurt, vanilla, low fat"],
+["Yogurt, greco, alla fragola",103,8.2,10.9,2.6,100,"","yogurt, greek, strawberry"],
+["Yogurt, greco, alla frutta, latte intero",106,7.3,12.3,3,100,"","yogurt, greek, fruit"],
+["Yogurt, greco, alla vaniglia",95,8.6,9.5,2.5,100,"","yogurt, greek, vanilla"],
+["Yogurt, greco, semplice",73,9.9,3.9,1.9,100,"","yogurt, greek, plain"],
+["Yogurt, greco, semplice, latte intero",97,9,4,5,100,"","yogurt, greek, plain"],
+["Yogurt, semplice",63,5.2,7,1.6,100,"","yogurt, plain, low fat"],
+["Yogurt, semplice, latte intero",61,3.5,4.7,3.2,100,"","yogurt, plain, whole milk"],
+["Yogurt, semplice, latte scremato",56,5.7,7.7,0.2,100,"","yogurt, plain, skim milk"],
+["Zafferano",310,11.4,61.5,5.8,100,"","spices, saffron"],
+["Zenzero fresco, crudo",80,1.8,15.8,0.8,100,"","ginger root, raw"],
+["Zenzero, macinato",335,9,57.5,4.2,100,"","spices, ginger, ground"],
+["Zucca, cotta, bollita",20,0.7,3.8,0.1,100,"","pumpkin, cooked, boiled"],
+["Zucca, cruda",26,1,6,0.1,100,"","pumpkin, raw"],
+["Zucca, estiva, cotta, bollita",20,0.9,2.9,0.3,100,"","squash, summer, all varieties"],
+["Zucca, estiva, cruda",16,1.2,2.2,0.2,100,"","squash, summer, all varieties"],
+["Zucca, estiva, zucchine, cotta, bollita",15,1.1,1.7,0.4,100,"","squash, summer, zucchini"],
+["Zucca, estiva, zucchine, cruda",17,1.2,2.1,0.3,100,"","squash, summer, zucchini"],
+["Zucca, estiva, zucchine, surgelata",17,1.2,2.3,0.1,100,"","squash, summer, zucchini"],
+["Zucca, estiva, zucchine, surgelata, cotta, bollita",17,1.1,2.3,0.1,100,"","squash, summer, zucchini"],
+["Zucca, in scatola",34,1.1,5.2,0.3,100,"","pumpkin, canned, without salt"],
+["Zucca, invernale, butternut, cotta, al forno",40,0.9,7.3,0.1,100,"","squash, winter, butternut"],
+["Zucca, invernale, butternut, cruda",45,1,9.7,0.1,100,"","squash, winter, butternut"],
+["Zucca, invernale, butternut, surgelata",57,1.8,13.1,0.1,100,"","squash, winter, butternut"],
+["Zucca, invernale, butternut, surgelata, cotta, bollita",39,1.2,10,0.1,100,"","squash, winter, butternut"],
+["Zucca, invernale, cotta, al forno",37,0.9,6,0.3,100,"","squash, winter, all varieties"],
+["Zucca, invernale, cruda",34,0.9,7.1,0.1,100,"","squash, winter, all varieties"],
+["Zucca, invernale, spaghetti, cruda",31,0.6,5.4,0.6,100,"","squash, winter, spaghetti"],
+["Zucca, zucchine, baby, cruda",21,2.7,2,0.4,16,"pezzo","squash, zucchini, baby"],
+["Zucchero, d'acero",354,0.1,90.9,0.2,100,"","sugars, maple"],
+["Zucchero, in polvere",389,0,99.8,0,100,"","sugars, powdered"],
+["Zuppa, al formaggio, in scatola, condensata",82,0.8,9.1,3.9,100,"","soup, cheese, canned"],
+["Zuppa, al formaggio, in scatola, diluita con acqua",63,2.2,3.9,4.2,100,"","soup, cheese, canned"],
+["Zuppa, al formaggio, in scatola, preparata con latte",92,3.8,6.1,5.8,100,"","soup, cheese, canned"],
+["Zuppa, brodo di pollo",6,0.6,0.4,0.2,100,"","soup, chicken broth, ready-to-serve"],
+["Zuppa, brodo di pollo, in scatola",16,2,1.2,0.6,100,"","soup, chicken broth, low sodium"],
+["Zuppa, brodo di pollo, in scatola, condensata",31,4.4,0.8,1,100,"","soup, chicken broth, canned"],
+["Zuppa, brodo di pollo, in scatola, diluita con acqua",16,2,0.4,0.6,100,"","soup, chicken broth, canned"],
+["Zuppa, brodo vegetale",5,0.2,0.9,0.1,100,"","soup, vegetable broth, ready to serve"],
+["Zuppa, crema di asparagi, in scatola, condensata",69,1.8,8.1,3.3,100,"","soup, cream of asparagus, canned"],
+["Zuppa, crema di asparagi, in scatola, diluita con acqua",35,0.9,4.2,1.7,100,"","soup, cream of asparagus, canned"],
+["Zuppa, crema di asparagi, in scatola, preparata con latte",65,2.5,6.3,3.3,100,"","soup, cream of asparagus, canned"],
+["Zuppa, crema di cipolle, in scatola, condensata",88,2.2,10,4.2,100,"","soup, cream of onion, canned"],
+["Zuppa, crema di cipolle, in scatola, diluita con acqua",44,1.1,4.8,2.2,100,"","soup, cream of onion, canned"],
+["Zuppa, crema di cipolle, in scatola, preparata con latte",75,2.7,7.1,3.8,100,"","soup, cream of onion, canned"],
+["Zuppa, crema di funghi, in scatola",65,2.4,5.5,3.6,100,"","soup, cream of mushroom, low sodium"],
+["Zuppa, crema di funghi, in scatola, condensata",79,1.4,6.1,5.3,100,"","soup, cream of mushroom, canned"],
+["Zuppa, crema di funghi, in scatola, diluita con acqua",39,0.7,3,2.6,100,"","soup, cream of mushroom, canned"],
+["Zuppa, crema di patate, in scatola, condensata",74,1.5,11.5,1.9,100,"","soup, cream of potato, canned"],
+["Zuppa, crema di patate, in scatola, diluita con acqua",30,0.7,4.5,1,100,"","soup, cream of potato, canned"],
+["Zuppa, crema di patate, in scatola, preparata con latte",60,2.3,6.7,2.6,100,"","soup, cream of potato, canned"],
+["Zuppa, crema di pollo, in scatola, condensata",90,2.4,7.2,5.8,100,"","soup, cream of chicken, canned"],
+["Zuppa, crema di pollo, in scatola, diluita con acqua",48,1.4,3.7,3,100,"","soup, cream of chicken, canned"],
+["Zuppa, crema di pollo, in scatola, preparata con latte",77,3,5.9,4.6,100,"","soup, cream of chicken, canned"],
+["Zuppa, crema di pollo, secca, preparato, preparata con acqua",41,0.7,5,2,100,"","soup, cream of chicken, dry"],
+["Zuppa, crema di sedano, in scatola, condensata",72,1.3,6.4,4.5,100,"","soup, cream of celery, canned"],
+["Zuppa, crema di sedano, in scatola, diluita con acqua",37,0.7,3.3,2.3,100,"","soup, cream of celery, canned"],
+["Zuppa, crema di sedano, in scatola, preparata con latte",66,2.3,5.6,3.9,100,"","soup, cream of celery, canned"],
+["Zuppa, di cipolle, in scatola, condensata",46,3.1,6,1.4,100,"","soup, onion, canned"],
+["Zuppa, di cipolle, secca, preparato",293,7.5,58.5,0.3,100,"","soup, onion, dry"],
+["Zuppa, di cipolle, secca, preparato, preparata con acqua",12,0.3,2.5,0,100,"","soup, onion, dry"],
+["Zuppa, di fagioli neri, in scatola, condensata",91,4.8,8.6,1.3,100,"","soup, black bean, canned"],
+["Zuppa, di fagioli neri, in scatola, diluita con acqua",46,2.4,4.3,0.7,100,"","soup, black bean, canned"],
+["Zuppa, di pomodoro, in scatola",55,2.4,9.3,1.2,100,"","soup, tomato, canned"],
+["Zuppa, di pomodoro, in scatola, condensata",66,1.5,14.1,0.4,100,"","soup, tomato, canned"],
+["Zuppa, di pomodoro, in scatola, diluita con acqua",32,0.7,7,0.2,100,"","soup, tomato, canned"],
+["Zuppa, di pomodoro, secca, preparato, preparata con acqua",38,0.9,6.8,0.6,100,"","soup, tomato, dry"],
+["Zuppa, di verdure, in scatola, condensata",59,1.7,9.3,1.6,100,"","soup, vegetarian vegetable, canned"],
+["Zuppa, di verdure, in scatola, diluita con acqua",28,0.9,4.6,0.8,100,"","soup, vegetarian vegetable, canned"],
+["Zuppa, minestrone, in scatola",50,2,6.6,0.8,100,"","soup, minestrone, canned"],
+["Zuppa, minestrone, in scatola, con pezzi",53,2.1,6.2,1.2,100,"","soup, minestrone, canned"],
+["Zuppa, minestrone, in scatola, condensata",68,3.5,8.4,2,100,"","soup, minestrone, canned"],
+["Zuppa, minestrone, in scatola, diluita con acqua",34,1.8,4.3,1,100,"","soup, minestrone, canned"],
+["Zuppa, piselli, diluita con acqua",62,3.2,8,1.1,100,"","soup, pea, low sodium"],
+["Zuppa, piselli, verde, in scatola, condensata",125,6.5,16.3,2.2,100,"","soup, pea, green"],
+["Zuppa, piselli, verde, in scatola, diluita con acqua",61,3.2,8,1.1,100,"","soup, pea, green"],
+["Zuppa, piselli, verde, in scatola, preparata con latte",94,5,11.6,2.8,100,"","soup, pea, green"],
+["Zuppa, pollo e noodles, in scatola",41,3.3,3,1.3,100,"","soup, chicken noodle, reduced sodium"],
+["Zuppa, pollo e noodles, in scatola, condensata",48,2.4,5.2,1.6,100,"","soup, chicken noodle, canned"],
+["Zuppa, pollo e noodles, in scatola, diluita con acqua",25,1.3,2.8,0.9,100,"","soup, chicken noodle, canned"],
+["Zuppa, pollo e noodles, secca, preparato",377,15.4,59.1,6.5,100,"","soup, chicken noodle, dry"],
+["Zuppa, pollo e noodles, secca, preparato, preparata con acqua",23,0.8,3.6,0.6,100,"","soup, chicken noodle, dry"],
+["Zuppa, pollo e riso, in scatola, condensata",68,1.8,10.7,1.6,100,"","soup, chicken with rice, canned"],
+["Zuppa, pollo e riso, in scatola, diluita con acqua",24,1.4,2.6,0.8,100,"","soup, chicken with rice, canned"],
+["Zuppa, pollo e verdure, con pezzi",40,2.7,6.3,0.5,100,"","soup, chicken vegetable, chunky"],
+["Zuppa, pollo e verdure, in scatola, condensata",61,2.9,6.3,2.3,100,"","soup, chicken vegetable, canned"],
+["Zuppa, pollo, in scatola, con pezzi",71,5.1,6.3,2.6,100,"","soup, chicken, canned"],
+["Zuppa, tacchino, con pezzi, in scatola",57,4.3,6,1.9,100,"","soup, turkey, chunky"],
+["Zuppa, vegetale, in scatola, condensata",65,2.2,10,0.9,100,"","soup, vegetable, canned"]];
+{ const by = new Map(FOOD_IDX.map(f => [f.name.toLowerCase(), f]));
+  FOODS_W.forEach(([n, kcal, p, c, f, por, unit, cu, alt], wi) => { const k = n.toLowerCase(), e = by.get(k); if (e) { e.cu = e.cu || cu; e.wi = wi; e.alt = [e.alt, alt, ...CUISINES[cu]].filter(Boolean).join(' '); return; } const x = { name: n, kcal, p, c, f, por, unit: unit || '', cu, wi, alt: alt + ' ' + CUISINES[cu].join(' ') }; by.set(k, x); FOOD_IDX.push(x); });
+  for (const [n, kcal, p, c, f, por, unit, alt] of FOODS_U) { const k = n.toLowerCase(); if (by.has(k)) continue; const x = { name: n, kcal, p, c, f, por, unit: unit || '', src: 'usda', alt }; by.set(k, x); FOOD_IDX.push(x); } }
+
+/* =========================================================
+   COSA CUCINO · SCONTRINO IN DISPENSA · LA TUA SETTIMANA
+   · "Cosa cucino stasera?": guarda dispensa, cosa scade, la
+     dieta e le kcal che restano; propone piatti (dai tuoi, dalla
+     dieta e con l'AI). Un tocco: pasto nel diario, dispensa che
+     cala, mancanti in spesa.
+   · Lo scontrino della spesa fa tutto insieme: uscita nelle
+     Finanze, prodotti in dispensa con i grammi, lista spuntata.
+   · Ogni domenica il resoconto della settimana in tutte le aree,
+     con il confronto e tre consigli per la prossima.
+   · Un evento di Orbita va nel Calendario di iPhone con un tocco.
+   ========================================================= */
+
+/* ---------------- Cosa cucino ---------------- */
+const Cook = {
+  meal() { const h = new Date().getHours() + new Date().getMinutes() / 60; return h < 10.5 ? 'colazione' : h < 15.5 ? 'pranzo' : h < 17.5 ? 'spuntini' : 'cena'; },
+  mealName(m) { return (MEALS.find(x => x[0] === m) || MEALS[2])[1].toLowerCase(); },
+  /** what's at home, what's about to go, what the diet says, what's left for today */
+  ctx() {
+    const P = (S.pantry || []).filter(p => !/casa|igiene|bagno/.test(p.where || '') && !PANTRY_NONFOOD.test(p.name));
+    const soon = P.filter(p => p.exp && daysTo(p.exp) <= 3).sort((a, b) => a.exp.localeCompare(b.exp));
+    const meal = this.meal(), d = typeof Diet !== 'undefined' && Diet.D() ? Diet.day() : null, di = d ? Diet.dayIdx() : -1;
+    let dm = null, mi = -1; if (d) { const want = meal === 'spuntini' ? ['spuntino', 'merenda'] : [meal]; mi = d.meals.findIndex(m => want.includes(m.meal)); if (mi >= 0) dm = d.meals[mi]; }
+    const conf = typeof Health !== 'undefined' && Health.configured && Health.configured(), left = conf ? Math.round(Health.goalKcal() - Health.eaten().kcal) : null;
+    return { P, soon, meal, d, di, dm, mi, left };
+  },
+  st(name) { const s = Kit.status(name); return s === 'have' || s === 'base' ? 'have' : s; },
+  /** suggestions that need no AI: the diet's meal, then your recipes ranked by what you have and what it saves from the bin */
+  local(C = this.ctx()) {
+    const out = [];
+    if (C.dm && C.dm.items.length) { const ing = C.dm.items.map(it => ({ name: it.n, g: +it.g || 0, qty: it.q || '' })), kc = Math.round(C.dm.items.reduce((s, it) => s + (+it.kcal || 0) * (+it.g || 0) / 100, 0));
+      out.push({ src: 'diet', title: `${DMEAL[C.dm.meal] ? DMEAL[C.dm.meal][0] : 'Pasto'} della dieta`, emoji: DMEAL[C.dm.meal] ? DMEAL[C.dm.meal][1] : '🥗', servings: 1, ingredients: ing, kcal: kc || null, why: 'È quello che prevede il tuo piano per oggi' }); }
+    const R = (S.recipes || []).filter(r => (r.ingredients || []).length).map(r => { const I = r.ingredients.filter(i => !PANTRY.test(String(i.name).trim())); const have = I.filter(i => this.st(i.name) === 'have').length, saves = C.soon.filter(p => r.ingredients.some(i => Kit.same(i.name, p.food || p.name))).length; return { r, sc: (I.length ? have / I.length : 0) + saves * .35 + (r.fav ? .1 : 0), have, n: I.length, saves }; })
+      .filter(x => x.have > 0 || x.saves).sort((a, b) => b.sc - a.sc).slice(0, 4);
+    for (const { r, have, n, saves } of R) out.push({ src: 'mine', rid: r.id, title: r.title, emoji: r.emoji || '🍽️', servings: +r.servings || 2, time: r.time, ingredients: r.ingredients.map(i => ({ name: i.name, g: +i.g || 0, qty: i.qty || '' })), kcal: r.kcal, p: r.p, c: r.c, f: r.f, steps: r.steps, why: saves ? `Usa ${saves === 1 ? 'un prodotto che scade' : saves + ' prodotti che scadono'} · hai ${have} ingredienti su ${n}` : `Dal tuo ricettario · hai ${have} ingredienti su ${n}` });
+    return out;
+  },
+  async ai(C, want, people) {
+    const sample = await Cap.get('sample'); if (!sample) { aiUnavailable(); return []; }
+    const home = C.P.slice(0, 60).map(p => `${p.name}${p.g != null ? ` (${Math.round(p.g)} g)` : p.qty ? ` (${p.qty})` : ''}${p.exp ? `, scade tra ${Math.max(0, daysTo(p.exp))} gg` : ''}`).join('; ');
+    const diet = C.dm ? `La dieta per questo pasto prevede: ${C.dm.items.map(it => `${it.n} ${it.g ? it.g + ' g' : it.q || ''}`).join(', ')}. Resta vicino a questi alimenti e quantità.` : '';
+    const kc = C.left != null && C.left > 150 ? ` Restano ${C.left} kcal per oggi: una porzione dovrebbe stare intorno a ${Math.round(Math.min(C.left, C.meal === 'cena' ? C.left : C.left * .55))} kcal.` : '';
+    const R = await sample.json(`Sei un cuoco italiano pratico. Proponi 3 piatti per ${this.mealName(C.meal)}${people > 1 ? ` per ${people} persone` : ' per una persona'}, usando soprattutto quello che c'è in casa e PRIMA ciò che scade.
+In casa: ${home || 'non so cosa c\'è (proponi piatti con ingredienti comuni)'}.
+${C.soon.length ? 'Da usare subito: ' + C.soon.map(p => p.name).join(', ') + '.' : ''} ${diet}${kc}${want.length ? ' Requisiti: ' + want.join(', ') + '.' : ''}
+Rispondi solo con un array JSON di 3 oggetti {"title", "emoji", "servings": ${people}, "time" (minuti), "ingredients": [{"name": nome semplice come in dispensa, "qty": testo, "g": grammi totali per tutte le porzioni}], "steps": [frasi brevi], "kcal","p","c","f" (per porzione), "tags" (tra ${RTAGS.join(', ')}), "why": una riga sul perché (cita cosa salva dalla scadenza)}.`, { cache: false });
+    return (Array.isArray(R) ? R : []).filter(x => x && x.title).map(x => ({ src: 'ai', title: String(x.title), emoji: x.emoji || '🍽️', servings: +x.servings || people, time: +x.time || null, ingredients: (x.ingredients || []).map(i => ({ name: String(i.name || ''), qty: String(i.qty || ''), g: +i.g || 0 })).filter(i => i.name), steps: (x.steps || []).map(String), kcal: +x.kcal || null, p: +x.p || 0, c: +x.c || 0, f: +x.f || 0, tags: (x.tags || []).filter(t => RTAGS.includes(t)), why: String(x.why || '') }));
+  },
+  missing(r) { return r.ingredients.filter(i => this.st(i.name) === 'miss'); },
+  card(r, i) {
+    const miss = this.missing(r).length;
+    return `<div class="card ck-card" data-cki="${i}"><div class="ck-top"><span class="rc-emo sm">${esc(r.emoji || '🍽️')}</span><div class="grow" style="min-width:0"><b>${esc(r.title)}</b><div class="muted" style="font-size:13.5px">${[r.src === 'diet' ? 'Dieta' : r.src === 'mine' ? 'Ricettario' : 'Idea nuova', r.time ? r.time + ' min' : '', r.kcal ? Math.round(r.kcal) + ' kcal' + (r.servings > 1 ? '/porz.' : '') : ''].filter(Boolean).join(' · ')}</div></div></div>
+      ${r.why ? `<p class="ck-why">${esc(r.why)}</p>` : ''}
+      <div class="ck-ing">${r.ingredients.map(x => { const s = this.st(x.name); return `<span class="ck-i ${s}" title="${s === 'have' ? 'Ce l\'hai' : s === 'list' ? 'È già in lista' : 'Manca'}">${s === 'have' ? '🥫' : s === 'list' ? '🛒' : '＋'} ${esc(x.name)}${x.g ? ` <small>${Math.round(x.g)} g</small>` : x.qty ? ` <small>${esc(x.qty)}</small>` : ''}</span>`; }).join('')}</div>
+      <div class="ck-act"><button class="btn primary sm" data-ckcook="${i}">${ico('chef', 'sm')}Lo cucino</button>${miss ? `<button class="btn sm" data-ckshop="${i}">${ico('list', 'sm')}Mancano ${miss}: in spesa</button>` : `<span class="pill" style="color:var(--green)">Hai tutto</span>`}${r.src === 'ai' ? `<button class="btn sm plain" data-cksave="${i}">Salva ricetta</button>` : ''}${(r.steps || []).length ? `<button class="btn sm plain" data-ckhow="${i}">Come si fa</button>` : ''}</div></div>`;
+  },
+  sheet() {
+    const C = this.ctx(); let L = this.local(C), people = 1; const want = new Set();
+    const chips = ['Veloce', 'Leggero', 'Vegetariano', 'Proteico', 'Senza forno'];
+    const head = () => [C.soon.length ? `<span class="ck-ctx warn">⏳ Scade: ${C.soon.slice(0, 3).map(p => `${esc(p.name)} ${daysTo(p.exp) <= 0 ? 'oggi' : daysTo(p.exp) === 1 ? 'domani' : 'tra ' + daysTo(p.exp) + ' gg'}`).join(', ')}</span>` : '', C.P.length ? `<span class="ck-ctx">🥫 ${C.P.length} prodotti in casa</span>` : `<span class="ck-ctx">🥫 Dispensa vuota: ti propongo piatti con ingredienti comuni</span>`, C.left != null ? `<span class="ck-ctx">🔥 Restano ${Math.max(0, C.left)} kcal oggi</span>` : '', C.dm ? `<span class="ck-ctx">🥗 La dieta prevede ${C.dm.items.length} alimenti</span>` : ''].join('');
+    const sh = openSheet({ title: `Cosa cucino ${C.meal === 'cena' ? 'stasera' : C.meal === 'pranzo' ? 'a pranzo' : 'adesso'}?`, wide: true, left: { label: 'Chiudi' },
+      body: `<div class="ck-ctxs">${head()}</div>
+        <div class="chips">${chips.map(t => `<button type="button" class="chip" data-ckw="${t}">${t}</button>`).join('')}<span class="ck-ppl"><button type="button" class="icon-btn" data-ckp="-1" aria-label="Meno persone">−</button><b id="ckP">1 persona</b><button type="button" class="icon-btn" data-ckp="1" aria-label="Più persone">+</button></span></div>
+        <button class="btn primary" id="ckGo" style="align-self:flex-start">${ico('spark', 'sm')}Proponimi 3 piatti con quello che ho</button>
+        <div id="ckR" class="ck-list"></div>`,
+      onMount: el => {
+        const R = $('#ckR', el);
+        const paint = () => { R.innerHTML = L.length ? L.map((r, i) => this.card(r, i)).join('') : `<p class="muted" style="margin:0">Nessuna ricetta tua usa quello che hai: tocca il pulsante qui sopra e te ne propongo io.</p>`; wire(); };
+        const wire = () => {
+          $$('[data-ckcook]', R).forEach(b => b.onclick = () => this.cookSheet(L[+b.dataset.ckcook], C, () => { sh.close(); }));
+          $$('[data-ckshop]', R).forEach(b => b.onclick = () => { const r = L[+b.dataset.ckshop], M = this.missing(r); for (const x of M) Shop.add(x.name, x.g ? Qty.fmt(x.g) : x.qty, r.title); Island.toast({ icon: 'list', c: 'var(--green)', t: `${M.length} ${M.length === 1 ? 'prodotto' : 'prodotti'} in spesa`, s: r.title, ms: 1800 }); paint(); });
+          $$('[data-cksave]', R).forEach(b => b.onclick = () => { const x = L[+b.dataset.cksave]; const o = { id: uid(), added: Date.now(), cooked: 0, title: x.title, emoji: x.emoji, servings: x.servings || 2, time: x.time, tags: x.tags || [], ingredients: x.ingredients.map(i => ({ name: i.name, qty: i.qty || (i.g ? Math.round(i.g) + ' g' : ''), g: i.g || 0 })), steps: x.steps || [], kcal: x.kcal, p: x.p, c: x.c, f: x.f }; S.recipes.push(o); save('recipes'); try { RCP.syncFood(o); } catch (_) {} x.src = 'mine'; x.rid = o.id; b.replaceWith(Object.assign(document.createElement('span'), { className: 'pill', textContent: 'Salvata ✓' })); });
+          $$('[data-ckhow]', R).forEach(b => b.onclick = () => { const x = L[+b.dataset.ckhow]; openSheet({ title: x.title, left: { label: 'Chiudi' }, body: `<ol class="ck-steps">${(x.steps || []).map(s => `<li>${esc(s)}</li>`).join('')}</ol>` }); });
+        };
+        $$('[data-ckw]', el).forEach(b => b.onclick = () => { const t = b.dataset.ckw; want.has(t) ? want.delete(t) : want.add(t); b.setAttribute('aria-pressed', want.has(t)); });
+        $$('[data-ckp]', el).forEach(b => b.onclick = () => { people = clamp(people + +b.dataset.ckp, 1, 8); $('#ckP', el).textContent = people === 1 ? '1 persona' : people + ' persone'; });
+        $('#ckGo', el).onclick = async e => { const btn = e.currentTarget; btn.disabled = true; btn.innerHTML = `${ico('spark', 'sm')}Guardo in dispensa…`;
+          try { const A = await this.ai(C, [...want], people); if (A.length) { L = [...A, ...L.filter(x => x.src !== 'ai')]; paint(); R.scrollIntoView({ block: 'start', behavior: 'smooth' }); } } catch (err) { aiError(err); }
+          btn.disabled = false; btn.innerHTML = `${ico('spark', 'sm')}Altre idee`; };
+        paint();
+      } });
+    return sh;
+  },
+  /** cook it: portions, then diary + pantry + list in one go */
+  cookSheet(r, C, done) {
+    const tot = r.ingredients.reduce((s, i) => s + (+i.g || 0), 0), serv = Math.max(1, +r.servings || 1); let cooked = serv, eat = 1, meal = C.meal === 'spuntini' && r.src !== 'diet' ? 'cena' : C.meal;
+    const portion = () => tot ? Math.round(tot / serv) : 300;
+    const perPortion = () => { if (r.kcal) return { kcal: +r.kcal, p: +r.p || 0, c: +r.c || 0, f: +r.f || 0 }; let k = 0, p = 0, c = 0, f = 0; for (const i of r.ingredients) { const F = i.g && Kit.food(i.name); if (F) { k += F.kcal * i.g / 100; p += F.p * i.g / 100; c += F.c * i.g / 100; f += F.f * i.g / 100; } } return { kcal: Math.round(k / serv), p: p / serv, c: c / serv, f: f / serv }; };
+    const s = openSheet({ title: r.title, left: { label: 'Annulla' }, right: { label: 'Fatto', act: sh2 => {
+        const k = todayK(), V = perPortion(), pg = portion();
+        if (r.src === 'diet' && C.di >= 0 && C.mi >= 0) { const res = Diet.eat(C.di, C.mi, null, k); if (eat > 1 && res.n) { /* the diet logs one portion */ } }
+        else if (V.kcal) { const per = 100 / pg; Health.add(meal, { name: r.title, kcal: Math.round(V.kcal * per), p: Math.round(V.p * per * 10) / 10, c: Math.round(V.c * per * 10) / 10, f: Math.round(V.f * per * 10) / 10, src: 'ricetta', por: pg }, pg * eat, k); }
+        const used = []; if (r.src !== 'diet') for (const i of r.ingredients) if (i.g) { const before = Kit.pantryOf(i.name).length; Kit.ate({ name: i.name }, i.g * cooked / serv, k); if (before) used.push(i.name); }
+        else for (const i of r.ingredients) if (Kit.pantryOf(i.name).length) used.push(i.name);
+        const M = this.missing(r); if ($('#ckMiss', sh2.el) && $('#ckMiss', sh2.el).getAttribute('aria-pressed') === 'true') for (const x of M) Shop.add(x.name, x.g ? Qty.fmt(x.g) : x.qty, r.title);
+        if (r.rid) { const o = S.recipes.find(x => x.id === r.rid); if (o) { o.cooked = (o.cooked || 0) + 1; o.last = k; save('recipes'); } }
+        save('pantry'); sh2.close(); done && done(); App.refresh(); Sound.done && Sound.done(); Game.add(8, 'Cucinato: ' + r.title, { icon: 'chef' });
+        Island.toast({ icon: 'chef', c: 'var(--green)', t: 'Buon appetito!', s: [V.kcal ? `${Math.round(V.kcal * eat)} kcal nel diario` : 'Nel diario', used.length ? `dispensa aggiornata (${used.length})` : '', M.length && $('#ckMiss', sh2.el) && $('#ckMiss', sh2.el).getAttribute('aria-pressed') === 'true' ? `${M.length} in spesa` : ''].filter(Boolean).join(' · '), ms: 3200 });
+      } },
+      body: `${r.src === 'diet' ? `<p class="muted" style="margin:0">Segno il pasto della dieta come fatto e lo metto nel diario.</p>` : `<div class="list flat"><div class="row"><span class="grow"><div class="t">Cucini per</div><div class="s">Scalo la dispensa di conseguenza</div></span><span class="ck-ppl"><button type="button" class="icon-btn" data-cc="-1">−</button><b id="ccN"></b><button type="button" class="icon-btn" data-cc="1">+</button></span></div>
+        <div class="row"><span class="grow"><div class="t">Ne mangi</div><div class="s" id="ccK"></div></span><span class="ck-ppl"><button type="button" class="icon-btn" data-ce="-1">−</button><b id="ceN"></b><button type="button" class="icon-btn" data-ce="1">+</button></span></div></div>
+        <div class="seg">${MEALS.map(([m, n]) => `<button type="button" data-seg="ckm" data-v="${m}" aria-pressed="${m === meal}">${n}</button>`).join('')}</div>`}
+        ${this.missing(r).length ? `<div class="list flat"><div class="row"><span class="grow"><div class="t">Metti in spesa quello che manca</div><div class="s">${this.missing(r).map(x => esc(x.name)).join(', ')}</div></span>${toggleBtn('ckMiss', true)}</div></div>` : ''}`,
+      onMount: el => {
+        const P = () => { const n = $('#ccN', el); if (!n) return; n.textContent = cooked === 1 ? '1 persona' : cooked + ' persone'; $('#ceN', el).textContent = eat === 1 ? '1 porzione' : eat + ' porzioni'; const V = perPortion(); $('#ccK', el).textContent = V.kcal ? `${Math.round(V.kcal * eat)} kcal · ${Math.round(portion() * eat)} g` : `${Math.round(portion() * eat)} g`; };
+        $$('[data-cc]', el).forEach(b => b.onclick = () => { cooked = clamp(cooked + +b.dataset.cc, 1, 12); eat = Math.min(eat, cooked); P(); });
+        $$('[data-ce]', el).forEach(b => b.onclick = () => { eat = clamp(eat + +b.dataset.ce, 1, cooked); P(); });
+        wireSeg(el, 'ckm', v => meal = v); const t = $('#ckMiss', el); if (t) wireToggle(t, () => {}); P();
+      } });
+    return s;
+  },
+};
+const PANTRY_NONFOOD = /detersiv|sapone|shampoo|carta (igienica|da cucina)|spugn|ammorbident|candeggin|dentifric|deodorant|rasoi|assorbent|pannolin|sacchetti|alluminio|pellicola|scottex|tovaglioli|piatti di carta|lampadin|pil[ae] /i;
+ACT.recIdeas = () => Cook.sheet();
+ACT.cookTonight = () => Cook.sheet();
+TODAY_CARDS.cook = 'Cosa cucino';
+if (!TODAY_DEFAULT.includes('cook')) { const i = TODAY_DEFAULT.indexOf('diet'); TODAY_DEFAULT.splice(i >= 0 ? i + 1 : TODAY_DEFAULT.length, 0, 'cook'); }
+TODAY_EXTRA.cook = () => {
+  const h = new Date().getHours() + new Date().getMinutes() / 60; if (!(h >= 11 && h < 13.6) && !(h >= 17.5 && h < 21.5)) return '';
+  const k = todayK(), m = h < 15 ? 'pranzo' : 'cena'; if (((((S.health || {}).days || {})[k] || {}).meals || {})[m] && S.health.days[k].meals[m].length) return '';
+  const C = Cook.ctx(); if (!C.P.length && !(S.recipes || []).length && !C.dm) return '';
+  const best = Cook.local(C)[0];
+  return `<section class="card span-6 ck-today" data-act="cookTonight" style="cursor:pointer"><span class="ck-big">🍳</span><div class="grow" style="min-width:0"><b>Cosa cucino ${m === 'cena' ? 'stasera' : 'a pranzo'}?</b><div class="muted" style="font-size:14px">${C.soon.length ? `Prima che scadano: ${C.soon.slice(0, 3).map(p => esc(p.name)).join(', ')}` : best ? `Per esempio: ${esc(best.title)}` : `${C.P.length} prodotti in casa: ti propongo cosa farci`}</div></div>${ico('right', 'sm chev')}</section>`;
+};
+/* the pantry and the recipes point here too */
+{ const V = VIEWS.home; if (V) { const oA = V.actions; V.actions = () => { const t = UI.homeTab || 'pantry'; return (t === 'pantry' ? `<button class="btn sm" data-act="cookTonight">🍳<span class="hide-narrow">Cosa cucino</span></button>` : '') + oA(); }; } }
+
+/* ---------------- Scontrino: uscita + dispensa + lista, insieme ---------------- */
+const Rcpt = {
+  /** AI fields asked to every receipt read, on top of the money ones */
+  ASK: ` Per ogni articolo aggiungi anche "food": true se è cibo o bevanda, "g": grammi o ml totali se si capiscono (es. "PASTA 500G" → 500, "LATTE 1L" → 1000, 2 pezzi da 125 g → 250), "where": "frigo"|"freezer"|"dispensa", "days": giorni stimati prima della scadenza da oggi (0 se non scade), "name" deve essere il nome comune del prodotto in italiano (es. "YOG.GRECO 0% FAGE" → "Yogurt greco 0%"). Aggiungi in cima "grocery": true se è la spesa di un supermercato o alimentari.`,
+  /** the receipt's food lines, ready for the pantry */
+  food(r) { return (r.items || []).filter(x => x && x.name && (x.food === true || (x.food == null && r.grocery))).map(x => ({ name: cap(String(x.name).toLowerCase().replace(/\s+/g, ' ').trim()), g: +x.g || 0, where: x.where, days: +x.days || 0, price: +x.price || 0 })); },
+  /** in the pantry, and off the shopping list */
+  stock(L, store) { let n = 0, ticked = 0;
+    for (const x of L) { const it = (S.shop || []).find(s => !s.done && Kit.same(s.name, x.name)); const p = Pantry.add(x.name, { qty: x.g ? Qty.fmt(x.g) : '', where: PWHERE[x.where] ? x.where : undefined, exp: x.days ? addDK(todayK(), Math.round(x.days)) : undefined }); if (!p) continue; n++;
+      const f = Kit.food(x.name); if (f) p.food = f.name; if (x.g) p.g = p.g0 = Math.round(x.g); if (store) p.from = store;
+      if (it) { it.done = true; it.doneAt = Date.now(); p.shopId = it.id; ticked++; } }
+    save('pantry'); if (ticked) save('shop'); return { n, ticked }; },
+};
+if (typeof receiptSheet === 'function') {
+  const oRS = receiptSheet;
+  receiptSheet = function (file, r) {
+    const sh = oRS(file, r), L = Rcpt.food(r || {}); if (!L.length) return sh;
+    const s = sh || Sheets[Sheets.length - 1]; if (!s) return sh; const host = $('.sheet-b', s.el) || s.el; let on = L.map(() => true), stockOn = true;
+    const box = document.createElement('div'); box.className = 'rc-stock';
+    box.innerHTML = `<div class="list flat"><div class="row"><span class="grow"><div class="t">Metti in dispensa ${L.length} ${L.length === 1 ? 'prodotto' : 'prodotti'}</div><div class="s">Con i grammi e la scadenza stimata; spunto la lista della spesa</div></span>${toggleBtn('rcStock', true)}</div></div>
+      <div class="list" id="rcSL">${L.map((x, i) => `<button type="button" class="row" data-rcs="${i}"><span class="check on"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.2 4.2L19 7"/></svg></span><span class="grow"><div class="t">${esc(x.name)} ${x.g ? `<span class="muted">${Qty.fmt(x.g)}</span>` : ''}</div><div class="s">${(PWHERE[x.where] || PWHERE.dispensa)[0]}${x.days ? ' · scade tra circa ' + Math.round(x.days) + ' giorni' : ''}${(S.shop || []).some(s => !s.done && Kit.same(s.name, x.name)) ? ' · <b style="color:var(--green)">era in lista</b>' : ''}</div></span>${x.price ? `<span class="tnum muted">${eur(x.price)}</span>` : ''}</button>`).join('')}</div>`;
+    host.appendChild(box);
+    wireToggle($('#rcStock', box), v => { stockOn = v; $('#rcSL', box).hidden = !v; });
+    $$('[data-rcs]', box).forEach(b => b.onclick = () => { const i = +b.dataset.rcs; on[i] = !on[i]; b.querySelector('.check').classList.toggle('on', on[i]); });
+    const R = $('[data-sh=right]', s.el); if (R) R.addEventListener('click', () => { const store = ($('#rcS', s.el) || {}).value || r.store || ''; setTimeout(() => { if (!stockOn || Sheets.includes(s)) return; const res = Rcpt.stock(L.filter((_, i) => on[i]), store); if (res.n) setTimeout(() => Island.toast({ icon: 'grid', c: 'var(--green)', t: `${res.n} prodotti in dispensa`, s: res.ticked ? `${res.ticked} spuntati dalla lista della spesa` : 'Con grammi e scadenze', action: { label: 'Vedi', fn: () => { UI.homeTab = 'pantry'; go('home'); } }, ms: 3600 }), 1300); }, 60); }, true);
+    return sh;
+  };
+}
+/* "Da foto" in the pantry: when it's a receipt, it becomes an expense too */
+{ const oPP = ACT.pantryPhoto; ACT.pantryPhoto = () => {
+    const i = document.createElement('input'); i.type = 'file'; i.accept = 'image/*'; i.multiple = true;
+    i.onchange = async () => { const fs = [...i.files].slice(0, 3); if (!fs.length) return; const sample = await Cap.get('sample'); if (!sample) return aiUnavailable();
+      Island.toast({ icon: 'spark', c: 'var(--purple)', t: 'Guardo la foto…', ms: 3000 });
+      try { const r = await sample.json(`Nella foto c'è un frigo, una dispensa o uno scontrino della spesa (Italia, oggi è ${todayK()}). Rispondi solo con un oggetto JSON {"kind": "receipt" se è uno scontrino altrimenti "photo", "store": negozio o "", "date": "YYYY-MM-DD" o "", "total": totale in euro o 0, "category": uno tra ${Object.keys(MCAT).join(', ')}, "grocery": true se è spesa alimentare, "items": [{"name": nome comune in italiano, "price": prezzo o 0, "food": true se è cibo o bevanda, "g": grammi o ml totali se si capiscono o 0, "qty": quantità leggibile o "", "where": "frigo"|"freezer"|"dispensa"|"bagno", "days": giorni stimati prima della scadenza (0 se non scade)}] (max 40)}.`, { images: fs, cache: false });
+        if (r && r.kind === 'receipt' && +r.total > 0) { Island.toast({ icon: 'receipt', c: 'var(--accent)', t: 'È uno scontrino', s: 'Registro anche la spesa nelle Finanze', ms: 2200 }); receiptSheet(fs[0], { warranty_months: 0, product: '', ...r, category: MCAT[r.category] ? r.category : 'cibo' }); return; }
+        const L = ((r && r.items) || []).filter(x => x && x.name); if (!L.length) { Island.toast({ icon: 'image', c: 'var(--orange)', t: 'Non ho riconosciuto prodotti', ms: 2200 }); return; }
+        const on = L.map(() => true);
+        openSheet({ title: 'Metti in dispensa', left: { label: 'Annulla' }, right: { label: 'Aggiungi', act: s => { L.forEach((x, k) => { if (!on[k]) return; const p = Pantry.add(x.name, { qty: x.qty || (+x.g ? Qty.fmt(+x.g) : ''), where: PWHERE[x.where] ? x.where : undefined, exp: +x.days ? addDK(todayK(), Math.round(+x.days)) : null }); if (p && +x.g) { p.g = p.g0 = Math.round(+x.g); const f = Kit.food(x.name); if (f) p.food = f.name; } }); save('pantry'); s.close(); UI.homeTab = 'pantry'; go('home'); } },
+          body: `<div class="list">${L.map((x, k) => `<button class="row" data-pp="${k}"><span class="check on"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.2 4.2L19 7"/></svg></span><span class="grow"><div class="t">${esc(x.name)} <span class="muted">${esc(x.qty || (+x.g ? Qty.fmt(+x.g) : ''))}</span></div><div class="s">${(PWHERE[x.where] || PWHERE.dispensa)[0]}${+x.days ? ' · scade tra circa ' + Math.round(x.days) + ' giorni' : ''}</div></span></button>`).join('')}</div>`,
+          onMount: el => $$('[data-pp]', el).forEach(b => b.onclick = () => { const k = +b.dataset.pp; on[k] = !on[k]; b.querySelector('.check').classList.toggle('on', on[k]); }) });
+      } catch (e) { aiError(e); }
+    };
+    i.click();
+  }; void oPP; }
+
+/* ---------------- La tua settimana ---------------- */
+const Week = {
+  /** the week to look back on: this one from Sunday afternoon, otherwise the one that just ended */
+  range(off = 0) { const now = new Date(), sun = now.getDay() === 0 && now.getHours() >= 15; const mon = addDays(startOfWeek(now), (sun ? 0 : -7) + off * 7); const from = dkey(mon); return { from, to: addDK(from, 6) }; },
+  days(from) { return Array.from({ length: 7 }, (_, i) => addDK(from, i)); },
+  data(from) {
+    const to = addDK(from, 6), D = this.days(from), t = todayK(), past = D.filter(k => k <= t), G = k => S.game.days[k] || {}, H = k => ((S.health || {}).days || {})[k] || {};
+    const o = { from, to, D };
+    o.focus = D.map(k => G(k).focus || 0); o.tasks = D.reduce((s, k) => s + (G(k).tasks || 0), 0); o.cards = D.reduce((s, k) => s + (G(k).cards || 0), 0); o.xp = D.reduce((s, k) => s + (G(k).xp || 0), 0);
+    o.subj = (S.courses || []).map(c => ({ n: c.name, c: c.color, m: D.reduce((s, k) => s + ((c.min || {})[k] || 0), 0) })).filter(x => x.m).sort((a, b) => b.m - a.m);
+    o.steps = D.map(k => +H(k).steps || 0); o.work = D.reduce((s, k) => s + (H(k).burn || []).length, 0); o.water = D.map(k => +H(k).water || 0);
+    const hc = typeof Health !== 'undefined' && Health.configured && Health.configured();
+    o.kcal = hc ? past.map(k => ({ k, e: Health.eaten(k).kcal, g: Health.goalKcal(k) })).filter(x => x.e > 0) : [];
+    o.dietOk = null; if (typeof Diet !== 'undefined' && Diet.D()) { let tot = 0, ok = 0; const D0 = Diet.D().from || Diet.D().start || ''; for (const k of past) { if (k < D0) continue; const d = Diet.day(k); if (!d) continue; tot += d.meals.reduce((s, m) => s + m.items.length, 0); ok += Diet.done(k).size; } if (tot) o.dietOk = Math.round(ok / tot * 100); }
+    const W = ((S.health || {}).weights || []).filter(w => w.d && w.d <= to).sort((a, b) => a.d.localeCompare(b.d)); const w1 = W.filter(w => w.d >= from).pop(), w0 = W.filter(w => w.d < from).pop(); o.weight = w1 ? { kg: +w1.kg, d: w0 ? Math.round((+w1.kg - +w0.kg) * 10) / 10 : null } : null;
+    const tx = ((S.money || {}).tx || []).filter(x => x.date >= from && x.date <= to && x.type !== 'transfer');
+    o.spent = -tx.filter(x => x.amt < 0).reduce((s, x) => s + x.amt, 0); o.earned = tx.filter(x => x.amt > 0).reduce((s, x) => s + x.amt, 0);
+    o.spendDay = D.map(k => -tx.filter(x => x.date === k && x.amt < 0).reduce((s, x) => s + x.amt, 0));
+    const bc = {}; for (const x of tx) if (x.amt < 0) bc[x.cat || 'altro'] = (bc[x.cat || 'altro'] || 0) - x.amt; o.cats = Object.entries(bc).sort((a, b) => b[1] - a[1]);
+    o.quests = typeof Side !== 'undefined' ? Side.st().log.filter(l => l.k >= from && l.k <= to).length : 0;
+    o.habits = (S.habits || []).length && past.length ? Math.round(S.habits.reduce((s, h) => s + past.filter(k => Habits.done(h, k)).length, 0) / (S.habits.length * past.length) * 100) : null;
+    const M = past.map(k => (((S.journal || {}).e || {})[k] || {}).m).filter(Boolean); o.mood = M.length ? M.reduce((a, b) => a + b, 0) / M.length : null;
+    o.exams = (S.exams || []).filter(x => x.status === 'passed' && x.date >= from && x.date <= to);
+    o.next = (S.exams || []).filter(x => x.status === 'planned' && x.date > to && dayDiff(to, x.date) <= 21).sort((a, b) => a.date.localeCompare(b.date));
+    o.events = (S.events || []).filter(e => e.date > to && e.date <= addDK(to, 7)).length;
+    o.cooked = (S.recipes || []).filter(r => r.last >= from && r.last <= to).length;
+    o.best = D.reduce((b, k, i) => o.focus[i] > (b ? o.focus[D.indexOf(b)] : 0) ? k : b, null);
+    o.sum = a => a.reduce((s, x) => s + x, 0);
+    return o;
+  },
+  delta(a, b, unit = '%') { if (!b) return ''; const d = Math.round((a - b) / b * 100); if (!isFinite(d) || Math.abs(d) < 3) return `<span class="wk-d">=</span>`; return `<span class="wk-d ${d > 0 ? 'up' : 'down'}">${d > 0 ? '▲' : '▼'} ${Math.abs(d)}${unit}</span>`; },
+  /** rule-based tips, used when the AI isn't there (and as a seed for it) */
+  tips(A, B) {
+    const T = [], f = A.sum(A.focus), st = A.sum(A.steps), stDays = A.steps.filter(Boolean).length;
+    if (A.next.length) T.push(`Hai ${A.next[0].name} il ${fmtLong(A.next[0].date).toLowerCase()}: blocca ora ${f < 300 ? 'almeno un\'ora al giorno' : 'le sessioni'} nel calendario.`);
+    if (f && B && A.sum(B.focus) && f < A.sum(B.focus) * .8) T.push(`Hai studiato meno della settimana prima: riparti dal giorno migliore (${A.best ? DOW[parseD(A.best).getDay()] : 'lunedì'}) e ripeti lo stesso orario.`);
+    if (stDays && st / stDays < 6000) T.push(`In media ${Math.round(st / stDays).toLocaleString('it-IT')} passi al giorno: una passeggiata di 20 minuti dopo pranzo ne aggiunge circa 2.500.`);
+    if (A.dietOk != null && A.dietOk < 70) T.push(`La dieta è stata seguita al ${A.dietOk}%: prepara il pranzo la sera prima nei giorni più pieni.`);
+    if (B && A.spent > B.spent * 1.25 && A.cats[0]) T.push(`Hai speso di più su ${MCAT[A.cats[0][0]] ? MCAT[A.cats[0][0]][0].toLowerCase() : 'altro'} (${eur(A.cats[0][1])}): fissa un tetto per la prossima settimana.`);
+    if (!A.work) T.push('Nessun allenamento registrato: fissane due da 30 minuti, anche solo camminata veloce.');
+    if (A.habits != null && A.habits < 50) T.push('Le abitudini sono a metà: tienine una sola, la più facile, per tutta la settimana.');
+    if (!T.length) T.push('Settimana solida: tieni gli stessi orari e alza di poco l\'asticella su una cosa sola.');
+    return T.slice(0, 3);
+  },
+  html(A, B) {
+    const f = A.sum(A.focus), st = A.sum(A.steps), stDays = A.steps.filter(Boolean).length, lab = A.D.map(k => DOW_S[dowIdx(k)]);
+    const tile = (v, k, d, c) => `<div class="wk-t" style="--c:${c}"><b>${v}</b><span>${k}</span>${d || ''}</div>`;
+    const tiles = [
+      f || (B && B.sum(B.focus)) ? tile(fmtMin(f), 'di studio e focus', B ? this.delta(f, B.sum(B.focus)) : '', 'var(--orange)') : '',
+      A.tasks ? tile(A.tasks, 'promemoria fatti', B ? this.delta(A.tasks, B.tasks) : '', 'var(--accent)') : '',
+      st ? tile(st.toLocaleString('it-IT'), `passi${stDays ? ` · ${Math.round(st / stDays).toLocaleString('it-IT')} al giorno` : ''}`, B ? this.delta(st, B.sum(B.steps)) : '', 'var(--green)') : '',
+      A.work ? tile(A.work, A.work === 1 ? 'allenamento' : 'allenamenti', B ? this.delta(A.work, B.work) : '', 'var(--red)') : '',
+      A.dietOk != null ? tile(A.dietOk + '%', 'dieta seguita', '', 'var(--teal)') : '',
+      A.kcal.length ? tile(Math.round(A.kcal.reduce((s, x) => s + x.e, 0) / A.kcal.length).toLocaleString('it-IT'), `kcal al giorno · obiettivo ${Math.round(A.kcal[0].g).toLocaleString('it-IT')}`, '', 'var(--yellow)') : '',
+      A.weight ? tile(A.weight.kg.toLocaleString('it-IT') + ' kg', A.weight.d == null ? 'peso' : `${A.weight.d > 0 ? '+' : ''}${A.weight.d.toLocaleString('it-IT')} kg in una settimana`, '', 'var(--indigo)') : '',
+      A.spent || A.earned ? tile(eur(A.spent), 'spesi' + (A.earned ? ` · entrati ${eur(A.earned)}` : ''), B ? this.delta(A.spent, B.spent) : '', 'var(--pink)') : '',
+      A.quests ? tile(A.quests, A.quests === 1 ? 'side quest' : 'side quest completate', '', 'var(--purple)') : '',
+      A.habits != null ? tile(A.habits + '%', 'abitudini rispettate', '', 'var(--orange)') : '',
+      A.cooked ? tile(A.cooked, A.cooked === 1 ? 'ricetta cucinata' : 'ricette cucinate', '', 'var(--yellow)') : '',
+      A.xp ? tile('+' + A.xp, 'XP', '', 'var(--yellow)') : '',
+    ].filter(Boolean);
+    const hero = [f ? `${fmtMin(f)} di studio` : '', st ? `${st.toLocaleString('it-IT')} passi` : '', A.work ? `${A.work} allenament${A.work === 1 ? 'o' : 'i'}` : '', A.exams.length ? `${A.exams.length === 1 ? 'un esame' : A.exams.length + ' esami'} superat${A.exams.length === 1 ? 'o' : 'i'} 🎉` : ''].filter(Boolean);
+    return `<div class="wk-hero"><span class="wk-range">${parseD(A.from).getDate()} ${MON_S[parseD(A.from).getMonth()]} – ${parseD(A.to).getDate()} ${MON_S[parseD(A.to).getMonth()]}</span><h2>${hero.length ? 'Una settimana da ' + hero.slice(0, 3).join(', ') : 'La tua settimana'}</h2>${A.mood ? `<p>Umore medio: <b>${MOODS[Math.round(A.mood) - 1][0].toLowerCase()}</b>${A.best && Math.max(...A.focus) ? ` · giorno migliore: ${DOW[parseD(A.best).getDay()]}` : ''}</p>` : A.best && Math.max(...A.focus) ? `<p>Giorno migliore: ${DOW[parseD(A.best).getDay()]}</p>` : ''}</div>
+      ${tiles.length ? `<div class="wk-tiles">${tiles.join('')}</div>` : `<p class="muted">Questa settimana non c'è ancora molto da raccontare: usa Orbita qualche giorno e qui trovi il resoconto.</p>`}
+      <div class="wk-charts">
+        ${f ? `<div class="card"><div class="card-h"><h3>Studio al giorno</h3></div>${barChart(A.D.map((k, i) => ({ label: lab[i], v: A.focus[i], tip: `${relDay(k, true)}: ${fmtMin(A.focus[i])}` })), { unit: 'min', h: 150, w: 360, color: 'var(--orange)', hiLast: false })}</div>` : ''}
+        ${st ? `<div class="card"><div class="card-h"><h3>Passi al giorno</h3></div>${barChart(A.D.map((k, i) => ({ label: lab[i], v: A.steps[i], tip: `${relDay(k, true)}: ${A.steps[i].toLocaleString('it-IT')} passi` })), { unit: '', h: 150, w: 360, color: 'var(--green)', hiLast: false })}</div>` : ''}
+        ${A.spent ? `<div class="card"><div class="card-h"><h3>Spese al giorno</h3></div>${barChart(A.D.map((k, i) => ({ label: lab[i], v: Math.round(A.spendDay[i]), tip: `${relDay(k, true)}: ${eur(A.spendDay[i])}` })), { unit: '€', h: 150, w: 360, color: 'var(--pink)', hiLast: false })}</div>` : ''}
+      </div>
+      ${A.subj.length ? `<div class="section-h">Dove è andato lo studio</div><div class="card">${A.subj.slice(0, 6).map(r => `<div class="wk-bar"><span>${esc(r.n)}</span><i style="--w:${Math.round(r.m / A.subj[0].m * 100)}%;--c:${r.c || 'var(--accent)'}"></i><b class="tnum">${fmtMin(r.m)}</b></div>`).join('')}</div>` : ''}
+      ${A.cats.length ? `<div class="section-h">Dove sono andati i soldi</div><div class="card">${A.cats.slice(0, 5).map(([c, v]) => `<div class="wk-bar"><span>${(mcatOf(c) || MCAT.altro)[0]}</span><i style="--w:${Math.round(v / A.cats[0][1] * 100)}%;--c:${(mcatOf(c) || MCAT.altro)[1]}"></i><b class="tnum">${eur(v)}</b></div>`).join('')}</div>` : ''}
+      <div class="section-h">Per la prossima settimana</div><div class="card wk-tips" id="wkTips"><ul>${this.tips(A, B).map(t => `<li>${esc(t)}</li>`).join('')}</ul><button class="btn sm" id="wkAI" style="color:var(--purple)">${ico('spark', 'sm')}Consigli su misura con l'AI</button></div>
+      ${A.next.length || A.events ? `<div class="section-h">In arrivo</div><div class="list">${A.next.slice(0, 3).map(x => `<div class="row"><span class="tile-ico" style="background:var(--red)">${ico('grad')}</span><span class="grow"><div class="t">${esc(x.name)}</div><div class="s">${fmtLong(x.date)} · tra ${dayDiff(todayK(), x.date)} giorni</div></span></div>`).join('')}${A.events ? `<div class="row"><span class="tile-ico" style="background:var(--accent)">${ico('cal')}</span><span class="grow"><div class="t">${A.events} ${A.events === 1 ? 'evento' : 'eventi'} la prossima settimana</div></span></div>` : ''}</div>` : ''}`;
+  },
+  seen(from) { return ((S.profile.wkSeen) || '') >= from; },
+  open(off = 0) {
+    const { from } = this.range(off), A = this.data(from), B = this.data(addDK(from, -7));
+    const sh = openSheet({ title: 'La tua settimana', wide: true, left: { label: 'Chiudi' }, right: { label: off < 0 ? 'Più recente' : 'Settimana prima', act: s => { s.close(); this.open(off < 0 ? off + 1 : off - 1); } }, body: `<div class="wk">${this.html(A, B)}</div>`,
+      onMount: el => { try { wireCharts(el); } catch (_) {}
+        $('#wkAI', el).onclick = async e => { const btn = e.currentTarget, sample = await Cap.get('sample'); if (!sample) return aiUnavailable(); btn.disabled = true; btn.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
+          const facts = `studio ${A.sum(A.focus)} min (prima ${B.sum(B.focus)}), materie: ${A.subj.map(s => s.n + ' ' + s.m + ' min').join(', ') || '—'}; promemoria fatti ${A.tasks}; passi ${A.sum(A.steps)} (prima ${B.sum(B.steps)}); allenamenti ${A.work}; dieta seguita ${A.dietOk ?? '—'}%; kcal medie ${A.kcal.length ? Math.round(A.kcal.reduce((s, x) => s + x.e, 0) / A.kcal.length) : '—'} su obiettivo ${A.kcal.length ? Math.round(A.kcal[0].g) : '—'}; peso ${A.weight ? A.weight.kg + ' kg (' + (A.weight.d ?? 0) + ')' : '—'}; spesi ${Math.round(A.spent)} € (prima ${Math.round(B.spent)}), categorie ${A.cats.map(([c, v]) => c + ' ' + Math.round(v)).join(', ') || '—'}; abitudini ${A.habits ?? '—'}%; side quest ${A.quests}; prossimi esami ${A.next.map(x => x.name + ' il ' + x.date).join(', ') || 'nessuno'}`;
+          try { const r = await sample.json(`Sei il coach personale di uno studente universitario che lavora. Dati della sua settimana: ${facts}. Dai 3 consigli concreti e specifici per la prossima settimana (uno per riga, max 25 parole ciascuno, tono diretto e gentile, in italiano, con numeri precisi quando servono). Rispondi solo con un array JSON di 3 stringhe.`, { cache: false });
+            const L = (Array.isArray(r) ? r : []).map(String).filter(Boolean).slice(0, 3); if (L.length) $('#wkTips ul', el).innerHTML = L.map(t => `<li>${esc(t)}</li>`).join(''); btn.remove(); }
+          catch (err) { aiError(err); btn.disabled = false; btn.innerHTML = `${ico('spark', 'sm')}Riprova`; } };
+        if (!off) { S.profile.wkSeen = from; save('profile'); App.refresh(); } } });
+    return sh;
+  },
+};
+ACT.weekRecap = () => Week.open();
+TODAY_CARDS.week = 'La tua settimana';
+if (!TODAY_DEFAULT.includes('week')) TODAY_DEFAULT.splice(1, 0, 'week');
+TODAY_EXTRA.week = () => {
+  const now = new Date(), d = now.getDay(), h = now.getHours(); if (!((d === 0 && h >= 15) || (d === 1 && h < 14))) return '';
+  const { from } = Week.range(); if (Week.seen(from)) return ''; const A = Week.data(from), f = A.sum(A.focus), st = A.sum(A.steps);
+  if (!f && !st && !A.tasks && !A.spent) return '';
+  return `<section class="card span-6 wk-today" data-act="weekRecap" style="cursor:pointer"><span class="ck-big">📊</span><div class="grow" style="min-width:0"><b>La tua settimana è pronta</b><div class="muted" style="font-size:14px">${[f ? fmtMin(f) + ' di studio' : '', st ? st.toLocaleString('it-IT') + ' passi' : '', A.spent ? eur(A.spent) + ' spesi' : ''].filter(Boolean).join(' · ')} — e tre consigli per la prossima</div></div>${ico('right', 'sm chev')}</section>`;
+};
+{ const old = Alerts.list.bind(Alerts); Alerts.list = function (hours = 48) { const out = old(hours), now = Date.now();
+    for (let i = 0; i <= Math.ceil(hours / 24); i++) { const k = addDK(todayK(), i); if (parseD(k).getDay() !== 0 || S.profile.wkNotif === false) continue; const key = 'wk:' + k, at = this.at(k, '19:00'); if (!this.fired[key] && at >= now - 10 * 60e3 && at <= now + hours * 36e5) out.push({ key, at, title: '📊 La tua settimana è pronta', body: 'Studio, salute, soldi e side quest in un colpo d\'occhio, con tre consigli per la prossima', view: 'today', open: 'week:recap' }); }
+    return out; }; }
+{ const oO = Alerts.open && Alerts.open.bind(Alerts); if (oO) Alerts.open = function (d) { if (d && d.open === 'week:recap') { go('today'); setTimeout(() => Week.open(), 300); return; } return oO(d); }; }
+/* the Report page links to it */
+{ const V = VIEWS.report; if (V) { const oA = V.actions; V.actions = () => `<button class="btn sm" data-act="weekRecap">📊<span class="hide-narrow">La tua settimana</span></button>` + (oA ? oA() : ''); } }
+CMD_ACT.push(['La tua settimana', 'grid', () => Week.open()]);
+
+/* ---------------- Un evento di Orbita nel Calendario di iPhone ---------------- */
+{ const oE = editEvent; editEvent = function (id, preset, occK) { const r = oE.apply(this, arguments); const ev = id && S.events.find(x => x.id === id); if (!ev) return r;
+    const sh = Sheets[Sheets.length - 1]; if (!sh) return r; const host = $('.sheet-b', sh.el) || sh.el; if (host.querySelector('.ev-apple')) return r;
+    if (typeof Dav !== 'undefined' && Dav.connected() && Dav.ok()) return r; /* already mirrored to Apple Calendar */
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'btn plain ev-apple'; b.style.alignSelf = 'flex-start'; b.innerHTML = `${ico('cal', 'sm')}Aggiungi al Calendario di Apple`;
+    b.onclick = async () => { const ok = await saveFile(`${(ev.title || 'evento').replace(/[^\w\- àèéìòù]+/gi, '').trim().slice(0, 40) || 'evento'}.ics`, buildICS({ events: [ev] }), 'text/calendar'); if (ok !== false) Island.toast({ icon: 'cal', t: 'Apri il file', s: 'Su iPhone e iPad tocca “Aggiungi” per metterlo nel Calendario', ms: 3200 }); };
+    host.appendChild(b); return r; }; }
+
+/* =========================================================
+   POSIZIONE AUTOMATICA — il meteo (e tutto ciò che dipende da
+   dove sei) segue il dispositivo: GPS quando c'è il permesso,
+   altrimenti la posizione approssimativa della connessione.
+   Il nome del posto arriva da solo. Casa si impara da sola:
+   dove il dispositivo sta di notte per qualche giorno → te lo
+   propongo come indirizzo di casa (per gli orari di partenza).
+   La città scritta a mano resta solo come scelta esplicita.
+   ========================================================= */
+const Here = {
+  P() { return S.profile; },
+  mode() { return this.P().wxMode || 'auto'; },
+  last() { return this.P().here || null; },
+  fresh(g, ms = 20 * 60e3) { return g && Date.now() - (g.at || 0) < ms; },
+  async perm() { try { const p = await navigator.permissions.query({ name: 'geolocation' }); return p.state; } catch (_) { return 'prompt'; } },
+  /** precise position when allowed (asks once), otherwise null */
+  async gps(ask) {
+    if (!navigator.geolocation || (window.orbitaDesktop && !this.P().deskGps)) return null;
+    const st = await this.perm(); if (st === 'denied') return null; if (st === 'prompt' && !ask && this.P().gpsAsked) return null;
+    if (st === 'prompt') { this.P().gpsAsked = 1; save('profile'); }
+    try { const g = await Promise.race([geoHere(), new Promise((_, ko) => setTimeout(() => ko(new Error('timeout')), 16000))]); return { lat: g.lat, lng: g.lng, acc: g.acc, src: 'gps' }; } catch (_) { return null; }
+  },
+  async ip() {
+    try { const r = await (await fetch('https://ipwho.is/?fields=success,city,region,latitude,longitude')).json(); if (r && r.success !== false && r.latitude != null) return { lat: r.latitude, lng: r.longitude, acc: 15000, src: 'ip', name: r.city || '' }; } catch (_) {}
+    return null;
+  },
+  /** coordinates → "Cassino", "Roma · Trastevere"… */
+  async name(lat, lng) {
+    try { const r = await (await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=it`)).json(); const n = r.city || r.locality || r.principalSubdivision; if (n) return { name: n, region: r.principalSubdivision || '', country: r.countryCode || '' }; } catch (_) {}
+    try { const r = await (await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=12&accept-language=it`)).json(); const a = r.address || {}; const n = a.city || a.town || a.village || a.municipality || a.county; if (n) return { name: n, region: a.state || '', country: (a.country_code || '').toUpperCase() }; } catch (_) {}
+    return null;
+  },
+  /** where am I: GPS → connection → last known */
+  async get({ ask = false, force = false } = {}) {
+    const L = this.last(); if (!force && this.fresh(L)) return L;
+    let g = await this.gps(ask) || await this.ip(); if (!g) return L;
+    const moved = !L || dist(L, g) > 2000;
+    if (!moved && L && L.name) g.name = L.name, g.region = L.region;
+    else if (g.src === 'gps' || !g.name) { const n = await this.name(g.lat, g.lng); if (n) Object.assign(g, n); }
+    g.name ||= (L && dist(L, g) < 15000 && L.name) || 'La tua zona'; g.at = Date.now();
+    this.P().here = g; save('profile'); this.learnHome(g); return g;
+  },
+  /* ---------- casa, imparata ---------- */
+  learnHome(g) {
+    if (g.src !== 'gps' || (g.acc || 0) > 250) return; const now = new Date(Date.now()), h = now.getHours(); if (!(h >= 22 || h < 7)) return;
+    const P = this.P(); if (P.home && P.home.lat != null && !P.home.auto) return;
+    const k = dkey(h < 7 ? new Date(+now - 864e5) : now), N = (P.nightPts ||= []).filter(p => p.k !== k && dayDiff(p.k, k) < 21); N.push({ k, lat: +g.lat.toFixed(4), lng: +g.lng.toFixed(4) }); P.nightPts = N.slice(-14);
+    const near = N.filter(p => dist(p, g) < 300); save('profile');
+    if (near.length >= 3 && !P.homeAsked) { P.homeAsked = Date.now(); save('profile'); this.proposeHome({ lat: near.reduce((s, p) => s + p.lat, 0) / near.length, lng: near.reduce((s, p) => s + p.lng, 0) / near.length }); }
+  },
+  async addr(lat, lng) {
+    try { const r = await (await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1&accept-language=it`)).json(); const a = r.address || {}; const street = [a.road, a.house_number].filter(Boolean).join(' '), town = a.city || a.town || a.village || a.municipality || ''; if (street || town) return [street, town].filter(Boolean).join(', '); } catch (_) {}
+    const n = await this.name(lat, lng); return n ? n.name : '';
+  },
+  async proposeHome(c) {
+    const addr = await this.addr(c.lat, c.lng);
+    Island.toast({ icon: 'pin', c: 'var(--accent)', t: 'È qui che abiti?', s: (addr || 'Questa posizione') + ' · la uso per dirti quando partire', action: { label: 'Sì, è casa', fn: () => { S.profile.home = { addr: addr || 'Casa', lat: +c.lat.toFixed(6), lng: +c.lng.toFixed(6), auto: true }; save('profile'); Island.toast({ icon: 'pin', c: 'var(--green)', t: 'Casa salvata', s: 'La cambi quando vuoi in Impostazioni › Posizione', ms: 2400 }); } }, ms: 9000 });
+  },
+  async setHomeHere() { const g = await this.gps(true); if (!g) { Island.toast({ icon: 'pin', c: 'var(--orange)', t: 'Posizione non disponibile', s: 'Permetti la posizione a Orbita nelle impostazioni del dispositivo', ms: 3200 }); return false; } const addr = await this.addr(g.lat, g.lng); S.profile.home = { addr: addr || 'Casa', lat: g.lat, lng: g.lng, auto: true }; save('profile'); Island.toast({ icon: 'pin', c: 'var(--green)', t: 'Casa salvata', s: addr || '', ms: 2200 }); return true; },
+};
+/* metres between two {lat,lng|lon} */
+function dist(a, b) { const R = 6371e3, r = x => x * Math.PI / 180, la1 = r(a.lat), la2 = r(b.lat), dl = r((b.lng ?? b.lon) - (a.lng ?? a.lon)), dp = la2 - la1; const h = Math.sin(dp / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dl / 2) ** 2; return 2 * R * Math.asin(Math.min(1, Math.sqrt(h))); }
+
+/* the weather follows you, unless you chose a fixed city */
+{ const oG = Weather.geo.bind(Weather);
+  Weather.geo = async function () {
+    if (Here.mode() === 'manual' && (S.profile.city || '').trim()) return oG();
+    const g = await Here.get({ ask: !S.profile.gpsAsked }); if (!g) throw new Error('Posizione non disponibile: permetti la posizione oppure scegli una città in Impostazioni › Posizione');
+    return { q: '', auto: true, src: g.src, lat: g.lat, lon: g.lng, name: g.name };
+  }; }
+/* moved a lot (a trip, back home)? refresh when the app comes back */
+document.addEventListener('visibilitychange', () => { if (document.hidden || !Weather.ok() || Here.mode() === 'manual') return; const L = Here.last(); if (L && Here.fresh(L, 20 * 60e3)) return; Here.get({ force: true }).then(g => { if (g && Weather.now && (!Weather.now.city || Weather.now.city !== g.name || Date.now() - Weather.at > 30 * 60e3)) { Weather.now = null; Weather.load(true); } }).catch(() => {}); });
+/* trips and routes without a typed home: offer "use where I am" */
+ACT.homeHere = async () => { if (await Here.setHomeHere()) App.refresh(); };
+
+/* ---------- Impostazioni › Posizione ---------- */
+Promise.resolve().then(() => { const V = VIEWS.settings; if (V) {
+  const oR = V.render, oM = V.mount;
+  V.render = function () { let h = oR.apply(this, arguments); if (IN_CLAUDE) return h;
+    const P = S.profile, L = Here.last(), man = Here.mode() === 'manual', H = P.home;
+    const sec = `<div class="section-h">Posizione</div><div class="list flat" id="plcBox">
+      <div class="row"><span class="tile-ico" style="background:var(--accent)">${ico('pin')}</span><span class="grow" style="min-width:0"><div class="t">Meteo e luoghi</div><div class="s">${man ? 'Città fissa: ' + esc(P.city || '—') : L ? `Automatica · ${esc(L.name || 'la tua zona')}${L.src === 'gps' ? ' (posizione precisa)' : ' (dalla connessione, approssimativa)'}` : 'Automatica'}</div></span>${seg('plcM', [['auto', 'Automatica'], ['manual', 'Città fissa']], man ? 'manual' : 'auto')}</div>
+      <div class="row" id="plcCityRow" ${man ? '' : 'hidden'}><span class="t" style="width:120px">Città</span><input class="input" id="plcCity" value="${esc(P.city || '')}" placeholder="Es. Cassino" style="flex:1"></div>
+      ${!man && (!L || L.src !== 'gps') && !window.orbitaDesktop ? `<button class="row" id="plcGps"><span class="tile-ico" style="background:var(--green)">${ico('pin')}</span><span class="grow"><div class="t">Usa la posizione precisa</div><div class="s">Il meteo del posto esatto in cui sei, anche in trasferta</div></span>${ico('right', 'sm chev')}</button>` : ''}
+      <div class="row"><span class="tile-ico" style="background:#A2845E">${ico('grid')}</span><span class="grow" style="min-width:0"><div class="t">Casa</div><div class="s">${H && (H.addr || H.lat != null) ? esc(H.addr || 'Posizione salvata') + (H.auto ? ' · riconosciuta in automatico' : '') : 'La riconosco da sola dopo qualche notte, oppure impostala adesso'}</div></span><button class="btn sm" id="plcHome">${ico('pin', 'sm')}Sono a casa</button></div></div>`;
+    h = h.replace(/<div class="section-h">Meteo<\/div><div class="list flat">[\s\S]*?<\/div><\/div>/, sec);
+    if (!h.includes('id="plcBox"')) h = h.replace('<div class="section-h">Università</div>', sec + '<div class="section-h">Università</div>');
+    return h; };
+  V.mount = function (root) { const r = oM && oM.apply(this, arguments); if (IN_CLAUDE) return r; const box = $('#plcBox', root); if (!box) return r;
+    wireSeg(box, 'plcM', v => { S.profile.wxMode = v; save('profile'); $('#plcCityRow', box).hidden = v !== 'manual'; if (v === 'manual') $('#plcCity', box).focus(); else { Weather.now = null; Weather.load(true).then(() => App.render()); } });
+    const c = $('#plcCity', box); if (c) c.onchange = () => { S.profile.city = c.value.trim(); S.profile.cityGeo = null; save('profile'); Weather.now = null; Weather.load(true).then(() => App.render()); };
+    const gp = $('#plcGps', box); if (gp) gp.onclick = async () => { gp.disabled = true; const g = await Here.gps(true); if (g) { S.profile.here = null; await Here.get({ force: true }); Weather.now = null; await Weather.load(true); App.render(); Island.toast({ icon: 'pin', c: 'var(--green)', t: 'Posizione precisa attiva', s: (Here.last() || {}).name || '', ms: 2000 }); } else { gp.disabled = false; Island.toast({ icon: 'pin', c: 'var(--orange)', t: 'Posizione non permessa', s: 'Attivala per Orbita nelle impostazioni del browser o del dispositivo', ms: 3400 }); } };
+    $('#plcHome', box).onclick = async () => { if (await Here.setHomeHere()) App.render(); };
+    return r; };
+  if (UI.view === 'settings') App.render();
+} });
+
+/* =========================================================
+   ANDROID — quando Orbita gira nell'app per Android, usa il
+   telefono davvero: promemoria come notifiche di sistema (anche
+   ad app chiusa), file salvati in Download, tasto indietro che
+   chiude prima le schede, barre di sistema del colore del tema.
+   ========================================================= */
+const AND = window.OrbitaAndroid || null;
+if (AND) {
+  document.documentElement.classList.add('is-android');
+  /* reminders → system notifications, scheduled by the app */
+  Alerts.sync = function () { clearTimeout(this.st); this.st = setTimeout(() => { try { const on = S.profile.alertsOn !== false; AND.schedule(JSON.stringify(on ? this.list(48).map(a => ({ key: a.key, at: a.at, title: a.title, body: a.body, data: JSON.stringify({ key: a.key, open: a.open || null, task: a.task || null, view: a.view || null }) })) : [])); } catch (_) {} }, 400); };
+  window.__androidOpen = s => { try { const d = typeof s === 'string' ? JSON.parse(s) : s; if (!d) return; if (d.key) Alerts.mark(d.key); Alerts.open(d); } catch (_) {} };
+  /* files → Download folder */
+  { const oS = saveFile; saveFile = async function (name, data, type) {
+      try { const blob = data instanceof Blob ? data : new Blob([data], { type }); const b64 = await new Promise((ok, ko) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(',')[1] || ''); r.onerror = ko; r.readAsDataURL(blob); });
+        const ok = AND.save(String(name), b64, blob.type || type || 'application/octet-stream'); if (ok) Island.toast({ icon: 'download', c: 'var(--green)', t: 'Salvato in Download', s: name, action: { label: 'Apri', fn: () => AND.open(String(name)) }, ms: 3000 }); return !!ok; }
+      catch (_) { return oS.apply(this, arguments); } }; }
+  /* back button: close the top sheet, then go back to Today, then leave */
+  window.__androidBack = () => { try { if (Sheets.length) { Sheets[Sheets.length - 1].close(); return true; } if (UI.view !== 'today') { go('today'); return true; } } catch (_) {} return false; };
+  /* status and navigation bars follow the theme */
+  { const paint = () => { try { const dark = document.documentElement.getAttribute('data-theme') === 'dark' || (!document.documentElement.getAttribute('data-theme') && matchMedia('(prefers-color-scheme: dark)').matches); AND.bars(dark); } catch (_) {} };
+    const oT = applyTheme; applyTheme = function () { const r = oT.apply(this, arguments); paint(); return r; };
+    try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', paint); } catch (_) {} setTimeout(paint, 0); }
+  /* links outside the app open in the browser (the app handles it); the app version for diagnostics */
+  try { UI.android = JSON.parse(AND.info()); } catch (_) { UI.android = {}; }
+  setTimeout(() => { try { Alerts.sync(); } catch (_) {} }, 1500);
+}
+
+/* =========================================================
    ASSISTANT — "Segretario": Claude with page tools
    ========================================================= */
 const CAT_KEYS = Object.keys(CATS);
@@ -16966,8 +20205,9 @@ function boot() {
   Timer.restore();
   Game.checkBadges();
   App.render(true);
+  requestAnimationFrame(() => { try { window.__splashHide && window.__splashHide(); } catch (_) {} });
   Island.live();
-  Store.connect();
+  Store.heavyReady.then(n => { if (n && /^(boards|docs|notes)$/.test(UI.view)) App.render(); }).catch(() => {}).then(() => Store.connect());
   applyZoom(); Trophies.check(!S.game.ach); Shared.init();
   if (!IN_CLAUDE) { GAuth.load(); MAuth.load(); setTimeout(() => { Ext.load(); Mail.load(); Weather.load(); }, 600); }
   if (IN_CLAUDE) Spot.init(); else { SPA.load(); SPA.handleRedirect().then(() => { if (SPA.connected()) { SPA.start(); App.refreshChrome(); } if (UI.view === 'focus' || UI.view === 'settings') App.render(); }); }

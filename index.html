@@ -1,4 +1,4 @@
-<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610181010"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="orbita-build" content="202610212145"><meta name="orbita-shell" content="1"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" href="icon-192.png"><script src="config.js"></script><meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"></head><body><title>Orbita</title>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Orbita">
@@ -1662,7 +1662,100 @@ body:has(.sheet-wrap) .vc-fab,body:has(.wr) .vc-fab,body:has(.cmd) .vc-fab{opaci
 .soc-prev{white-space:pre-wrap;margin-top:4px}.soc-ul{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
 .soc-behind{display:flex;flex-direction:column;gap:6px;margin-top:8px;padding-top:10px;border-top:.5px solid var(--sep);font-size:13.5px;color:var(--label-2)}.soc-behind .btn{align-self:flex-start}
 @media (max-width:640px){.soc-acc{width:220px}.soc-tools{grid-template-columns:1fr 1fr}.soc-week{grid-template-columns:repeat(7,128px)}}
+
+.hd-box{display:flex;flex-direction:column;gap:8px}.hd-r{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:12px;background:var(--cell)}.hd-r>span{font-size:17px;line-height:1.3}.hd-r .t{font-weight:600;font-size:14.5px}.hd-r .s{font-size:13px;color:var(--label-2);margin-top:2px}
+
+/* cucina collegata */
+.kt-tags{display:inline-flex;flex-wrap:wrap;gap:4px;margin-left:6px;vertical-align:middle}.kt-b{font-size:11px;font-weight:600;padding:2px 7px;border-radius:999px;background:var(--fill);color:var(--label-2);white-space:nowrap}.kt-b.ok{background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}.kt-b.no{background:color-mix(in srgb,var(--orange) 16%,transparent);color:var(--orange)}.kt-b.have{background:color-mix(in srgb,var(--blue) 14%,transparent);color:var(--blue)}
+.kt-k{font-size:11px;color:var(--label-3);white-space:nowrap}
+.kt-cov{display:flex;flex-direction:column;gap:6px;margin:6px 0 4px;background:color-mix(in srgb,var(--green) 9%,var(--surface))}.kt-cov-h{display:flex;align-items:center;gap:12px}.kt-cov-h b{display:block;font-size:15px}.kt-cov-h small{display:block;font-size:13px;margin-top:2px}
+.kt-sw{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 4px 2px;font-size:13.5px}
+.kt-st{display:inline-flex;align-items:center;margin-left:6px;font-size:12px;font-weight:600;padding:1px 7px;border-radius:999px;vertical-align:middle;white-space:nowrap}.kt-st.have{background:color-mix(in srgb,var(--green) 14%,transparent)}.kt-st.list{background:color-mix(in srgb,var(--blue) 14%,transparent)}.kt-st.miss{background:color-mix(in srgb,var(--orange) 16%,transparent);color:var(--orange);cursor:pointer}
+.kt-miss,.kt-soon{font-size:13.5px;margin-top:8px;color:var(--label-2);display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.kt-left{font-size:12px;color:var(--label-3)}
+/* ---------- cosa cucino ---------- */
+.ck-ctxs{display:flex;flex-wrap:wrap;gap:6px}
+.ck-ctx{font-size:13px;padding:5px 10px;border-radius:999px;background:var(--fill);color:var(--label-2)}
+.ck-ctx.warn{background:color-mix(in srgb,var(--orange) 15%,transparent);color:var(--orange);font-weight:600}
+.ck-ppl{display:inline-flex;align-items:center;gap:6px;margin-left:auto}.ck-ppl b{font-size:14px;min-width:78px;text-align:center;font-weight:600}.ck-ppl .icon-btn{width:30px;height:30px;font-size:18px;line-height:1}
+.ck-list{display:flex;flex-direction:column;gap:10px}
+.ck-card{display:flex;flex-direction:column;gap:10px;padding:14px 16px}
+.ck-top{display:flex;align-items:center;gap:12px}.ck-top b{font-size:16.5px;letter-spacing:-.01em}
+.ck-why{margin:0;font-size:14px;color:var(--label-2)}
+.ck-ing{display:flex;flex-wrap:wrap;gap:6px}
+.ck-i{font-size:13px;padding:4px 9px;border-radius:999px;background:var(--fill);white-space:nowrap}.ck-i small{color:var(--label-3);font-size:11.5px}
+.ck-i.have{background:color-mix(in srgb,var(--green) 13%,transparent)}.ck-i.list{background:color-mix(in srgb,var(--blue) 13%,transparent)}.ck-i.miss{background:color-mix(in srgb,var(--orange) 14%,transparent);color:color-mix(in srgb,var(--orange) 80%,var(--label))}
+.ck-act{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.ck-steps{margin:0;padding-left:22px;display:flex;flex-direction:column;gap:8px;font-size:15px;line-height:1.45}
+.ck-today,.wk-today{display:flex;align-items:center;gap:14px}.ck-big{font-size:34px;line-height:1;flex:none}
+.rc-stock{display:flex;flex-direction:column;gap:8px}
+/* ---------- la tua settimana ---------- */
+.wk{display:flex;flex-direction:column;gap:14px}
+.wk-hero{padding:18px 20px;border-radius:var(--r-lg);color:#fff;background:linear-gradient(135deg,#5E5CE6 0%,#BF5AF2 55%,#FF6482 100%);box-shadow:var(--shadow-md)}
+.wk-hero h2{margin:4px 0 6px;font-size:23px;line-height:1.2;letter-spacing:-.02em;font-weight:700}.wk-hero p{margin:0;font-size:14.5px;opacity:.92}
+.wk-range{font-size:12.5px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;opacity:.85}
+.wk-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.wk-t{position:relative;display:flex;flex-direction:column;gap:2px;padding:12px 14px 12px 16px;border-radius:var(--r-md);background:var(--cell);box-shadow:var(--shadow-sm);overflow:hidden}
+.wk-t::before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:4px;border-radius:0 3px 3px 0;background:var(--c)}
+.wk-t b{font-size:21px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}.wk-t span{font-size:13px;color:var(--label-2);line-height:1.3}
+.wk-d{font-size:12px;font-weight:700;color:var(--label-3)}.wk-d.up{color:var(--green)}.wk-d.down{color:var(--red)}
+.wk-charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}.wk-charts .card{padding:12px 14px}
+.wk-bar{display:grid;grid-template-columns:minmax(0,130px) 1fr auto;gap:10px;align-items:center;padding:5px 0;font-size:14px}.wk-bar span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wk-bar i{height:10px;border-radius:5px;background:var(--fill);position:relative;overflow:hidden}.wk-bar i::after{content:"";position:absolute;inset:0;width:var(--w);border-radius:5px;background:var(--c)}
+.wk-tips ul{margin:0 0 10px;padding-left:20px;display:flex;flex-direction:column;gap:8px;font-size:15px;line-height:1.45}
+@media (max-width:640px){.wk-hero h2{font-size:20px}.wk-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.ck-ppl{margin-left:0}}
 </style>
+<div id="splash" aria-hidden="true">
+<style>
+#splash{position:fixed;inset:0;z-index:2147483000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:#F2F2F7;color:#1c1c1e;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI Variable Display","Segoe UI",Inter,Roboto,system-ui,sans-serif;-webkit-font-smoothing:antialiased;transition:opacity .45s cubic-bezier(.2,.8,.2,1),visibility 0s .45s}
+#splash.dark{background:#000;color:#f5f5f7}
+#splash .sp-ic{width:116px;height:116px;filter:drop-shadow(0 18px 34px rgba(60,70,200,.32)) drop-shadow(0 3px 8px rgba(0,0,0,.12));animation:spIn .7s cubic-bezier(.2,.9,.25,1.15) both;transition:transform .5s cubic-bezier(.2,.8,.2,1)}
+#splash.dark .sp-ic{filter:drop-shadow(0 18px 40px rgba(94,92,230,.45))}
+#splash .sp-wrap{position:relative;display:grid;place-items:center}
+#splash .sp-halo{position:absolute;width:170px;height:170px;border-radius:50%;background:radial-gradient(circle,rgba(94,120,255,.34),rgba(94,120,255,0) 68%);animation:spHalo 2.2s .4s ease-in-out infinite both;will-change:transform,opacity}
+#splash.dark .sp-halo{background:radial-gradient(circle,rgba(120,110,255,.42),rgba(120,110,255,0) 68%)}
+#splash .sp-name{font-size:30px;font-weight:700;letter-spacing:-.025em;animation:spUp .6s .18s cubic-bezier(.2,.8,.2,1) both}
+#splash .sp-hi{font-size:15.5px;font-weight:500;opacity:.55;min-height:20px;margin-top:-10px;animation:spUp .6s .32s cubic-bezier(.2,.8,.2,1) both}
+#splash.out{opacity:0;visibility:hidden;pointer-events:none}
+#splash.out .sp-ic{transform:scale(1.16)}
+@keyframes spIn{from{opacity:0;transform:scale(.72)}to{opacity:1;transform:none}}
+@keyframes spUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes spHalo{0%,100%{opacity:.55;transform:scale(.86)}50%{opacity:1;transform:scale(1.08)}}
+.app.app-enter{animation:appEnter .55s cubic-bezier(.2,.8,.2,1) both}
+@keyframes appEnter{from{opacity:0;transform:scale(.985)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){#splash *,.app.app-enter{animation:none!important;transition:none!important}}
+</style>
+<div class="sp-wrap"><span class="sp-halo"></span><svg class="sp-ic" viewBox="0 0 120 120">
+  <defs>
+    <linearGradient id="spBg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2E8FFF"/><stop offset=".55" stop-color="#3D63E8"/><stop offset="1" stop-color="#5B3FD4"/></linearGradient>
+    <radialGradient id="spSph" cx=".36" cy=".3" r=".85"><stop offset="0" stop-color="#ffffff"/><stop offset=".55" stop-color="#DADDF6"/><stop offset="1" stop-color="#8C8FDA"/></radialGradient>
+    <radialGradient id="spMoon" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#FFF27A"/><stop offset="1" stop-color="#FFC400"/></radialGradient>
+    <radialGradient id="spGlow"><stop offset=".45" stop-color="#FFE14D" stop-opacity=".55"/><stop offset="1" stop-color="#FFE14D" stop-opacity="0"/></radialGradient>
+    <mask id="spMask" maskUnits="userSpaceOnUse" x="-20" y="-20" width="160" height="160"><rect x="-20" y="-20" width="160" height="160" fill="#fff"/><path d="M33.5 62 A26.5 26.5 0 0 1 86.5 62 Z" fill="#000"/></mask>
+  </defs>
+  <rect width="120" height="120" rx="27" fill="url(#spBg)"/>
+  <circle cx="60" cy="62" r="26" fill="url(#spSph)"/>
+  <g transform="rotate(-22 60 62)" mask="url(#spMask)">
+    <ellipse cx="60" cy="62" rx="46" ry="15.5" fill="none" stroke="#fff" stroke-opacity=".94" stroke-width="3.4" pathLength="200"/>
+    <g id="spMoonG"><circle r="11" fill="url(#spGlow)"/><circle r="6.2" fill="url(#spMoon)"/>
+      <animateMotion id="spMove" dur="2.6s" repeatCount="indefinite" begin="0s" path="M106,62 A46,15.5 0 1,1 14,62 A46,15.5 0 1,1 106,62" calcMode="paced"/></g>
+  </g>
+</svg></div>
+<div class="sp-name">Orbita</div>
+<div class="sp-hi" id="spHi"></div>
+<script>
+(function(){var s=document.getElementById('splash'),p={};try{p=JSON.parse(localStorage.getItem('orbita.sp')||'{}')}catch(e){}
+var dark=p.t==='dark'||(p.t!=='light'&&window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches);if(dark)s.className='dark';
+var h=new Date().getHours(),g=h<5?'Buonanotte':h<13?'Buongiorno':h<18?'Buon pomeriggio':'Buonasera';document.getElementById('spHi').textContent=p.n?g+', '+p.n:g;
+var rm=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches,m=document.getElementById('spMove');
+if(rm&&m){m.parentNode.removeChild(m);document.getElementById('spMoonG').setAttribute('transform','translate(100,55)');}
+var t0=Date.now(),seen=false;try{seen=sessionStorage.getItem('orbita.spSeen')==='1';sessionStorage.setItem('orbita.spSeen','1')}catch(e){}
+var min=rm?0:seen?250:900,done=false;
+window.__splashHide=function(){if(done)return;done=true;var w=Math.max(0,min-(Date.now()-t0));setTimeout(function(){var a=document.getElementById('app');if(a&&!rm){a.classList.add('app-enter');setTimeout(function(){a.classList.remove('app-enter')},700);}s.classList.add('out');setTimeout(function(){if(s.parentNode)s.parentNode.removeChild(s)},600);},w);};
+setTimeout(function(){window.__splashHide()},12000);
+}())
+</script>
+</div>
 <div class="app" id="app">
   <aside class="sidebar" id="sidebar" aria-label="Navigazione"></aside>
   <main class="main">
@@ -1763,7 +1856,7 @@ body:has(.sheet-wrap) .vc-fab,body:has(.wr) .vc-fab,body:has(.cmd) .vc-fab{opaci
     <symbol id="i-bank" viewBox="0 0 24 24"><path d="M3.5 9.5L12 4l8.5 5.5zM5.5 10v7M10 10v7M14 10v7M18.5 10v7M3.5 20h17"/></symbol>
   </defs>
 </svg>
-<script src="app.js?v=202610181010"></script>
+<script src="app.js?v=202610212145"></script>
 <script id="orbita-motion">
 (()=>{
 const RM=matchMedia('(prefers-reduced-motion: reduce)'), FINE=matchMedia('(hover:hover) and (pointer:fine)');
