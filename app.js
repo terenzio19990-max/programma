@@ -1080,8 +1080,9 @@ function taskRow(t) {
 ACT.toggleTask = el => {
   const t = S.tasks.find(x => x.id === el.dataset.id); if (!t) return;
   t.done = !t.done; t.doneAt = t.done ? Date.now() : null;
-  el.classList.toggle('on', t.done);
-  el.closest('.row')?.classList.toggle('task-done', t.done);
+  if (el.classList) el.classList.toggle('on', t.done);
+  if (el.closest) el.closest('.row')?.classList.toggle('task-done', t.done);
+  if (!el.classList) App.refresh();
   save('tasks');
   if (t.done) { Game.bump('tasks'); Sound.done(); Game.add(PRIO_XP[t.prio || 0], 'Promemoria completato', { icon: 'check' }); }
   else { Game.bump('tasks', -1); Game.add(-PRIO_XP[t.prio || 0], 'Promemoria riaperto', { silent: true }); }
@@ -5110,7 +5111,7 @@ const WebAI = {
     return p === 'gemini' ? { 'x-goog-api-key': k, 'Content-Type': 'application/json' } : { Authorization: 'Bearer ' + k, 'Content-Type': 'application/json', ...(p === 'openrouter' ? { 'X-Title': 'Orbita' } : {}), ...(p === 'anthropic' ? { 'x-api-key': k, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' } : {}) }; },
   /* OpenAI-style request ⇄ Gemini's own API (the one that always works from a browser) */
   toGem(body) { const sys = [], contents = [], names = {};
-    const parts = c => typeof c === 'string' ? [{ text: c }] : (c || []).map(x => x.type === 'text' ? { text: x.text } : x.type === 'image_url' ? (u => { const m = /^data:([^;]+);base64,(.*)$/.exec(u || ''); return m ? { inline_data: { mime_type: m[1], data: m[2] } } : { text: '' }; })(x.image_url && x.image_url.url) : { text: '' });
+    const parts = c => typeof c === 'string' ? [{ text: c }] : (c || []).map(x => x.type === 'text' ? { text: x.text } : x.type === 'image_url' ? (u => { const m = /^data:([^;]+);base64,(.*)$/.exec(u || ''); return m ? { inline_data: { mime_type: m[1], data: m[2] } } : { text: '' }; })(x.image_url && x.image_url.url) : x.type === 'input_audio' && x.input_audio ? { inline_data: { mime_type: 'audio/' + (x.input_audio.format || 'wav'), data: x.input_audio.data } } : { text: '' });
     for (const m of body.messages || []) {
       if (m.role === 'system') { sys.push(...parts(m.content)); continue; }
       if (m.role === 'assistant') { if (m._g) { contents.push({ role: 'model', parts: m._g }); (m.tool_calls || []).forEach(tc => names[tc.id] = tc.function.name); continue; } const P = m.content ? parts(m.content) : []; for (const tc of m.tool_calls || []) { names[tc.id] = tc.function.name; let a = {}; try { a = JSON.parse(tc.function.arguments || '{}'); } catch (_) {} P.push({ functionCall: { name: tc.function.name, args: a } }); } contents.push({ role: 'model', parts: P.length ? P : [{ text: '' }] }); continue; }
@@ -13611,7 +13612,8 @@ function voiceSheet() { let rec = null, txt = '', fin = '', done = false;
   if (Voice.can()) { try { const SR = window.SpeechRecognition || window.webkitSpeechRecognition; rec = new SR(); rec.lang = 'it-IT'; rec.interimResults = true; rec.continuous = false; O.classList.add('on');
       rec.onresult = e => { let it = ''; for (let i = e.resultIndex; i < e.results.length; i++) { if (e.results[i].isFinal) fin += e.results[i][0].transcript; else it += e.results[i][0].transcript; } txt = (fin + it).trim(); T.textContent = txt || 'Ti ascolto…'; };
       rec.onerror = e => { O.classList.remove('on'); if (e.error === 'not-allowed') T.textContent = 'Consenti il microfono, oppure scrivi qui sotto'; else if (e.error === 'no-speech') T.textContent = 'Non ho sentito niente: tocca il cerchio e riprova'; };
-      rec.onend = () => { O.classList.remove('on'); if (!done && (fin || txt).trim()) run((fin || txt).trim()); };
+      rec.onaudioend = () => { if (rec && rec.ai && !done) { O.classList.remove('on'); O.classList.add('busy'); T.textContent = 'Sto capendo…'; } };
+      rec.onend = () => { O.classList.remove('on', 'busy'); if (!done && (fin || txt).trim()) run((fin || txt).trim()); };
       O.onclick = () => { if (O.classList.contains('on')) { try { rec.stop(); } catch (_) {} return; } fin = txt = ''; done = false; try { rec.start(); O.classList.add('on'); T.textContent = 'Ti ascolto…'; } catch (_) {} };
       rec.start(); } catch (_) { O.classList.remove('on'); T.textContent = 'Microfono non disponibile: scrivi qui sotto'; } }
   else setTimeout(() => $('#vcI', el).focus(), 80);
@@ -13758,6 +13760,7 @@ const CHM = {
   focus: ['Ore di studio / focus', '⏱️', 'h', k => Math.round((S.focuslog || []).filter(f => dkey(new Date(f.t)) === k).reduce((s, f) => s + (+f.min || 0), 0) / 6) / 10],
   tasks: ['Cose fatte', '✅', '', k => S.tasks.filter(t => t.done && t.doneAt && dkey(new Date(t.doneAt)) === k).length],
   water: ['Acqua bevuta', '💧', 'ml', k => +((S.health.days || {})[k] || {}).water || 0],
+  xp: ['XP delle lingue', '🦉', 'XP', k => (S.langs || []).reduce((t, l) => t + (+((l.xpDays || {})[k]) || 0), 0)],
   quit: ['Giorni senza…', '💪', 'giorni', null],
 };
 const Chal = {
@@ -13768,16 +13771,16 @@ const Chal = {
   board(sp) { const v = sp.v || {}, c = v.ch || {}, ppl = [sp.owner_email, ...(sp.members || [])].filter((x, i, a) => x && a.indexOf(x) === i); return ppl.map(e => ({ e, n: (v.names || {})[e] || e.split('@')[0], t: this.total(v, c, e), seen: (v.scores || {})[e] ? (v.scores[e].at || 0) : 0 })).sort((a, b) => b.t - a.t); },
   fmt(c, n) { const M = CHM[c.metric] || CHM.steps; return `${(Math.round(n * 10) / 10).toLocaleString('it-IT')}${M[2] ? ' ' + M[2] : ''}`; },
   /** send my numbers (only the days that changed) */
-  async push(force) { if (!Share.ready()) return; const me = Share.email(); for (const sp of this.list()) { const c = (sp.v || {}).ch; if (!c) continue; const mine = this.mine(c), cur = ((sp.v.scores || {})[me]) || {}, changed = Object.entries(mine).some(([k, x]) => cur[k] !== x); if (!changed && !force && Date.now() - (cur.at || 0) < 6 * 36e5) continue;
+  async push(force) { if (!Share.ready()) return; const me = Share.email(); for (const sp of this.list()) { const c = (sp.v || {}).ch; if (!c || (!CHM[c.metric] && c.metric !== 'quit')) continue; const mine = this.mine(c), cur = ((sp.v.scores || {})[me]) || {}, changed = Object.entries(mine).some(([k, x]) => cur[k] !== x); if (!changed && !force && Date.now() - (cur.at || 0) < 6 * 36e5) continue;
       try { await Share.mutate(sp.id, v => { v.scores ||= {}; const r = v.scores[me] ||= {}; Object.assign(r, mine, { at: Date.now() }); for (const k of Object.keys(r)) if (/^\d{4}-/.test(k) && dayDiff(k, todayK()) > 62) delete r[k]; }); } catch (_) {} } },
 };
 setTimeout(() => { Chal.push(); setInterval(() => { if (!document.hidden) Chal.push(); }, 10 * 60e3); }, 8000);
-function chalNew() { if (!Share.ready()) { go('shared'); Island.toast({ icon: 'share', c: 'var(--orange)', t: 'Per le sfide serve la sincronizzazione', s: 'Accedi in Impostazioni → Sincronizzazione', ms: 3200 }); return; } let metric = 'steps', period = 'week', quit = (S.quits[0] || {}).kind || 'fumo'; const ppl = [];
+function chalNew(pre) { pre = pre || {}; if (!Share.ready()) { go('shared'); Island.toast({ icon: 'share', c: 'var(--orange)', t: 'Per le sfide serve la sincronizzazione', s: 'Accedi in Impostazioni → Sincronizzazione', ms: 3200 }); return; } let metric = CHM[pre.metric] ? pre.metric : 'steps', period = pre.period || 'week', quit = (S.quits[0] || {}).kind || 'fumo'; const ppl = [];
   const sh = openSheet({ title: '🏆 Nuova sfida', left: { label: 'Annulla' }, right: { label: 'Crea', act: async s => { if (!ppl.length) { $('#chE', s.el).focus(); Island.toast({ icon: 'share', c: 'var(--orange)', t: 'Aggiungi almeno un amico (email)', ms: 2000 }); return; } const B = $('[data-sh=right]', s.wrap); B.disabled = true;
       const name = $('#chN', s.el).value.trim() || `${CHM[metric][1]} ${CHM[metric][0]}`; try { const sp = await Share.create('sfida', name, ppl); await Share.mutate(sp.id, v => { v.ch = { metric, period, quit, from: todayK(), to: $('#chT', s.el).value || addDK(todayK(), 6), title: name }; }); await Chal.push(true); s.close(); chalOpen(sp.id); inviteSheet(Share.spaces.find(x => x.id === sp.id)); } catch (e) { B.disabled = false; Island.toast({ icon: 'x', c: 'var(--red)', t: 'Non riesco a creare la sfida', s: Share.state === 'nosql' ? 'Prepara prima il database in Condivisi' : String(e.message || e).slice(0, 80), ms: 3200 }); } } },
     body: `<div class="chips">${Object.entries(CHM).map(([k, v]) => `<button type="button" class="chip" data-seg="chm" data-v="${k}" aria-pressed="${k === metric}">${v[1]} ${v[0]}</button>`).join('')}</div>
       <div id="chQ" class="chips" hidden>${Object.entries(QK).map(([k, v]) => `<button type="button" class="chip" data-seg="chq" data-v="${k}" aria-pressed="${k === quit}">${v[1]} ${v[0]}</button>`).join('')}</div>
-      <input class="input" id="chN" placeholder="Nome (es. Chi cammina di più)"><div class="field" id="chPb"><span class="lbl">Durata</span>${seg('chp', [['week', 'Ogni settimana'], ['month', 'Ogni mese'], ['once', 'Fino a una data']], period)}</div>
+      <input class="input" id="chN" placeholder="Nome (es. Chi cammina di più)" value="${esc(pre.name || '')}"><div class="field" id="chPb"><span class="lbl">Durata</span>${seg('chp', [['week', 'Ogni settimana'], ['month', 'Ogni mese'], ['once', 'Fino a una data']], period)}</div>
       <div class="field" id="chTb" hidden><label for="chT">Fino al</label><input class="input" type="date" id="chT" value="${addDK(todayK(), 13)}"></div>
       <div class="field"><span class="lbl">Con chi (email)</span><div class="chips" id="chP"></div><div style="display:flex;gap:8px"><input class="input" id="chE" type="email" placeholder="email dell'amico" list="chCt" style="flex:1"><datalist id="chCt">${(S.contacts || []).filter(c => c.email).map(c => `<option value="${esc(c.email)}">${esc(Contacts.name(c))}</option>`).join('')}</datalist><button class="btn" id="chA">${ico('plus', 'sm')}</button></div></div>
       <p class="muted" style="margin:0;font-size:13px">I tuoi numeri arrivano da soli dalla Salute, dal Focus e dai promemoria. Gli amici vedono solo il totale della sfida, non il resto dei tuoi dati.</p>`,
@@ -19935,6 +19938,1593 @@ if (AND) {
   try { UI.android = JSON.parse(AND.info()); } catch (_) { UI.android = {}; }
   setTimeout(() => { try { Alerts.sync(); } catch (_) {} }, 1500);
 }
+
+/* =========================================================
+   ESERCIZI — libreria con animazioni originali (un omino che
+   mostra il movimento, disegnato in tempo reale da un piccolo
+   "scheletro" a angoli), muscoli, esecuzione passo passo ed
+   errori da evitare.
+   ========================================================= */
+/* ---------- the rig: side view, x forward (right), y down; angles in degrees ----------
+   torso tr: 0 = upright, +90 = leaning forward flat; limbs: 0 = pointing down, +90 = forward, 180 = up, -90 = back */
+const RIG = { T: 54, H: 11, UA: 27, FA: 25, TH: 36, SH: 35, FT: 13 };
+const rad = d => d * Math.PI / 180;
+function rigPts(p) {
+  const P = { ...{ x: 100, y: 108, tr: 0, hd: 0, ua: 0, fa: 0, th: 0, sh: 0, ft: 90, ua2: null, fa2: null, th2: null, sh2: null, ft2: null }, ...p };
+  const hip = [P.x, P.y], neck = [P.x + RIG.T * Math.sin(rad(P.tr)), P.y - RIG.T * Math.cos(rad(P.tr))];
+  const head = [neck[0] + (RIG.H + 4) * Math.sin(rad(P.tr + P.hd)), neck[1] - (RIG.H + 4) * Math.cos(rad(P.tr + P.hd))];
+  const sh = [neck[0] - 3 * Math.sin(rad(P.tr)), neck[1] + 3 * Math.cos(rad(P.tr))];
+  const limb = (o, a, L) => [o[0] + L * Math.sin(rad(a)), o[1] + L * Math.cos(rad(a))];
+  const arm = (ua, fa) => { const e = limb(sh, ua, RIG.UA), w = limb(e, fa, RIG.FA); return [sh, e, w]; };
+  const leg = (th, s, ft) => { const k = limb(hip, th, RIG.TH), a = limb(k, s, RIG.SH), t = limb(a, ft, RIG.FT); return [hip, k, a, t]; };
+  return { head, neck, hip, A: arm(P.ua, P.fa), A2: arm(P.ua2 ?? P.ua, P.fa2 ?? P.fa), L: leg(P.th, P.sh, P.ft), L2: leg(P.th2 ?? P.th, P.sh2 ?? P.sh, P.ft2 ?? P.ft) };
+}
+/* front view: x = left/right, arms/legs open sideways (ab = abduction, 0 = down, 90 = out sideways, 180 = up) */
+function rigFront(p) {
+  const P = { y: 108, ab: 8, el: 0, lg: 4, kn: 0, sq: 0, ...p }, cx = 100, hipY = P.y + P.sq, neck = [cx, hipY - RIG.T];
+  const head = [cx, neck[1] - RIG.H - 4], sL = [cx - 13, neck[1] + 4], sR = [cx + 13, neck[1] + 4];
+  const arm = (s, dir) => { const e = [s[0] + dir * RIG.UA * Math.sin(rad(P.ab)), s[1] + RIG.UA * Math.cos(rad(P.ab))], a2 = P.ab + P.el; return [s, e, [e[0] + dir * RIG.FA * Math.sin(rad(a2)), e[1] + RIG.FA * Math.cos(rad(a2))]]; };
+  const leg = (dir) => { const h = [cx + dir * 8, hipY], k = [h[0] + dir * RIG.TH * Math.sin(rad(P.lg + P.kn)), h[1] + RIG.TH * Math.cos(rad(P.lg + P.kn))], a = [k[0] + dir * RIG.SH * Math.sin(rad(P.lg - P.kn * .4)), Math.min(178, k[1] + RIG.SH * Math.cos(rad(P.lg - P.kn * .4)))]; return [h, k, a, [a[0] + dir * 6, a[1] + 2]]; };
+  return { front: true, head, neck, hip: [cx, hipY], A: arm(sR, 1), A2: arm(sL, -1), L: leg(1), L2: leg(-1) };
+}
+const ST = { x: 100, y: 108 };
+/* patterns: keyframes + props (bench, bar, mat, equipment in hand) + seconds per rep */
+const MOVES = {
+  squat: { k: [{ ...ST, ua: 70, fa: 90 }, { x: 80, y: 140, tr: 38, ua: 80, fa: 90, th: 80, sh: -18 }], dur: 1.1 },
+  goblet: { k: [{ ...ST, ua: 25, fa: 160 }, { x: 80, y: 140, tr: 32, ua: 30, fa: 175, th: 82, sh: -18 }], dur: 1.1, eq: 'kbChest' },
+  sumo: { front: true, k: [{ ab: 10, el: 0, lg: 22 }, { ab: 10, el: 0, lg: 30, kn: 40, sq: 26 }], dur: 1.1, eq: 'dbHang' },
+  jumpsquat: { k: [{ x: 80, y: 140, tr: 38, ua: -30, fa: -20, th: 82, sh: -18 }, { x: 100, y: 92, ua: 160, fa: 175, th: 6, sh: 0, ft: 140 }, { x: 80, y: 140, tr: 38, ua: -30, fa: -20, th: 82, sh: -18 }], dur: .8 },
+  lunge: { k: [{ ...ST, ua: 0, th: 2, th2: -2 }, { x: 98, y: 132, tr: 2, ua: 0, th: 70, sh: 0, th2: -40, sh2: -95, ft2: 0 }], dur: 1.2, eq: 'dbHang' },
+  revlunge: { k: [{ ...ST, ua: 0 }, { x: 108, y: 132, tr: 4, ua: 0, th: 72, sh: -2, th2: -38, sh2: -95, ft2: 0 }], dur: 1.2 },
+  bulgarian: { k: [{ x: 108, y: 108, tr: 4, ua: 0, th: 8, sh: 0, th2: -38, sh2: -110, ft2: -40 }, { x: 104, y: 130, tr: 10, ua: 0, th: 68, sh: -8, th2: -20, sh2: -112, ft2: -40 }], dur: 1.2, props: ['benchBack'], eq: 'dbHang' },
+  stepup: { k: [{ x: 96, y: 108, ua: 0, th: 70, sh: 0, ft: 90, th2: 0, sh2: 0 }, { x: 120, y: 80, ua: 0, th: 2, sh: 0, th2: 30, sh2: -60 }], dur: 1.2, props: ['box'] },
+  bridge: { k: [{ x: 80, y: 168, tr: -94, hd: 30, ua: -90, fa: -90, th: 66, sh: -30, ft: 90 }, { x: 80, y: 142, tr: -82, hd: 30, ua: -100, fa: -90, th: 98, sh: -2, ft: 90 }], dur: 1.2, props: ['mat'] },
+  hipthrust: { k: [{ x: 84, y: 160, tr: -70, hd: 40, ua: -100, fa: -90, th: 62, sh: -16 }, { x: 84, y: 128, tr: -88, hd: 50, ua: -100, fa: -90, th: 92, sh: 2 }], dur: 1.2, props: ['benchBack2'], eq: 'bbHip' },
+  deadlift: { k: [{ x: 82, y: 124, tr: 62, ua: -4, fa: -4, th: 50, sh: -10 }, { ...ST, ua: -6, fa: -4 }], dur: 1.4, eq: 'bbLow' },
+  rdl: { k: [{ ...ST, ua: -4, fa: -2 }, { x: 88, y: 112, tr: 70, ua: -2, fa: 0, th: 10, sh: -6 }], dur: 1.4, eq: 'bbLow' },
+  goodmorning: { k: [{ ...ST, ua: 140, fa: 30 }, { x: 88, y: 112, tr: 72, ua: 150, fa: 40, th: 8, sh: -6 }], dur: 1.4 },
+  calf: { k: [{ ...ST, ua: 0 }, { x: 100, y: 98, ua: 0, ft: 160 }], dur: .8, eq: 'dbHang' },
+  wallsit: { k: [{ x: 70, y: 138, tr: -2, ua: 30, fa: 30, th: 90, sh: 0 }, { x: 70, y: 138, tr: -2, ua: 34, fa: 34, th: 90, sh: 0 }], dur: 2, props: ['wall'] },
+  pushup: { k: [{ x: 98, y: 146, tr: 78, hd: -6, ua: 0, fa: 0, th: -78, sh: -78, ft: -170 }, { x: 98, y: 160, tr: 86, hd: -6, ua: -52, fa: 30, th: -86, sh: -86, ft: -170 }], dur: 1.1, props: ['mat'] },
+  kneepush: { k: [{ x: 98, y: 150, tr: 72, hd: -6, ua: 0, fa: 0, th: -80, sh: -170, ft: -100 }, { x: 98, y: 162, tr: 84, ua: -52, fa: 30, th: -86, sh: -172, ft: -100 }], dur: 1.1, props: ['mat'] },
+  incline: { k: [{ x: 84, y: 128, tr: 62, hd: -6, ua: 26, fa: 26, th: -60, sh: -60, ft: -160 }, { x: 88, y: 138, tr: 70, ua: -30, fa: 60, th: -68, sh: -68, ft: -160 }], dur: 1.1, props: ['benchFront'] },
+  pike: { k: [{ x: 96, y: 112, tr: 140, hd: 10, ua: 140, fa: 140, th: -30, sh: -30, ft: -120 }, { x: 96, y: 112, tr: 155, hd: 10, ua: 105, fa: 170, th: -30, sh: -30, ft: -120 }], dur: 1.2, props: ['mat'] },
+  dip: { k: [{ x: 100, y: 120, tr: 4, ua: -14, fa: 0, th: 84, sh: 6 }, { x: 100, y: 140, tr: 18, ua: -70, fa: 4, th: 80, sh: 6 }], dur: 1.1, props: ['benchBack3'] },
+  bench: { k: [{ x: 70, y: 132, tr: 90, hd: 0, ua: 180, fa: 180, th: -60, sh: 0 }, { x: 70, y: 132, tr: 90, ua: 120, fa: 200, th: -60, sh: 0 }], dur: 1.2, props: ['flatBench'], eq: 'bbHand', lying: true },
+  fly: { k: [{ x: 70, y: 132, tr: 90, ua: 180, fa: 180, th: -60, sh: 0 }, { x: 70, y: 132, tr: 90, ua: 120, fa: 140, th: -60, sh: 0 }], dur: 1.3, props: ['flatBench'], eq: 'dbHand' },
+  ohp: { k: [{ ...ST, ua: 10, fa: 175 }, { ...ST, ua: 172, fa: 178 }], dur: 1.2, eq: 'dbHand' },
+  lateral: { front: true, k: [{ ab: 8, el: 0 }, { ab: 88, el: 0 }], dur: 1.2, eq: 'dbHand' },
+  frontraise: { k: [{ ...ST, ua: 4, fa: 4 }, { ...ST, ua: 90, fa: 92 }], dur: 1.2, eq: 'dbHand' },
+  row: { k: [{ x: 90, y: 116, tr: 62, ua: 0, fa: 0, th: 18, sh: -12 }, { x: 90, y: 116, tr: 62, ua: -48, fa: 30, th: 18, sh: -12 }], dur: 1.1, eq: 'bbHand' },
+  onearm: { k: [{ x: 84, y: 112, tr: 82, ua: 0, fa: 0, ua2: 60, fa2: 0, th: 2, sh: 0, th2: 84, sh2: 0 }, { x: 84, y: 112, tr: 82, ua: -60, fa: 26, ua2: 60, fa2: 0, th: 2, sh: 0, th2: 84, sh2: 0 }], dur: 1.1, props: ['benchLow'], eq: 'dbHand1' },
+  pullup: { k: [{ x: 100, y: 130, ua: 176, fa: 178, th: 6, sh: -14 }, { x: 100, y: 96, ua: 156, fa: 20, th: 10, sh: -20 }], dur: 1.4, props: ['bar'] },
+  pulldown: { k: [{ x: 100, y: 130, tr: -8, ua: 172, fa: 178, th: 90, sh: 0 }, { x: 100, y: 130, tr: -14, ua: 130, fa: 10, th: 90, sh: 0 }], dur: 1.3, props: ['seat', 'cable'] },
+  facepull: { k: [{ ...ST, tr: -4, ua: 92, fa: 92 }, { ...ST, tr: -4, ua: 94, fa: 175 }], dur: 1.2, props: ['band'] },
+  curl: { k: [{ ...ST, ua: 2, fa: 4 }, { ...ST, ua: 6, fa: 150 }], dur: 1.1, eq: 'dbHand' },
+  triext: { k: [{ ...ST, ua: 172, fa: 20 }, { ...ST, ua: 172, fa: 176 }], dur: 1.2, eq: 'dbHand' },
+  kickback: { k: [{ x: 88, y: 114, tr: 62, ua: -60, fa: 20, th: 14, sh: -10 }, { x: 88, y: 114, tr: 62, ua: -70, fa: -70, th: 14, sh: -10 }], dur: 1.1, eq: 'dbHand' },
+  plank: { k: [{ x: 96, y: 152, tr: 80, hd: -6, ua: -2, fa: 90, th: -80, sh: -80, ft: -170 }, { x: 96, y: 151, tr: 80, hd: -6, ua: -2, fa: 90, th: -80, sh: -80, ft: -170 }], dur: 2, props: ['mat'] },
+  sideplank: { front: true, side: true, k: [{ ab: 0 }, { ab: 0 }], dur: 2, props: ['mat'] },
+  crunch: { k: [{ x: 96, y: 168, tr: -90, hd: 20, ua: 170, fa: 40, th: 50, sh: -40 }, { x: 96, y: 168, tr: -55, hd: 30, ua: 150, fa: 30, th: 50, sh: -40 }], dur: 1.1, props: ['mat'] },
+  situp: { k: [{ x: 96, y: 168, tr: -90, hd: 20, ua: 120, fa: 120, th: 50, sh: -40 }, { x: 96, y: 168, tr: 10, hd: 10, ua: 90, fa: 90, th: 50, sh: -40 }], dur: 1.4, props: ['mat'] },
+  legraise: { k: [{ x: 96, y: 170, tr: -90, hd: 10, ua: -90, fa: -90, th: 90, sh: 90, ft: 180 }, { x: 96, y: 170, tr: -90, hd: 10, ua: -90, fa: -90, th: 178, sh: 178, ft: 268 }], dur: 1.4, props: ['mat'] },
+  bicycle: { k: [{ x: 100, y: 168, tr: -62, hd: 20, ua: 160, fa: 40, th: 100, sh: 20, th2: 160, sh2: 130 }, { x: 100, y: 168, tr: -62, hd: 20, ua: 160, fa: 40, th: 160, sh: 130, th2: 100, sh2: 20 }], dur: .8, props: ['mat'] },
+  climber: { k: [{ x: 96, y: 146, tr: 74, hd: -6, ua: 0, fa: 0, th: 40, sh: -40, th2: -76, sh2: -76, ft2: -170 }, { x: 96, y: 146, tr: 74, ua: 0, fa: 0, th: -76, sh: -76, ft: -170, th2: 40, sh2: -40 }], dur: .5, props: ['mat'] },
+  deadbug: { k: [{ x: 96, y: 170, tr: -90, hd: 10, ua: 180, fa: 180, th: 180, sh: 90, ft: 180 }, { x: 96, y: 170, tr: -90, hd: 10, ua: 180, fa: 180, ua2: 262, fa2: 262, th: 180, sh: 90, ft: 180, th2: 98, sh2: 96, ft2: 180 }], dur: 1.4, props: ['mat'] },
+  birddog: { k: [{ x: 76, y: 132, tr: 90, hd: 0, ua: 0, fa: 0, th: 0, sh: -90, ft: -170 }, { x: 76, y: 132, tr: 90, ua: 92, fa: 92, ua2: 0, fa2: 0, th: -92, sh: -92, ft: -180, th2: 0, sh2: -90, ft2: -170 }], dur: 1.6, props: ['mat'] },
+  superman: { k: [{ x: 96, y: 172, tr: 90, hd: 0, ua: 90, fa: 90, th: -90, sh: -90, ft: -180 }, { x: 96, y: 172, tr: 100, hd: -10, ua: 108, fa: 108, th: -104, sh: -104, ft: -190 }], dur: 1.4, props: ['mat'] },
+  twist: { k: [{ x: 96, y: 166, tr: -40, ua: 70, fa: 120, th: 60, sh: -30, ft: 120 }, { x: 96, y: 166, tr: -40, ua: 40, fa: 80, th: 60, sh: -30, ft: 120 }], dur: .8, props: ['mat'], eq: 'kbHand' },
+  burpee: { k: [{ ...ST }, { x: 82, y: 142, tr: 60, ua: 30, fa: 20, th: 84, sh: -14 }, { x: 98, y: 146, tr: 78, ua: 0, fa: 0, th: -78, sh: -78, ft: -170 }, { x: 82, y: 142, tr: 60, ua: 30, fa: 20, th: 84, sh: -14 }, { x: 100, y: 92, ua: 175, fa: 178, th: 4, sh: 0, ft: 140 }], dur: .6 },
+  jack: { front: true, k: [{ ab: 6, el: 0, lg: 4 }, { ab: 170, el: 0, lg: 22, sq: -6 }], dur: .5 },
+  knees: { k: [{ ...ST, ua: 40, fa: 120, ua2: -30, fa2: 60, th: 90, sh: 0, th2: 0, sh2: 0 }, { ...ST, ua: -30, fa: 60, ua2: 40, fa2: 120, th: 0, sh: 0, th2: 90, sh2: 0 }], dur: .35 },
+  kicks: { k: [{ ...ST, ua: 30, fa: 100, ua2: -30, fa2: 40, th: -10, sh: -160, th2: 0, sh2: 0 }, { ...ST, ua: -30, fa: 40, ua2: 30, fa2: 100, th: 0, sh: 0, th2: -10, sh2: -160 }], dur: .35 },
+  run: { k: [{ ...ST, tr: 8, ua: 50, fa: 130, ua2: -40, fa2: 40, th: 50, sh: -30, th2: -30, sh2: -80 }, { ...ST, tr: 8, ua: -40, fa: 40, ua2: 50, fa2: 130, th: -30, sh: -80, th2: 50, sh2: -30 }], dur: .4 },
+  rope: { k: [{ ...ST, ua: 14, fa: 70 }, { x: 100, y: 100, ua: 18, fa: 80, ft: 150 }], dur: .35, props: ['rope'] },
+  catcow: { k: [{ x: 76, y: 132, tr: 84, hd: 20, ua: 0, fa: 0, th: 0, sh: -90, ft: -170 }, { x: 76, y: 128, tr: 96, hd: -30, ua: 0, fa: 0, th: 0, sh: -90, ft: -170 }], dur: 2, props: ['mat'], arch: true },
+  child: { k: [{ x: 80, y: 150, tr: 100, hd: 0, ua: 96, fa: 92, th: 60, sh: -90, ft: -170 }, { x: 78, y: 152, tr: 106, hd: 0, ua: 100, fa: 95, th: 62, sh: -90, ft: -170 }], dur: 2.4, props: ['mat'] },
+  hipflex: { k: [{ x: 100, y: 132, tr: 0, ua: 0, fa: 0, th: 70, sh: 0, th2: -20, sh2: -110, ft2: -170 }, { x: 108, y: 138, tr: -6, ua: 170, fa: 170, th: 84, sh: -6, th2: -40, sh2: -110, ft2: -170 }], dur: 2.4, props: ['mat'] },
+  hamstring: { k: [{ x: 90, y: 166, tr: 0, ua: 60, fa: 60, th: 90, sh: 90, ft: 180 }, { x: 90, y: 166, tr: 52, ua: 80, fa: 90, th: 90, sh: 90, ft: 180 }], dur: 2.4, props: ['mat'] },
+  armcircle: { front: true, k: [{ ab: 90, el: 0 }, { ab: 150, el: 0 }, { ab: 90, el: 0 }, { ab: 40, el: 0 }], dur: .5 },
+  stretchquad: { k: [{ ...ST, ua: 100, fa: 100, ua2: -10, fa2: 170, th2: -10, sh2: -170 }, { ...ST, ua: 100, fa: 100, ua2: -14, fa2: 170, th2: -14, sh2: -172 }], dur: 2 },
+};
+/* ---------- exercises ---------- */
+/* [id, name, pattern, muscles, equipment, level 1-3, kind, timed seconds|0, steps, mistakes] */
+const EX_RAW = [
+  ['squat', 'Squat a corpo libero', 'squat', 'quadricipiti,glutei,core', 'corpo', 1, 'forza', 0, ['Piedi alla larghezza delle spalle, punte leggermente in fuori', 'Spingi il bacino indietro come per sederti', 'Scendi finché le cosce sono parallele al pavimento', 'Spingi sui talloni e torna su'], ['Ginocchia che cadono verso l\'interno', 'Talloni che si alzano', 'Schiena che si incurva']],
+  ['goblet', 'Goblet squat', 'goblet', 'quadricipiti,glutei,core', 'manubri', 1, 'forza', 0, ['Tieni un manubrio o un kettlebell al petto con i gomiti in basso', 'Petto alto, scendi tra le ginocchia', 'Gomiti dentro le ginocchia in basso', 'Risali spingendo il pavimento'], ['Peso che si allontana dal petto', 'Busto che crolla in avanti']],
+  ['sumo', 'Squat sumo', 'sumo', 'adduttori,glutei,quadricipiti', 'manubri', 1, 'forza', 0, ['Gambe larghe, punte in fuori di 30-45°', 'Peso che pende tra le gambe', 'Scendi con il busto dritto', 'Stringi i glutei in alto'], ['Ginocchia che non seguono le punte', 'Schiena curva']],
+  ['bbsquat', 'Squat con bilanciere', 'squat', 'quadricipiti,glutei,core', 'bilanciere', 2, 'forza', 0, ['Bilanciere sui trapezi, mani salde', 'Inspira e blocca l\'addome', 'Scendi controllando fino al parallelo', 'Spingi su espirando a metà salita'], ['Rimbalzare in basso', 'Bacino che sale prima del petto', 'Carico eccessivo a scapito della profondità']],
+  ['jumpsquat', 'Squat jump', 'jumpsquat', 'quadricipiti,glutei,polpacci', 'corpo', 2, 'cardio', 0, ['Scendi in squat con le braccia indietro', 'Salta esplosivo portando le braccia in alto', 'Atterra morbido sugli avampiedi', 'Riparti subito nello squat'], ['Atterrare rigidi sulle ginocchia', 'Ginocchia verso l\'interno all\'atterraggio']],
+  ['lunge', 'Affondi in avanti', 'lunge', 'quadricipiti,glutei', 'corpo', 1, 'forza', 0, ['Passo lungo in avanti', 'Scendi finché il ginocchio dietro sfiora il pavimento', 'Busto verticale', 'Spingi con il piede davanti e torna su; alterna'], ['Ginocchio davanti che va oltre la punta', 'Passo troppo corto']],
+  ['revlunge', 'Affondi indietro', 'revlunge', 'quadricipiti,glutei', 'corpo', 1, 'forza', 0, ['Fai un passo lungo all\'indietro', 'Scendi con entrambe le ginocchia a 90°', 'Peso sul tallone davanti', 'Torna su e alterna'], ['Busto che cade in avanti', 'Ginocchio dietro che sbatte a terra']],
+  ['bulgarian', 'Squat bulgaro', 'bulgarian', 'quadricipiti,glutei', 'panca', 2, 'forza', 0, ['Collo del piede dietro appoggiato sulla panca', 'Piede davanti a un passo lungo', 'Scendi in verticale', 'Spingi con il tallone davanti'], ['Piede davanti troppo vicino', 'Bacino ruotato']],
+  ['stepup', 'Step-up', 'stepup', 'quadricipiti,glutei', 'panca', 1, 'forza', 0, ['Un piede intero sul gradino o sulla panca', 'Sali spingendo con quella gamba', 'Distendi l\'anca in alto', 'Scendi lentamente e alterna'], ['Spingersi con la gamba a terra', 'Gradino troppo alto']],
+  ['bridge', 'Ponte glutei', 'bridge', 'glutei,femorali,core', 'corpo', 1, 'forza', 0, ['Supino, ginocchia piegate, piedi a terra', 'Spingi sui talloni e solleva il bacino', 'Stringi i glutei in alto per 1 secondo', 'Scendi lentamente'], ['Inarcare la zona lombare', 'Spingere con le punte']],
+  ['hipthrust', 'Hip thrust', 'hipthrust', 'glutei,femorali', 'bilanciere', 2, 'forza', 0, ['Scapole appoggiate alla panca, bilanciere sulle anche', 'Piedi a terra alla larghezza del bacino', 'Spingi il bacino fino a busto e cosce in linea', 'Mento verso il petto, stringi i glutei'], ['Iperestendere la schiena in alto', 'Piedi troppo lontani']],
+  ['deadlift', 'Stacco da terra', 'deadlift', 'femorali,glutei,schiena,core', 'bilanciere', 3, 'forza', 0, ['Bilanciere sopra il centro del piede', 'Afferra, schiena neutra, petto alto', 'Spingi il pavimento con le gambe tenendo il bilanciere vicino', 'Chiudi stendendo le anche, poi torna giù controllando'], ['Schiena curva', 'Bilanciere lontano dalle gambe', 'Tirare con le braccia']],
+  ['rdl', 'Stacco rumeno', 'rdl', 'femorali,glutei,schiena', 'manubri', 2, 'forza', 0, ['In piedi con il peso davanti alle cosce', 'Ginocchia appena flesse, spingi il bacino indietro', 'Scendi finché senti tirare i femorali', 'Risali spingendo le anche in avanti'], ['Piegare troppo le ginocchia', 'Schiena che si arrotonda']],
+  ['goodmorning', 'Good morning', 'goodmorning', 'femorali,schiena', 'corpo', 1, 'forza', 0, ['Mani dietro la testa', 'Ginocchia morbide, spingi il bacino indietro', 'Busto quasi parallelo, schiena dritta', 'Torna su stringendo i glutei'], ['Arrotondare la schiena']],
+  ['calf', 'Sollevamenti sui polpacci', 'calf', 'polpacci', 'corpo', 1, 'forza', 0, ['In piedi, meglio sul bordo di un gradino', 'Sali sulle punte il più in alto possibile', 'Tieni 1 secondo', 'Scendi lentamente sotto il gradino'], ['Movimento veloce e corto']],
+  ['wallsit', 'Wall sit', 'wallsit', 'quadricipiti,glutei', 'corpo', 1, 'forza', 40, ['Schiena contro il muro', 'Scendi finché le cosce sono parallele', 'Ginocchia sopra le caviglie', 'Tieni la posizione respirando'], ['Mani sulle cosce per aiutarti', 'Ginocchia oltre le punte']],
+  ['pushup', 'Piegamenti', 'pushup', 'pettorali,tricipiti,spalle,core', 'corpo', 2, 'forza', 0, ['Mani poco più larghe delle spalle', 'Corpo in linea dalla testa ai talloni', 'Scendi con i gomiti a 45° dal busto', 'Spingi fino a braccia tese'], ['Bacino che cede', 'Gomiti aperti a 90°', 'Mezze ripetizioni']],
+  ['kneepush', 'Piegamenti sulle ginocchia', 'kneepush', 'pettorali,tricipiti,spalle', 'corpo', 1, 'forza', 0, ['Ginocchia a terra, corpo in linea da ginocchia a testa', 'Mani sotto le spalle, un po\' più larghe', 'Petto verso il pavimento', 'Spingi su'], ['Sedere in alto', 'Testa che cade in avanti']],
+  ['incline', 'Piegamenti inclinati', 'incline', 'pettorali,tricipiti,spalle', 'panca', 1, 'forza', 0, ['Mani su panca, tavolo o gradino', 'Corpo in linea', 'Petto verso il bordo', 'Spingi via'], ['Bacino che cede']],
+  ['pike', 'Pike push-up', 'pike', 'spalle,tricipiti', 'corpo', 2, 'forza', 0, ['Posizione a V rovesciata, sedere in alto', 'Piega i gomiti portando la testa verso terra', 'Testa davanti alle mani', 'Spingi fino a braccia tese'], ['Gomiti troppo aperti']],
+  ['dip', 'Dip tra le panche', 'dip', 'tricipiti,pettorali,spalle', 'panca', 1, 'forza', 0, ['Mani sul bordo della panca dietro di te', 'Gambe avanti, sedere vicino alla panca', 'Scendi fino a gomiti a 90°', 'Spingi su con i tricipiti'], ['Scendere troppo con le spalle', 'Gomiti che si aprono']],
+  ['bench', 'Panca piana', 'bench', 'pettorali,tricipiti,spalle', 'bilanciere', 2, 'forza', 0, ['Sdraiato, occhi sotto il bilanciere, scapole strette', 'Presa poco più larga delle spalle', 'Scendi al petto controllando', 'Spingi in su e leggermente indietro'], ['Rimbalzare sul petto', 'Glutei che si staccano', 'Polsi piegati all\'indietro']],
+  ['dbbench', 'Panca con manubri', 'bench', 'pettorali,tricipiti,spalle', 'manubri', 1, 'forza', 0, ['Sdraiato sulla panca con un manubrio per mano', 'Scendi ai lati del petto', 'Gomiti a 45-60°', 'Spingi in su avvicinando i manubri'], ['Scendere troppo veloce']],
+  ['fly', 'Croci con manubri', 'fly', 'pettorali', 'manubri', 2, 'forza', 0, ['Sdraiato, manubri sopra il petto', 'Gomiti leggermente piegati e fissi', 'Apri le braccia ad arco', 'Richiudi come per abbracciare un albero'], ['Distendere del tutto i gomiti', 'Peso troppo alto']],
+  ['ohp', 'Lento avanti', 'ohp', 'spalle,tricipiti,core', 'manubri', 2, 'forza', 0, ['In piedi, manubri all\'altezza delle spalle', 'Addome e glutei contratti', 'Spingi sopra la testa', 'Scendi controllando'], ['Inarcare la schiena', 'Spingere in avanti invece che in alto']],
+  ['lateral', 'Alzate laterali', 'lateral', 'spalle', 'manubri', 1, 'forza', 0, ['In piedi, manubri lungo i fianchi', 'Gomiti appena piegati', 'Alza fino all\'altezza delle spalle', 'Scendi lentamente'], ['Slanci con il busto', 'Alzare troppo le spalle verso le orecchie']],
+  ['frontraise', 'Alzate frontali', 'frontraise', 'spalle', 'manubri', 1, 'forza', 0, ['Manubri davanti alle cosce', 'Braccia quasi tese', 'Alza fino all\'altezza degli occhi', 'Scendi lentamente'], ['Usare lo slancio']],
+  ['row', 'Rematore con bilanciere', 'row', 'dorsali,bicipiti,schiena', 'bilanciere', 2, 'forza', 0, ['Busto inclinato a 45-60°, schiena dritta', 'Bilanciere che pende sotto le spalle', 'Tira verso l\'ombelico portando i gomiti indietro', 'Stringi le scapole e scendi'], ['Schiena curva', 'Rimbalzi con il busto']],
+  ['onearm', 'Rematore a un braccio', 'onearm', 'dorsali,bicipiti', 'manubri', 1, 'forza', 0, ['Una mano e un ginocchio sulla panca', 'Schiena piatta', 'Tira il manubrio verso il fianco', 'Scendi allungando bene'], ['Ruotare il busto', 'Tirare con il bicipite']],
+  ['bandrow', 'Rematore con elastico', 'row', 'dorsali,bicipiti', 'elastico', 1, 'forza', 0, ['Elastico fissato davanti a te o sotto i piedi', 'Busto dritto o inclinato', 'Porta i gomiti indietro stringendo le scapole', 'Torna controllando la resistenza'], ['Spalle che salgono']],
+  ['pullup', 'Trazioni alla sbarra', 'pullup', 'dorsali,bicipiti,core', 'sbarra', 3, 'forza', 0, ['Presa prona poco più larga delle spalle', 'Parti a braccia tese, scapole basse', 'Tira il petto verso la sbarra', 'Scendi fino in fondo controllando'], ['Slanci con le gambe', 'Mezze ripetizioni']],
+  ['chinup', 'Trazioni presa inversa', 'pullup', 'dorsali,bicipiti', 'sbarra', 2, 'forza', 0, ['Presa supina alla larghezza delle spalle', 'Tira fino al mento sopra la sbarra', 'Scendi lentamente'], ['Non scendere del tutto']],
+  ['pulldown', 'Lat machine', 'pulldown', 'dorsali,bicipiti', 'macchina', 1, 'forza', 0, ['Seduto, cosce bloccate', 'Presa larga', 'Tira la barra al petto portando giù i gomiti', 'Risali controllando'], ['Tirare dietro la nuca', 'Dondolare con il busto']],
+  ['facepull', 'Face pull', 'facepull', 'spalle posteriori,schiena', 'elastico', 1, 'forza', 0, ['Elastico all\'altezza del viso', 'Tira verso la fronte aprendo i gomiti', 'Ruota le mani in fuori alla fine', 'Torna controllando'], ['Gomiti bassi']],
+  ['curl', 'Curl con manubri', 'curl', 'bicipiti', 'manubri', 1, 'forza', 0, ['Gomiti fermi ai fianchi', 'Palmi in avanti', 'Piega fino in alto', 'Scendi lentamente'], ['Slanci con la schiena', 'Gomiti che vanno avanti']],
+  ['hammer', 'Curl a martello', 'curl', 'bicipiti,avambracci', 'manubri', 1, 'forza', 0, ['Palmi che si guardano', 'Gomiti fermi', 'Porta su il manubrio', 'Scendi controllando'], ['Usare lo slancio']],
+  ['triext', 'Estensioni tricipiti sopra la testa', 'triext', 'tricipiti', 'manubri', 1, 'forza', 0, ['Manubrio con due mani sopra la testa', 'Gomiti vicini alla testa', 'Scendi dietro la nuca', 'Distendi le braccia'], ['Gomiti che si aprono', 'Schiena inarcata']],
+  ['kickback', 'Kickback tricipiti', 'kickback', 'tricipiti', 'manubri', 1, 'forza', 0, ['Busto inclinato, gomito alto vicino al fianco', 'Distendi l\'avambraccio indietro', 'Tieni 1 secondo in estensione', 'Torna lentamente'], ['Muovere la spalla']],
+  ['plank', 'Plank', 'plank', 'core,spalle', 'corpo', 1, 'core', 40, ['Avambracci a terra, gomiti sotto le spalle', 'Corpo in linea, glutei contratti', 'Spingi il pavimento con gli avambracci', 'Respira senza muovere il bacino'], ['Bacino che cede o sale', 'Trattenere il respiro']],
+  ['sideplank', 'Plank laterale', 'sideplank', 'obliqui,core', 'corpo', 2, 'core', 30, ['Su un fianco, gomito sotto la spalla', 'Solleva il bacino in linea', 'Non far cadere i fianchi', 'Poi cambia lato'], ['Bacino che scende', 'Spalla che si schiaccia']],
+  ['crunch', 'Crunch', 'crunch', 'addominali', 'corpo', 1, 'core', 0, ['Supino, ginocchia piegate', 'Mani alle tempie, senza tirare la testa', 'Stacca le spalle avvicinando le costole al bacino', 'Scendi lentamente'], ['Tirare il collo', 'Movimento troppo veloce']],
+  ['situp', 'Sit-up', 'situp', 'addominali,flessori dell\'anca', 'corpo', 2, 'core', 0, ['Supino con piedi a terra', 'Arrotola il busto fino a sederti', 'Scendi vertebra per vertebra'], ['Slanciarsi con le braccia']],
+  ['legraise', 'Sollevamento gambe', 'legraise', 'addominali bassi', 'corpo', 2, 'core', 0, ['Supino, mani lungo i fianchi', 'Gambe tese insieme', 'Solleva fino alla verticale', 'Scendi senza toccare terra e senza inarcare'], ['Zona lombare che si stacca']],
+  ['bicycle', 'Bicycle crunch', 'bicycle', 'obliqui,addominali', 'corpo', 2, 'core', 0, ['Supino, mani alle tempie', 'Porta un gomito verso il ginocchio opposto', 'Distendi l\'altra gamba', 'Alterna in modo controllato'], ['Andare troppo veloce']],
+  ['climber', 'Mountain climber', 'climber', 'core,spalle,cardio', 'corpo', 1, 'cardio', 30, ['Posizione di piegamento a braccia tese', 'Porta un ginocchio al petto', 'Alterna rapidamente', 'Bacino basso e fermo'], ['Sedere in alto']],
+  ['deadbug', 'Dead bug', 'deadbug', 'core', 'corpo', 1, 'core', 0, ['Supino, braccia al soffitto, ginocchia a 90°', 'Schiena incollata al pavimento', 'Allunga braccio e gamba opposti', 'Torna e alterna'], ['Schiena che si inarca']],
+  ['birddog', 'Bird dog', 'birddog', 'core,schiena,glutei', 'corpo', 1, 'core', 0, ['A quattro zampe', 'Allunga braccio e gamba opposti', 'Bacino fermo e parallelo al pavimento', 'Torna e alterna'], ['Ruotare il bacino']],
+  ['superman', 'Superman', 'superman', 'schiena,glutei', 'corpo', 1, 'core', 0, ['Prono con braccia avanti', 'Solleva braccia e gambe insieme', 'Tieni 2 secondi', 'Scendi'], ['Collo iperesteso']],
+  ['twist', 'Russian twist', 'twist', 'obliqui,core', 'corpo', 2, 'core', 0, ['Seduto, busto inclinato indietro', 'Piedi a terra o sollevati', 'Ruota il busto portando le mani da un lato all\'altro', 'Schiena dritta'], ['Muovere solo le braccia']],
+  ['burpee', 'Burpee', 'burpee', 'tutto il corpo,cardio', 'corpo', 2, 'cardio', 0, ['Scendi in squat e appoggia le mani', 'Salta indietro in plank', 'Torna con i piedi alle mani', 'Salta in alto con le braccia su'], ['Bacino che cede in plank']],
+  ['jack', 'Jumping jack', 'jack', 'cardio,spalle,polpacci', 'corpo', 1, 'cardio', 40, ['Salta aprendo gambe e braccia', 'Mani che si toccano sopra la testa', 'Torna a gambe unite', 'Ritmo costante'], ['Atterrare sui talloni']],
+  ['knees', 'Skip alto', 'knees', 'cardio,flessori dell\'anca', 'corpo', 1, 'cardio', 30, ['Corsa sul posto portando le ginocchia all\'altezza del bacino', 'Braccia che accompagnano', 'Sugli avampiedi'], ['Busto che si piega indietro']],
+  ['kicks', 'Calciata dietro', 'kicks', 'cardio,femorali', 'corpo', 1, 'cardio', 30, ['Corsa sul posto portando i talloni ai glutei', 'Ritmo rapido', 'Busto dritto'], ['Ginocchia che vanno avanti']],
+  ['run', 'Corsa sul posto', 'run', 'cardio', 'corpo', 1, 'cardio', 60, ['Corsa leggera sul posto', 'Braccia a 90°', 'Respiro regolare'], []],
+  ['rope', 'Salto della corda', 'rope', 'cardio,polpacci', 'corda', 1, 'cardio', 60, ['Gomiti vicini al corpo', 'Gira la corda con i polsi', 'Salti bassi sugli avampiedi'], ['Salti troppo alti', 'Braccia larghe']],
+  ['catcow', 'Gatto-mucca', 'catcow', 'schiena,mobilità', 'corpo', 1, 'mobilita', 40, ['A quattro zampe', 'Espirando arrotonda la schiena', 'Inspirando inarca e guarda avanti', 'Movimento lento'], []],
+  ['child', 'Posizione del bambino', 'child', 'schiena,anche,mobilità', 'corpo', 1, 'mobilita', 40, ['In ginocchio, siediti sui talloni', 'Allunga le braccia in avanti a terra', 'Respira lentamente nella schiena'], []],
+  ['hipflex', 'Allungamento flessori dell\'anca', 'hipflex', 'flessori dell\'anca,mobilità', 'corpo', 1, 'mobilita', 40, ['In affondo con il ginocchio dietro a terra', 'Spingi il bacino in avanti', 'Braccia in alto', 'Poi cambia lato'], ['Inarcare la schiena']],
+  ['hamstring', 'Allungamento femorali', 'hamstring', 'femorali,mobilità', 'corpo', 1, 'mobilita', 40, ['Seduto a gambe tese', 'Schiena lunga', 'Piegati in avanti dalle anche', 'Respira e scendi un po\' a ogni espirazione'], ['Arrotondare tanto la schiena']],
+  ['armcircle', 'Circonduzioni delle braccia', 'armcircle', 'spalle,mobilità', 'corpo', 1, 'mobilita', 30, ['Braccia aperte ai lati', 'Cerchi piccoli che diventano grandi', 'Poi nell\'altro verso'], []],
+  ['quadstretch', 'Allungamento quadricipiti', 'stretchquad', 'quadricipiti,mobilità', 'corpo', 1, 'mobilita', 30, ['In piedi su una gamba', 'Afferra la caviglia dietro', 'Ginocchia vicine, bacino in avanti', 'Poi cambia lato'], []],
+];
+const EXL = EX_RAW.map(([id, n, pat, mus, eq, lvl, kind, time, steps, err]) => ({ id, n, pat, mus: mus.split(','), eq, lvl, kind, time, steps, err }));
+const EXI = Object.fromEntries(EXL.map(e => [e.id, e]));
+const EQ_N = { corpo: 'Corpo libero', manubri: 'Manubri', bilanciere: 'Bilanciere', panca: 'Panca o gradino', elastico: 'Elastico', sbarra: 'Sbarra', macchina: 'Macchina', corda: 'Corda', kettlebell: 'Kettlebell' };
+const KIND_N = { forza: 'Forza', cardio: 'Cardio', core: 'Addome e core', mobilita: 'Mobilità' };
+const exFind = name => { const n = kNorm(name); return EXL.find(e => kNorm(e.n) === n) || EXL.find(e => n && (kNorm(e.n).includes(n) || n.includes(kNorm(e.n)))) || null; };
+
+/* ---------- drawing ---------- */
+const Moves = {
+  live: new Set(),
+  svg(id, size = 200, extra = '') { return `<svg class="mv" data-mv="${id}" viewBox="0 0 200 200" width="${size}" height="${size}" ${extra}></svg>`; },
+  ease: t => t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2,
+  DEF: { x: 100, y: 108, tr: 0, hd: 0, ua: 0, fa: 0, th: 0, sh: 0, ft: 90, ab: 8, el: 0, lg: 4, kn: 0, sq: 0 },
+  full(p) { const o = { ...this.DEF, ...p }; for (const k of ['ua', 'fa', 'th', 'sh', 'ft']) if (o[k + '2'] == null) o[k + '2'] = o[k]; return o; },
+  lerp(a, b, t) { a = this.full(a); b = this.full(b); const o = {}; for (const k of Object.keys(a)) o[k] = a[k] + (b[k] - a[k]) * t; return o; },
+  props(M) {
+    const P = M.props || []; let s = '<line x1="10" y1="181" x2="190" y2="181" class="mv-floor"/>';
+    for (const p of P) s += {
+      mat: '<rect x="30" y="178" width="140" height="4" rx="2" class="mv-mat"/>',
+      bar: '<line x1="40" y1="34" x2="160" y2="34" class="mv-prop" stroke-width="5"/><line x1="44" y1="34" x2="44" y2="181" class="mv-prop2"/><line x1="156" y1="34" x2="156" y2="181" class="mv-prop2"/>',
+      wall: '<rect x="44" y="20" width="10" height="161" class="mv-propf"/>',
+      box: '<rect x="108" y="146" width="44" height="35" rx="4" class="mv-propf"/>',
+      benchBack: '<rect x="34" y="140" width="44" height="10" rx="3" class="mv-propf"/><line x1="40" y1="150" x2="40" y2="181" class="mv-prop2"/><line x1="72" y1="150" x2="72" y2="181" class="mv-prop2"/>',
+      benchBack2: '<rect x="28" y="136" width="40" height="12" rx="3" class="mv-propf"/><line x1="34" y1="148" x2="34" y2="181" class="mv-prop2"/><line x1="62" y1="148" x2="62" y2="181" class="mv-prop2"/>',
+      benchBack3: '<rect x="56" y="112" width="40" height="10" rx="3" class="mv-propf"/><line x1="62" y1="122" x2="62" y2="181" class="mv-prop2"/><line x1="90" y1="122" x2="90" y2="181" class="mv-prop2"/>',
+      benchFront: '<rect x="136" y="134" width="46" height="10" rx="3" class="mv-propf"/><line x1="142" y1="144" x2="142" y2="181" class="mv-prop2"/><line x1="176" y1="144" x2="176" y2="181" class="mv-prop2"/>',
+      benchLow: '<rect x="96" y="132" width="70" height="10" rx="3" class="mv-propf"/><line x1="104" y1="142" x2="104" y2="181" class="mv-prop2"/><line x1="158" y1="142" x2="158" y2="181" class="mv-prop2"/>',
+      flatBench: '<rect x="20" y="140" width="110" height="10" rx="3" class="mv-propf"/><line x1="30" y1="150" x2="30" y2="181" class="mv-prop2"/><line x1="120" y1="150" x2="120" y2="181" class="mv-prop2"/>',
+      seat: '<rect x="80" y="134" width="40" height="8" rx="3" class="mv-propf"/><line x1="100" y1="142" x2="100" y2="181" class="mv-prop2"/>',
+      cable: '<line x1="100" y1="6" x2="100" y2="20" class="mv-prop2"/>',
+      band: '<circle cx="186" cy="56" r="4" class="mv-propf"/>',
+      rope: '',
+    }[p] || '';
+    return s;
+  },
+  draw(svg, M, t) {
+    const n = M.k.length, seg = t * (n - 1 + (n > 2 ? 0 : 0)), i = Math.min(n - 2, Math.floor(seg)), f = this.ease(seg - i), pose = this.lerp(M.k[i], M.k[i + 1], f);
+    const R = M.front ? rigFront(pose) : rigPts(pose), pl = pts => pts.map(p => p.map(v => v.toFixed(1)).join(',')).join(' ');
+    let eq = '';
+    const W = R.A[2], W2 = R.A2[2];
+    const hand = (w, kind) => kind === 'db' ? `<rect x="${w[0] - 8}" y="${w[1] - 3}" width="16" height="6" rx="2" class="mv-eq"/><rect x="${w[0] - 10}" y="${w[1] - 6}" width="5" height="12" rx="2" class="mv-eq"/><rect x="${w[0] + 5}" y="${w[1] - 6}" width="5" height="12" rx="2" class="mv-eq"/>` : kind === 'bb' ? `<circle cx="${w[0]}" cy="${w[1]}" r="12" class="mv-plate"/><circle cx="${w[0]}" cy="${w[1]}" r="3" class="mv-eq"/>` : kind === 'kb' ? `<circle cx="${w[0]}" cy="${w[1] + 7}" r="8" class="mv-eq"/>` : '';
+    switch (M.eq) {
+      case 'dbHand': case 'dbHang': eq = hand(W, 'db') + (M.front ? hand(W2, 'db') : ''); break;
+      case 'dbHand1': eq = hand(W, 'db'); break;
+      case 'bbHand': case 'bbLow': eq = hand(W, 'bb'); break;
+      case 'bbHip': eq = hand([R.hip[0] + 4, R.hip[1] - 10], 'bb'); break;
+      case 'kbChest': eq = `<circle cx="${(R.A[2][0] + 4).toFixed(1)}" cy="${(R.A[2][1] + 4).toFixed(1)}" r="8" class="mv-eq"/>`; break;
+      case 'kbHand': eq = hand(W, 'kb'); break;
+    }
+    const lim = (P, cls) => `<polyline points="${pl(P)}" class="${cls}"/>`;
+    const torso = M.arch ? `<path d="M${R.hip[0]},${R.hip[1]} Q${((R.hip[0] + R.neck[0]) / 2).toFixed(1)},${(((R.hip[1] + R.neck[1]) / 2) + (pose.tr > 90 ? 8 : -10)).toFixed(1)} ${R.neck[0].toFixed(1)},${R.neck[1].toFixed(1)}" class="mv-body"/>` : `<line x1="${R.hip[0].toFixed(1)}" y1="${R.hip[1].toFixed(1)}" x2="${R.neck[0].toFixed(1)}" y2="${R.neck[1].toFixed(1)}" class="mv-body"/>`;
+    let rope = ''; if ((M.props || []).includes('rope')) { const y = 181 - 8 + Math.cos(t * Math.PI * 2) * 2; rope = `<path d="M${W[0]},${W[1]} Q100,${(W[1] + (t < .5 ? 110 : -80)).toFixed(0)} ${W[0] - 30},${W[1]}" class="mv-rope"/>`; }
+    if (M.side) { /* side plank seen from the front: a tilted line */ const a = t * 0; svg.innerHTML = this.props(M) + `<line x1="40" y1="176" x2="150" y2="${(130 - Math.sin(t * Math.PI) * 4).toFixed(1)}" class="mv-body"/><line x1="150" y1="${(130 - Math.sin(t * Math.PI) * 4).toFixed(1)}" x2="150" y2="180" class="mv-limb"/><line x1="140" y1="${(132).toFixed(1)}" x2="132" y2="92" class="mv-limb2"/><circle cx="168" cy="${(118 - Math.sin(t * Math.PI) * 4).toFixed(1)}" r="11" class="mv-head"/>`; return; }
+    svg.innerHTML = this.props(M) + rope + lim(R.L2, 'mv-limb2') + lim(R.A2, 'mv-limb2') + torso + lim(R.L, 'mv-limb') + `<circle cx="${R.head[0].toFixed(1)}" cy="${R.head[1].toFixed(1)}" r="${RIG.H}" class="mv-head"/>` + lim(R.A, 'mv-limb') + eq;
+  },
+  /** start every [data-mv] inside root; they stop by themselves when removed */
+  start(root) {
+    const R = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    for (const svg of $$('svg[data-mv]', root || document)) { if (svg._mv) continue; const e = EXI[svg.dataset.mv] || { pat: svg.dataset.mv }, M = MOVES[e.pat]; if (!M) continue; svg._mv = { M, t0: performance.now() + Math.random() * 300 }; this.live.add(svg); if (R) this.draw(svg, M, 1); }
+    if (!this.raf && !R) { const tick = now => { for (const s of this.live) { if (!s.isConnected) { this.live.delete(s); continue; } const { M, t0 } = s._mv, per = M.dur * 1000, hold = M.k.length > 2 ? 0 : 280, cyc = (per + hold) * 2, x = ((now - t0) % cyc + cyc) % cyc; let t = x < per ? x / per : x < per + hold ? 1 : x < 2 * per + hold ? 1 - (x - per - hold) / per : 0; if (M.k.length > 2) t = ((now - t0) % (per * (M.k.length - 1))) / (per * (M.k.length - 1)); this.draw(s, M, t); } this.raf = this.live.size ? requestAnimationFrame(tick) : 0; }; this.raf = requestAnimationFrame(tick); }
+  },
+};
+
+/* =========================================================
+   ALLENAMENTO — una sezione vera: schede su misura (obiettivo,
+   livello, giorni, tempo, dove ti alleni, punti delicati),
+   allenamento guidato con l'omino che mostra il movimento,
+   timer di lavoro e recupero, voce, carichi suggeriti,
+   riepilogo e progressi; libreria di esercizi con come si fa.
+   ========================================================= */
+{ const g = NAV.find(x => x.g === 'Vita') || NAV[0], i = g.items.findIndex(x => x[0] === 'health'); g.items.splice(i >= 0 ? i + 1 : g.items.length, 0, ['train', 'Allenamento', 'flame']); }
+TITLES.train = 'Allenamento';
+const T_GOAL = { forza: ['Più forte', '🏋️', 'Pochi ripetizioni, carichi alti, recuperi lunghi'], massa: ['Più muscoli', '💪', 'Ripetizioni medie, volume, progressione costante'], tono: ['Tonificare e dimagrire', '🔥', 'Ripetizioni alte, recuperi brevi, più movimento'], resistenza: ['Fiato e resistenza', '🫀', 'Circuiti a tempo, cuore che lavora'], mobilita: ['Mobilità e postura', '🧘', 'Allungamenti, core e controllo'] };
+const T_PLACE = { casa0: ['A casa, senza attrezzi', ['corpo']], casa1: ['A casa con manubri ed elastico', ['corpo', 'manubri', 'elastico', 'panca', 'corda']], palestra: ['In palestra', ['corpo', 'manubri', 'bilanciere', 'panca', 'elastico', 'sbarra', 'macchina', 'corda', 'kettlebell']] };
+const T_LIMIT = { ginocchia: ['jumpsquat', 'lunge', 'bulgarian', 'burpee', 'knees', 'rope', 'jack', 'bbsquat', 'wallsit'], schiena: ['deadlift', 'goodmorning', 'row', 'bbsquat', 'superman', 'situp', 'legraise', 'twist'], spalle: ['ohp', 'pike', 'dip', 'bench', 'pullup', 'triext'] };
+/* movement slots → candidates, best first */
+const T_SLOT = {
+  squat: ['bbsquat', 'goblet', 'squat', 'sumo'], single: ['bulgarian', 'revlunge', 'lunge', 'stepup'], hinge: ['deadlift', 'rdl', 'hipthrust', 'bridge', 'goodmorning'],
+  pushH: ['bench', 'dbbench', 'pushup', 'incline', 'kneepush'], pushV: ['ohp', 'pike', 'frontraise'], pull: ['pullup', 'pulldown', 'row', 'onearm', 'bandrow', 'chinup', 'superman'], pull2: ['onearm', 'row', 'bandrow', 'facepull', 'chinup', 'superman'],
+  shoulder: ['lateral', 'facepull', 'frontraise'], biceps: ['curl', 'hammer'], triceps: ['triext', 'dip', 'kickback'], calf: ['calf'], chest2: ['fly', 'incline', 'pushup', 'kneepush'],
+  core: ['plank', 'deadbug', 'bicycle', 'legraise', 'crunch', 'birddog', 'sideplank'], core2: ['sideplank', 'twist', 'birddog', 'deadbug', 'crunch'], cardio: ['burpee', 'climber', 'jumpsquat', 'jack', 'knees', 'run', 'rope'],
+  mob: ['catcow', 'hipflex', 'hamstring', 'child', 'quadstretch', 'armcircle', 'birddog'],
+};
+const T_SPLIT = {
+  full: [['A', 'Total body', ['squat', 'pushH', 'pull', 'hinge', 'pushV', 'core', 'single', 'core2']], ['B', 'Total body', ['hinge', 'pushV', 'pull2', 'single', 'chest2', 'core', 'squat', 'core2']], ['C', 'Total body', ['single', 'pushH', 'pull', 'squat', 'shoulder', 'core2', 'hinge', 'core']]],
+  ul: [['A', 'Parte alta', ['pushH', 'pull', 'pushV', 'pull2', 'shoulder', 'biceps', 'triceps', 'core']], ['B', 'Gambe e core', ['squat', 'hinge', 'single', 'calf', 'core', 'core2', 'bridgeX']]],
+  ppl: [['A', 'Spinta (petto, spalle, tricipiti)', ['pushH', 'pushV', 'chest2', 'shoulder', 'triceps', 'core']], ['B', 'Tirata (schiena, bicipiti)', ['pull', 'pull2', 'shoulder', 'biceps', 'core2', 'hingeL']], ['C', 'Gambe', ['squat', 'hinge', 'single', 'calf', 'core', 'core2']]],
+  circuit: [['A', 'Circuito total body', ['squat', 'pushH', 'cardio', 'pull', 'core', 'single', 'cardio', 'core2']], ['B', 'Circuito brucia-calorie', ['cardio', 'single', 'pushH', 'cardio', 'hinge', 'core', 'cardio', 'core2']]],
+  mob: [['A', 'Mobilità e core', ['mob', 'mob', 'core', 'mob', 'core2', 'mob', 'mob']], ['B', 'Postura e schiena', ['mob', 'core', 'mob', 'bridgeX', 'mob', 'core2', 'mob']]],
+};
+T_SLOT.bridgeX = ['bridge', 'hipthrust']; T_SLOT.hingeL = ['rdl', 'bridge', 'superman'];
+const T_DAYS = { 2: [0, 3], 3: [0, 2, 4], 4: [0, 1, 3, 4], 5: [0, 1, 2, 3, 4], 6: [0, 1, 2, 3, 4, 5] };
+const T_QUICK = {
+  sette: ['7 minuti scientifici', 'Il classico circuito: 12 esercizi, 30 s di lavoro e 10 di pausa', 'hiit', [['jack', 30], ['wallsit', 30], ['pushup', 30], ['crunch', 30], ['stepup', 30], ['squat', 30], ['dip', 30], ['plank', 30], ['knees', 30], ['lunge', 30], ['pushup', 30], ['sideplank', 30]], 10],
+  addome: ['Addome in 10 minuti', 'Core forte senza attrezzi', 'pesi', [['crunch', 40], ['deadbug', 40], ['plank', 40], ['bicycle', 40], ['legraise', 40], ['sideplank', 40], ['birddog', 40], ['plank', 40]], 20],
+  silenzio: ['Cardio senza salti', 'Per non disturbare i vicini: niente salti, cuore su', 'hiit', [['squat', 40], ['climber', 40], ['revlunge', 40], ['knees', 40], ['kneepush', 40], ['bicycle', 40], ['bridge', 40], ['run', 40]], 20],
+  mattino: ['Mobilità del mattino', 'Otto minuti per svegliare schiena, anche e spalle', 'yoga', [['catcow', 45], ['child', 40], ['hipflex', 40], ['hamstring', 40], ['armcircle', 30], ['birddog', 40], ['quadstretch', 30], ['bridge', 40]], 10],
+  scrivania: ['Pausa dalla scrivania', 'Cinque minuti per collo, schiena e gambe dopo tanto studio', 'yoga', [['armcircle', 30], ['catcow', 40], ['hipflex', 40], ['squat', 30], ['quadstretch', 30], ['hamstring', 40]], 10],
+};
+const Train = {
+  P() { return (S.health.train ||= { plan: null, log: [] }); },
+  plan() { const p = this.P().plan; return p && p.sessions && p.sessions.length ? p : null; },
+  sess(id) { return Gym.plans().find(x => x.id === id) || null; },
+  sessions() { const p = this.plan(); return p ? p.sessions.map(id => this.sess(id)).filter(Boolean) : []; },
+  /** which session is next: rotate after the last one done */
+  next() { const L = this.sessions(); if (!L.length) return null; const done = this.P().log.filter(l => l.plan === this.plan().id); const last = done[done.length - 1]; const i = last ? (L.findIndex(s => s.id === last.sid) + 1) % L.length : 0; return L[Math.max(0, i)]; },
+  todayPlanned() { const p = this.plan(); return !!p && (p.days || []).includes(dowIdx(todayK())); },
+  doneOn(k) { return this.P().log.some(l => l.k === k); },
+  weekDone() { const mon = dkey(startOfWeek(new Date())); return this.P().log.filter(l => l.k >= mon).length; },
+  weekStreak() { let n = 0; const p = this.plan(), need = p ? Math.max(1, (p.days || []).length - 1) : 1; for (let w = 1; w < 60; w++) { const a = dkey(addDays(startOfWeek(new Date()), -7 * w)), b = addDK(a, 6); if (this.P().log.filter(l => l.k >= a && l.k <= b).length >= need) n++; else break; } if (this.weekDone() >= need) n++; return n; },
+  minutes(s) { let t = 0; for (const e of s.ex || []) { const sets = (e.sets || []).length || 3, work = e.time || 40; t += sets * (work + (e.rest || 60)); } t += ((s.warm || []).length + (s.cool || []).length) * 40; return Math.max(5, Math.round(t / 60)); },
+  /* ---------- the plan generator ---------- */
+  build(o) {
+    const eq = new Set(T_PLACE[o.place][1]), ban = new Set((o.limits || []).flatMap(l => T_LIMIT[l] || [])), lv = +o.level || 1;
+    let ok = id => { const e = EXI[id]; return e && eq.has(e.eq) && !ban.has(id) && e.lvl <= lv + 1 && !(lv === 1 && e.lvl === 3); };
+    const split = o.goal === 'mobilita' ? 'mob' : o.goal === 'resistenza' || (o.goal === 'tono' && o.place === 'casa0') ? 'circuit' : o.days <= 3 ? 'full' : o.days === 4 ? 'ul' : 'ppl';
+    if (split === 'circuit' || split === 'mob') { const o2 = ok, light = new Set(['corpo', 'manubri', 'elastico', 'corda', 'kettlebell', 'panca']), heavy = new Set(['deadlift', 'bench', 'pullup', 'chinup', 'bbsquat', 'row', 'hipthrust', 'dbbench', 'fly', 'pulldown']); ok = id => o2(id) && light.has(EXI[id].eq) && !heavy.has(id) && EXI[id].lvl <= 2; }
+    let tpl = T_SPLIT[split]; if (split === 'full') tpl = tpl.slice(0, Math.min(3, o.days)); if (split === 'circuit' || split === 'mob') tpl = tpl.slice(0, o.days <= 2 ? 2 : 2);
+    const nEx = clamp(Math.round(o.minutes / (o.goal === 'forza' ? 11 : o.goal === 'massa' ? 9 : 6)), 4, 8);
+    const scheme = { forza: { s: 4, r: lv === 1 ? 8 : 5, rest: 150 }, massa: { s: lv === 1 ? 3 : 4, r: 10, rest: 90 }, tono: { s: 3, r: 14, rest: 45 }, resistenza: { s: 3, time: 40, rest: 20 }, mobilita: { s: 2, time: 40, rest: 15 } }[o.goal];
+    const used = new Set(), out = [];
+    tpl.forEach(([letter, name, slots], ti) => {
+      const ex = [];
+      for (const sl of slots) { if (ex.length >= nEx) break; const C = (T_SLOT[sl] || []).filter(ok); if (!C.length) continue; const pick = C.find(id => !ex.some(e => e.id === id) && !(used.has(id) && C.length > 1 && ti)) || C.find(id => !ex.some(e => e.id === id)); if (!pick) continue; used.add(pick);
+        const E = EXI[pick], timed = E.time || scheme.time; const base = { id: pick, n: E.n, rest: scheme.rest };
+        if (timed) ex.push({ ...base, time: E.time ? Math.round(E.time * (o.goal === 'resistenza' || o.goal === 'mobilita' ? 1 : 1)) : scheme.time, sets: Array.from({ length: scheme.s }, () => ({ r: 0, kg: 0 })) });
+        else { const r = E.kind === 'core' ? Math.max(scheme.r, 12) : E.eq === 'corpo' && o.goal === 'forza' ? 12 : scheme.r; ex.push({ ...base, sets: Array.from({ length: scheme.s }, () => ({ r, kg: 0 })) }); } }
+      const warm = (o.goal === 'mobilita' ? [['catcow', 40], ['armcircle', 30]] : [['jack', 40], ['armcircle', 30], [ban.has('jack') ? 'run' : 'squat', 30]]).filter(([id]) => !ban.has(id) || id === 'run').map(([id, t]) => ({ id, n: EXI[id].n, time: t }));
+      const cool = [['hamstring', 40], ['child', 40], [split === 'ul' || split === 'ppl' ? 'hipflex' : 'quadstretch', 40]].map(([id, t]) => ({ id, n: EXI[id].n, time: t }));
+      out.push({ id: uid(), name: `${letter} · ${name}`, letter, ex, warm, cool, rest: scheme.rest, kind: split === 'circuit' ? 'hiit' : split === 'mob' ? 'yoga' : 'pesi', circuit: split === 'circuit' });
+    });
+    return { split, sessions: out };
+  },
+  makePlan(o) {
+    const { split, sessions } = this.build(o), P = this.P();
+    if (P.plan) S.health.plans = Gym.plans().filter(x => !P.plan.sessions.includes(x.id));
+    for (const s of sessions) Gym.plans().push(s);
+    P.plan = { id: uid(), ...o, split, days: o.dayList || T_DAYS[o.days] || T_DAYS[3], sessions: sessions.map(s => s.id), created: todayK() };
+    save('health'); return P.plan;
+  },
+  /** suggestion for this session: last time's numbers, a little more if it went well */
+  target(e) {
+    if (e.time) return { time: e.time };
+    const L = Gym.last(e.n), base = (e.sets || [])[0] || { r: 10, kg: 0 };
+    if (!L) return { r: base.r, kg: base.kg || 0 };
+    const all = (L.sets || []).every(z => (+z.r || 0) >= (+base.r || 0)), kg = Math.max(0, ...(L.sets || []).map(z => +z.kg || 0));
+    if (kg) return { r: base.r, kg: all ? Math.round((kg + (kg >= 40 ? 2.5 : 1)) * 2) / 2 : kg, up: all };
+    return { r: all ? Math.min(base.r + 2, (base.r || 10) + 8) : base.r, kg: 0, up: all };
+  },
+  say(t) { if (this.P().voice === false || !('speechSynthesis' in window)) return; try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(t); u.lang = 'it-IT'; u.rate = 1.05; const v = speechSynthesis.getVoices().find(v => /^it/i.test(v.lang)); if (v) u.voice = v; speechSynthesis.speak(u); } catch (_) {} },
+};
+
+/* ---------- the guided workout ---------- */
+function trainPlay(sid, quick) {
+  let s = sid ? Train.sess(sid) : null;
+  if (quick) { const Q = T_QUICK[quick]; s = { id: 'q-' + quick, name: Q[0], kind: Q[2], circuit: true, ex: Q[3].map(([id, t]) => ({ id, n: EXI[id].n, time: t, rest: Q[4], sets: [{ r: 0, kg: 0 }] })), warm: [], cool: [] }; }
+  if (!s) return;
+  /* the flat list of steps: warm-up, sets (or circuit rounds), cool-down */
+  const steps = [], add = (e, phase, set, of) => steps.push({ e, phase, set, of, ex: EXI[e.id] || exFind(e.n), t: Train.target(e) });
+  for (const e of s.warm || []) add(e, 'warm', 1, 1);
+  if (s.circuit) { const rounds = Math.max(...s.ex.map(e => (e.sets || []).length || 1)); for (let r = 1; r <= rounds; r++) for (const e of s.ex) add(e, 'main', r, rounds); }
+  else for (const e of s.ex) { const n = (e.sets || []).length || 3; for (let k = 1; k <= n; k++) add(e, 'main', k, n); }
+  for (const e of s.cool || []) add(e, 'cool', 1, 1);
+  const st = { i: 0, rest: 0, restMax: 0, run: false, left: 0, t0: Date.now(), done: [], prs: [], timer: null, lock: null };
+  const res = steps.map(x => ({ r: x.t.r || 0, kg: x.t.kg || 0, ok: false }));
+  const keep = async () => { try { if ('wakeLock' in navigator && !st.lock) st.lock = await navigator.wakeLock.request('screen'); } catch (_) {} };
+  keep();
+  const sh = openSheet({ title: s.name, wide: true, left: { label: 'Esci', act: api => { if (res.some(r => r.ok) && !confirm2) { confirm2 = true; Island.toast({ icon: 'flame', c: 'var(--orange)', t: 'Tocca di nuovo Esci per uscire', s: 'Oppure “Fine” per salvare quello che hai fatto', ms: 2500 }); return; } api.close(); } }, right: { label: 'Fine', act: api => finish(api) },
+    body: `<div class="tp" id="tpB"></div>`, onClose() { clearInterval(st.timer); try { st.lock && st.lock.release(); } catch (_) {} try { speechSynthesis.cancel(); } catch (_) {} } });
+  let confirm2 = false; const B = $('#tpB', sh.el);
+  const fmt = n => `${Math.floor(n / 60)}:${pad(Math.max(0, n) % 60)}`;
+  const ring = (v, max, txt, sub, col) => { const C = 2 * Math.PI * 54, f = max ? Math.max(0, Math.min(1, v / max)) : 0; return `<div class="tp-ring"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="54" class="tp-rb"/><circle cx="60" cy="60" r="54" class="tp-rf" style="stroke:${col || 'var(--accent)'};stroke-dasharray:${C};stroke-dashoffset:${C * (1 - f)}"/></svg><div><b class="tnum">${txt}</b><small>${sub || ''}</small></div></div>`; };
+  const tick = () => { clearInterval(st.timer); st.timer = setInterval(() => {
+      if (st.rest > 0) { st.rest--; if (st.rest === 3) Sound.tone([660], .12); if (st.rest <= 0) { Sound.chime(); navigator.vibrate && navigator.vibrate([150, 80, 150]); const x = steps[st.i]; if (x) Train.say(`Via: ${x.ex ? x.ex.n : x.e.n}${x.e.time ? '' : `, ${res[st.i].r} ripetizioni`}`); } paint(); return; }
+      if (st.run && st.left > 0) { st.left--; if (st.left === 10 && steps[st.i].e.time >= 30) Train.say('Ultimi dieci secondi'); if (st.left <= 3 && st.left > 0) Sound.tone([880], .1); if (st.left <= 0) { st.run = false; complete(); return; } const r = $('.tp-ring b', B); if (r) { r.textContent = st.left; const f = $('.tp-rf', B); if (f) { const C = 2 * Math.PI * 54; f.style.strokeDashoffset = C * (1 - st.left / steps[st.i].e.time); } } return; }
+      const el = $('#tpClock', B); if (el) el.textContent = fmt(Math.round((Date.now() - st.t0) / 1000));
+    }, 1000); };
+  const complete = () => { const x = steps[st.i]; res[st.i].ok = true; Sound.done(); navigator.vibrate && navigator.vibrate(60);
+    const nx = st.i + 1; if (nx >= steps.length) { paint(); setTimeout(() => finish(sh), 400); return; }
+    const restFor = x.phase === 'main' ? (s.circuit ? (steps[nx].phase === 'main' && steps[nx].set !== x.set ? Math.max(60, x.e.rest || 20) : x.e.rest || 15) : x.e.rest || s.rest || 60) : 8;
+    st.i = nx; st.rest = st.restMax = restFor; st.run = false; st.left = steps[nx].e.time || 0;
+    Train.say(restFor > 12 ? `Recupero, ${restFor} secondi. Poi ${steps[nx].ex ? steps[nx].ex.n : steps[nx].e.n}` : `Poi ${steps[nx].ex ? steps[nx].ex.n : steps[nx].e.n}`);
+    paint(); };
+  const paint = () => {
+    const x = steps[st.i]; if (!x) return; const E = x.ex, r = res[st.i], timed = !!x.e.time, mainIdx = steps.filter(z => z.phase === 'main');
+    const prog = Math.round(res.filter(z => z.ok).length / steps.length * 100);
+    const label = x.phase === 'warm' ? 'Riscaldamento' : x.phase === 'cool' ? 'Defaticamento' : s.circuit ? `Giro ${x.set} di ${x.of}` : `Serie ${x.set} di ${x.of}`;
+    const nextS = steps[st.i + 1];
+    if (st.rest > 0) {
+      B.innerHTML = `<div class="tp-bar"><i style="width:${prog}%"></i></div><div class="tp-top"><span class="pill">${label}</span><span class="grow"></span><span class="muted tnum" id="tpClock">${fmt(Math.round((Date.now() - st.t0) / 1000))}</span></div>
+        <div class="tp-rest">${ring(st.rest, st.restMax, fmt(st.rest), 'recupero', 'var(--green)')}
+          <div class="tp-nextc"><small class="muted">Adesso</small>${Moves.svg(E ? E.id : x.e.id, 130)}<b>${esc(E ? E.n : x.e.n)}</b><span class="muted">${timed ? x.e.time + ' secondi' : `${r.r} ripetizioni${r.kg ? ' · ' + String(r.kg).replace('.', ',') + ' kg' : ''}`}</span></div></div>
+        <div class="tp-acts"><button class="btn" id="tpM">−15 s</button><button class="btn" id="tpP">+15 s</button><button class="btn primary" id="tpS">Salta il recupero</button></div>`;
+      $('#tpM', B).onclick = () => { st.rest = Math.max(1, st.rest - 15); paint(); }; $('#tpP', B).onclick = () => { st.rest += 15; st.restMax += 15; paint(); }; $('#tpS', B).onclick = () => { st.rest = 0; paint(); };
+      Moves.start(B); return; }
+    const L = !timed && Gym.last(x.e.n), pr = S.health.prs[(x.e.n || '').toLowerCase()];
+    B.innerHTML = `<div class="tp-bar"><i style="width:${prog}%"></i></div><div class="tp-top"><span class="pill">${label}</span><span class="muted" style="font-size:13px">${st.i + 1}/${steps.length}</span><span class="grow"></span><button class="icon-btn" id="tpV" title="Voce">${Train.P().voice === false ? '🔇' : '🔊'}</button><span class="muted tnum" id="tpClock">${fmt(Math.round((Date.now() - st.t0) / 1000))}</span></div>
+      <div class="tp-main"><div class="tp-anim">${Moves.svg(E ? E.id : (x.e.id || 'squat'), 250)}</div>
+        <div class="tp-info"><h2>${esc(E ? E.n : x.e.n)}</h2>${E ? `<div class="tp-mus">${E.mus.map(m => `<span>${esc(m)}</span>`).join('')}</div>` : ''}
+          ${timed ? ring(st.run ? st.left : x.e.time, x.e.time, st.run ? st.left : x.e.time, 'secondi', 'var(--orange)') : `<div class="tp-target"><label><input class="input tnum" id="tpR" type="number" inputmode="numeric" value="${r.r}"><span>ripetizioni</span></label>${E && E.eq !== 'corpo' || r.kg ? `<label><input class="input tnum" id="tpK" type="number" inputmode="decimal" step="0.5" value="${r.kg}"><span>kg</span></label>` : ''}</div>
+          ${x.t.up ? `<div class="tp-up">📈 L'ultima volta è andata bene: ${x.t.kg ? 'carico aumentato' : '+2 ripetizioni'}</div>` : ''}${L ? `<small class="muted">Ultima volta: ${(L.sets || []).map(z => `${z.r}${z.kg ? '×' + z.kg : ''}`).join(' · ')}${pr ? ` · record ${pr} kg` : ''}</small>` : ''}`}
+          <details class="tp-how"><summary>Come si fa</summary><ol>${(E ? E.steps : []).map(t => `<li>${esc(t)}</li>`).join('')}</ol>${E && E.err.length ? `<p class="muted"><b>Evita:</b> ${E.err.map(esc).join(' · ')}</p>` : ''}</details></div></div>
+      <div class="tp-acts">${st.i ? `<button class="btn" id="tpBack">${ico('left', 'sm')}</button>` : ''}${timed ? `<button class="btn primary big" id="tpGo">${st.run ? 'Pausa' : st.left && st.left < x.e.time ? 'Riprendi' : 'Inizia'}</button><button class="btn" id="tpDone">Fatto</button>` : `<button class="btn primary big" id="tpDone">${ico('check', 'sm')}Fatta</button>`}<button class="btn plain" id="tpSkip">Salta</button></div>
+      ${nextS ? `<div class="tp-next muted">Poi: <b>${esc(nextS.ex ? nextS.ex.n : nextS.e.n)}</b></div>` : ''}`;
+    const rr = $('#tpR', B), kk = $('#tpK', B); if (rr) rr.oninput = () => { r.r = +rr.value || 0; for (let j = st.i + 1; j < steps.length; j++) if (steps[j].e === x.e && !res[j].ok) res[j].r = r.r; }; if (kk) kk.oninput = () => { r.kg = +String(kk.value).replace(',', '.') || 0; for (let j = st.i + 1; j < steps.length; j++) if (steps[j].e === x.e && !res[j].ok) res[j].kg = r.kg; };
+    const go = $('#tpGo', B); if (go) go.onclick = () => { if (!st.left || st.left > x.e.time) st.left = x.e.time; st.run = !st.run; if (st.run && st.left === x.e.time) Train.say(`${E ? E.n : x.e.n}, ${x.e.time} secondi. Via!`); paint(); };
+    $('#tpDone', B).onclick = () => { st.run = false; complete(); };
+    $('#tpSkip', B).onclick = () => { st.run = false; if (st.i < steps.length - 1) { st.i++; st.left = steps[st.i].e.time || 0; paint(); } else finish(sh); };
+    const bk = $('#tpBack', B); if (bk) bk.onclick = () => { st.run = false; st.i = Math.max(0, st.i - 1); res[st.i].ok = false; st.left = steps[st.i].e.time || 0; paint(); };
+    $('#tpV', B).onclick = () => { Train.P().voice = Train.P().voice === false; save('health'); paint(); };
+    Moves.start(B);
+  };
+  const finish = api => {
+    clearInterval(st.timer); const min = Math.max(1, Math.round((Date.now() - st.t0) / 60e3));
+    const by = new Map(); steps.forEach((x, j) => { if (x.phase !== 'main' || !res[j].ok) return; const k = x.e.n; if (!by.has(k)) by.set(k, { n: k, id: x.e.id, sets: [] }); by.get(k).sets.push(x.e.time ? { r: 0, kg: 0, sec: x.e.time } : { r: res[j].r, kg: res[j].kg }); });
+    const done = [...by.values()]; if (!done.length && !res.some(r => r.ok)) { api.close(); return; }
+    const prs = []; for (const x of done) { const top = Math.max(0, ...x.sets.map(z => +z.kg || 0)), k = x.n.trim().toLowerCase(); if (top && top > (S.health.prs[k] || 0)) { if (S.health.prs[k]) prs.push(`${x.n} ${top} kg`); S.health.prs[k] = top; } }
+    const vol = done.reduce((a, x) => a + x.sets.reduce((b, z) => b + (+z.r || 0) * (+z.kg || 0), 0), 0), nsets = done.reduce((a, x) => a + x.sets.length, 0);
+    Health.dayW(todayK()).burn.push({ type: s.kind || 'pesi', name: s.name, min, ex: done });
+    const p = Train.plan(); Train.P().log.push({ k: todayK(), sid: s.id, plan: p && p.sessions.includes(s.id) ? p.id : null, min, sets: nsets, vol }); Train.P().log = Train.P().log.slice(-400);
+    const real = Train.sess(s.id); if (real) real.last = todayK(); save('health'); Game.add(30, 'Allenamento: ' + s.name, { icon: 'flame' }); Sound.level();
+    const kc = Math.round(Health.actKcal ? Health.actKcal({ type: s.kind || 'pesi', min }, todayK()) : min * 6);
+    api.close(); setTimeout(() => { const sh2 = openSheet({ title: 'Allenamento completato', left: { label: 'Chiudi' }, body: `<div class="tp-end"><div class="tp-end-big">💪</div><h2>${esc(s.name)}</h2><div class="tp-end-g">${[[min + ' min', 'durata'], [nsets, 'serie'], [vol ? Math.round(vol).toLocaleString('it-IT') + ' kg' : '—', 'volume'], [kc ? '~' + kc + ' kcal' : '—', 'consumate']].map(([v, k]) => `<div><b>${v}</b><small>${k}</small></div>`).join('')}</div>${prs.length ? `<div class="tp-pr">🏆 Nuovi record: ${prs.map(esc).join(', ')}</div>` : ''}<p class="muted" style="margin:0">${Train.weekDone()} ${Train.weekDone() === 1 ? 'allenamento' : 'allenamenti'} questa settimana${Train.plan() ? ` su ${(Train.plan().days || []).length}` : ''}. Segnato in Salute.</p></div>` }); App.refresh(); void sh2; }, 300);
+  };
+  tick(); paint();
+}
+
+/* ---------- plan wizard ---------- */
+function trainWizard() {
+  const old = Train.plan() || {}; const o = { goal: old.goal || 'tono', level: old.level || 1, days: old.days ? old.days.length : 3, minutes: old.minutes || 40, place: old.place || 'casa0', limits: [...(old.limits || [])] };
+  const sh = openSheet({ title: 'La tua scheda', wide: true, left: { label: 'Annulla' }, right: { label: 'Crea', act: s => { const p = Train.makePlan({ ...o, dayList: T_DAYS[o.days] }); s.close(); go('train'); App.render(); Island.toast({ icon: 'flame', c: 'var(--green)', t: 'Scheda pronta', s: `${p.sessions.length} allenamenti a rotazione, ${o.days} giorni a settimana`, ms: 2600 }); } },
+    body: `<div class="field"><span class="lbl">Obiettivo</span><div class="tw-goals">${Object.entries(T_GOAL).map(([k, [n, e, d]]) => `<button type="button" class="tw-g" data-seg="twg" data-v="${k}" aria-pressed="${k === o.goal}"><span>${e}</span><b>${n}</b><small>${d}</small></button>`).join('')}</div></div>
+      <div class="field"><span class="lbl">Dove ti alleni</span>${seg('twp', Object.entries(T_PLACE).map(([k, [n]]) => [k, n]), o.place)}</div>
+      <div class="form-grid"><div class="field"><span class="lbl">Livello</span>${seg('twl', [[1, 'Inizio'], [2, 'Intermedio'], [3, 'Avanzato']], o.level)}</div><div class="field"><span class="lbl">Giorni a settimana</span>${seg('twd', [2, 3, 4, 5, 6].map(n => [n, n]), o.days)}</div></div>
+      <div class="field"><span class="lbl">Tempo per allenamento: <b id="twMv">${o.minutes} minuti</b></span><input type="range" id="twM" min="20" max="90" step="5" value="${o.minutes}"></div>
+      <div class="field"><span class="lbl">Punti delicati (evito gli esercizi che li caricano)</span><div class="chips">${Object.keys(T_LIMIT).map(k => `<button type="button" class="chip" data-twx="${k}" aria-pressed="${o.limits.includes(k)}">${cap(k)}</button>`).join('')}</div></div>
+      <div class="card tw-prev" id="twPrev"></div>`,
+    onMount: el => {
+      const prev = () => { const { sessions } = Train.build(o); $('#twPrev', el).innerHTML = `<small class="muted">Anteprima</small>${sessions.map(s => `<div class="tw-ps"><b>${esc(s.name)}</b><span class="muted">~${Train.minutes(s)} min</span><div>${s.ex.map(e => esc(e.n)).join(' · ')}</div></div>`).join('')}`; };
+      wireSeg(el, 'twg', v => { o.goal = v; prev(); }); wireSeg(el, 'twp', v => { o.place = v; prev(); }); wireSeg(el, 'twl', v => { o.level = +v; prev(); }); wireSeg(el, 'twd', v => { o.days = +v; prev(); });
+      const m = $('#twM', el); m.oninput = () => { o.minutes = +m.value; $('#twMv', el).textContent = o.minutes + ' minuti'; prev(); };
+      $$('[data-twx]', el).forEach(b => b.onclick = () => { const k = b.dataset.twx, i = o.limits.indexOf(k); if (i >= 0) o.limits.splice(i, 1); else o.limits.push(k); b.setAttribute('aria-pressed', i < 0); prev(); });
+      prev(); } });
+  return sh;
+}
+/* ---------- exercise detail ---------- */
+function exSheet(id) {
+  const E = EXI[id]; if (!E) return;
+  const sh = openSheet({ title: E.n, wide: true, left: { label: 'Chiudi' },
+    body: `<div class="ex-d"><div class="ex-anim">${Moves.svg(E.id, 260)}</div><div class="ex-meta"><div class="tp-mus">${E.mus.map(m => `<span>${esc(m)}</span>`).join('')}</div><div class="muted" style="font-size:14px">${EQ_N[E.eq] || E.eq} · ${KIND_N[E.kind]} · ${['', 'Facile', 'Medio', 'Impegnativo'][E.lvl]}${E.time ? ` · ${E.time} secondi` : ''}</div>
+      <div class="section-h" style="margin:6px 0 4px">Come si fa</div><ol class="ex-steps">${E.steps.map(t => `<li>${esc(t)}</li>`).join('')}</ol>
+      ${E.err.length ? `<div class="section-h" style="margin:6px 0 4px">Errori da evitare</div><ul class="ex-err">${E.err.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px"><button class="btn primary" id="exTry">${ico('play', 'sm')}Provalo adesso</button>${Gym.plans().length ? `<button class="btn" id="exAdd">${ico('plus', 'sm')}Aggiungi a una scheda</button>` : ''}<a class="btn plain" href="https://www.youtube.com/results?search_query=${encodeURIComponent(E.n + ' esecuzione corretta')}" target="_blank" rel="noopener">${ico('play', 'sm')}Video su YouTube</a></div></div></div>`,
+    onMount: el => { Moves.start(el);
+      $('#exTry', el).onclick = () => { sh.close(); T_QUICK['__one'] = [E.n, '', E.kind === 'mobilita' ? 'yoga' : 'pesi', [[E.id, E.time || 40]], 30]; trainPlay(null, '__one'); };
+      const a = $('#exAdd', el); if (a) a.onclick = () => { const L = Gym.plans(); openSheet({ title: 'Aggiungi a…', left: { label: 'Annulla' }, body: `<div class="list">${L.map(p => `<button class="row" data-exp="${p.id}"><span class="grow t">${esc(p.name)}</span>${ico('plus', 'sm')}</button>`).join('')}</div>`, onMount: el2 => $$('[data-exp]', el2).forEach(b => b.onclick = () => { const p = L.find(x => x.id === b.dataset.exp); p.ex.push({ id: E.id, n: E.n, rest: p.rest || 90, ...(E.time ? { time: E.time } : {}), sets: [{ r: 10, kg: 0 }, { r: 10, kg: 0 }, { r: 10, kg: 0 }] }); save('health'); Sheets[Sheets.length - 1].close(); Island.toast({ icon: 'plus', c: 'var(--green)', t: 'Aggiunto', s: p.name, ms: 1600 }); }) }); };
+    } });
+}
+const T_MUS = { gambe: ['Gambe', /quadric|femoral|glute|polpac|addutt/], petto: ['Petto', /pettoral/], schiena: ['Schiena', /dorsal|schiena/], spalle: ['Spalle', /spalle/], braccia: ['Braccia', /bicip|tricip|avambr/], addome: ['Addome', /core|addomin|obliqu/], cardio: ['Cardio', /cardio|tutto il corpo/], mobilita: ['Mobilità', /mobilit/] };
+
+/* ---------- the section ---------- */
+VIEWS.train = {
+  actions: () => `<button class="btn sm" data-act="trainQuick">⚡<span class="hide-narrow">Veloce</span></button><button class="btn primary sm" data-act="trainWizard">${ico('spark', 'sm')}<span class="hide-narrow">${Train.plan() ? 'Rifai la scheda' : 'Crea la scheda'}</span></button>`,
+  render() {
+    const p = Train.plan(), nx = Train.next(), wk = Train.weekDone(), goalN = p ? (p.days || []).length : 3, tab = UI.trTab || 'piano', q = (UI.trQ || '').trim().toLowerCase(), mus = UI.trMus || '';
+    const days = []; const mon = startOfWeek(new Date()); for (let i = 0; i < 7; i++) { const k = dkey(addDays(mon, i)); days.push(k); }
+    const hero = `<section class="card tr-hero"><div class="tr-ringw">${(() => { const C = 2 * Math.PI * 44, f = Math.min(1, wk / Math.max(1, goalN)); return `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" class="tp-rb"/><circle cx="50" cy="50" r="44" class="tp-rf" style="stroke:var(--orange);stroke-dasharray:${C};stroke-dashoffset:${C * (1 - f)}"/></svg><div><b>${wk}/${goalN}</b><small>settimana</small></div>`; })()}</div>
+      <div class="grow" style="min-width:0"><small class="muted">${p ? T_GOAL[p.goal][1] + ' ' + T_GOAL[p.goal][0] + ' · ' + T_PLACE[p.place][0].toLowerCase() : 'Nessuna scheda ancora'}</small>
+        <div class="tr-week">${days.map(k => { const pl = p && (p.days || []).includes(dowIdx(k)), dn = Train.doneOn(k); return `<span class="${dn ? 'done' : pl ? 'plan' : ''} ${k === todayK() ? 'today' : ''}"><small>${DOW_S[dowIdx(k)][0]}</small><i>${dn ? '✓' : ''}</i></span>`; }).join('')}</div>
+        <div class="muted" style="font-size:13.5px">${Train.weekStreak() > 1 ? `🔥 ${Train.weekStreak()} settimane di fila` : p ? 'Allenati nei giorni segnati: la scheda ruota da sola' : 'Rispondi a 5 domande e ti preparo la scheda giusta'}</div></div></section>`;
+    const next = nx ? `<section class="card tr-next"><div class="tr-next-h"><span class="grow" style="min-width:0"><small class="muted">${Train.doneOn(todayK()) ? 'Fatto oggi ✓ · il prossimo' : Train.todayPlanned() ? 'Oggi tocca a' : 'Prossimo allenamento'}</small><b>${esc(nx.name)}</b><span class="muted">${nx.ex.length} esercizi · ~${Train.minutes(nx)} min</span></span><button class="btn primary big" data-trgo="${nx.id}">${ico('play', 'sm')}Inizia</button></div>
+      <div class="tr-thumbs">${nx.ex.slice(0, 6).map(e => `<button class="tr-th" data-exd="${e.id || ''}">${Moves.svg(e.id || (exFind(e.n) || {}).id || 'squat', 84)}<span>${esc(e.n)}</span><small>${e.time ? e.time + ' s' : `${(e.sets || []).length}×${(e.sets[0] || {}).r || 10}`}</small></button>`).join('')}</div></section>` : `<section class="card tr-empty"><div class="empty"><span style="font-size:44px">🏋️</span><b>Creiamo la tua scheda</b><p>Obiettivo, livello, giorni, tempo e dove ti alleni: preparo gli allenamenti a rotazione con gli esercizi giusti e ti guido serie per serie.</p><button class="btn primary" data-act="trainWizard">${ico('spark', 'sm')}Crea la scheda</button></div></section>`;
+    const plans = Gym.plans().length ? `<div class="section-h">Le tue schede</div><div class="list">${Gym.plans().map(s => `<div class="row"><span class="tile-ico" style="background:var(--orange)">${ico('flame')}</span><span class="grow" style="min-width:0"><div class="t">${esc(s.name)}</div><div class="s">${s.ex.length} esercizi · ~${Train.minutes(s)} min${s.last ? ' · ultima volta ' + relDay(s.last, true).toLowerCase() : ''}</div></span><button class="icon-btn" data-tred="${s.id}" title="Modifica">${ico('pencil', 'sm')}</button><button class="btn sm primary" data-trgo="${s.id}">${ico('play', 'sm')}</button></div>`).join('')}</div>` : '';
+    const quick = `<div class="section-h">Allenamenti veloci</div><div class="tr-quick">${Object.entries(T_QUICK).filter(([k]) => !k.startsWith('__')).map(([k, [n, d, , L]]) => `<button class="card tr-q" data-trq="${k}">${Moves.svg(L[0][0], 64)}<span><b>${esc(n)}</b><small>${esc(d)}</small><small class="muted">${Math.round(L.reduce((a, [, t]) => a + t + (T_QUICK[k][4] || 10), 0) / 60)} min</small></span></button>`).join('')}</div>`;
+    const lib = (() => { const L = EXL.filter(e => (!q || kNorm(e.n).includes(kNorm(q)) || e.mus.some(m => m.includes(q))) && (!mus || T_MUS[mus][1].test(e.mus.join(' ')))); return `<div class="tr-libh"><label class="quick" style="margin:0;flex:1;background:var(--cell);box-shadow:none">${ico('search')}<input id="trQ" placeholder="Cerca un esercizio o un muscolo" value="${esc(UI.trQ || '')}"></label></div><div class="chips">${Object.entries(T_MUS).map(([k, [n]]) => `<button class="chip" data-trm="${k}" aria-pressed="${k === mus}">${n}</button>`).join('')}</div><div class="tr-lib">${L.map(e => `<button class="card tr-ex" data-exd="${e.id}">${Moves.svg(e.id, 110, 'data-static="1"')}<b>${esc(e.n)}</b><small class="muted">${esc(e.mus.slice(0, 2).join(', '))} · ${EQ_N[e.eq]}</small></button>`).join('') || '<p class="muted">Nessun esercizio trovato.</p>'}</div>`; })();
+    const prog = (() => { const W = []; for (let w = 7; w >= 0; w--) { const a = dkey(addDays(startOfWeek(new Date()), -7 * w)), b = addDK(a, 6), L = Train.P().log.filter(l => l.k >= a && l.k <= b), m = Object.entries(S.health.days || {}).filter(([k]) => k >= a && k <= b).reduce((s, [, d]) => s + (d.burn || []).reduce((x, y) => x + (+y.min || 0), 0), 0); W.push({ label: `${parseD(a).getDate()}/${parseD(a).getMonth() + 1}`, v: m, tip: `${L.length} allenamenti · ${m} min` }); }
+      const prs = Object.entries(S.health.prs || {}).sort((a, b) => b[1] - a[1]).slice(0, 8);
+      return `<section class="card"><div class="card-h"><h3>Minuti di attività a settimana</h3></div>${barChart(W, { unit: 'min', h: 170, w: 520, color: 'var(--orange)', hiLast: true })}</section>${prs.length ? `<div class="section-h">Record personali</div><div class="list">${prs.map(([k, v]) => `<div class="row"><span class="grow t">${esc(cap(k))}</span><b class="tnum">${String(v).replace('.', ',')} kg</b></div>`).join('')}</div><button class="btn plain" data-act="trProgress" style="margin-top:8px">${ico('grid', 'sm')}Grafico per esercizio</button>` : '<p class="muted" style="font-size:14px">I record compaiono quando registri i carichi durante gli allenamenti.</p>'}`; })();
+    return `<h1 class="large-title">Allenamento</h1>${hero}<div class="seg tr-tabs">${[['piano', 'Scheda'], ['esercizi', 'Esercizi'], ['progressi', 'Progressi']].map(([k, n]) => `<button type="button" data-trt="${k}" aria-pressed="${k === tab}">${n}</button>`).join('')}</div>
+      ${tab === 'piano' ? next + quick + plans : tab === 'esercizi' ? lib : prog}`;
+  },
+  mount(root) {
+    $$('[data-trt]', root).forEach(b => b.onclick = () => { UI.trTab = b.dataset.trt; App.render(); });
+    $$('[data-trgo]', root).forEach(b => b.onclick = () => trainPlay(b.dataset.trgo));
+    $$('[data-tred]', root).forEach(b => b.onclick = () => gymEdit(b.dataset.tred));
+    $$('[data-trq]', root).forEach(b => b.onclick = () => trainPlay(null, b.dataset.trq));
+    $$('[data-exd]', root).forEach(b => b.onclick = () => { const id = b.dataset.exd || (exFind(b.textContent) || {}).id; if (id) exSheet(id); });
+    $$('[data-trm]', root).forEach(b => b.onclick = () => { UI.trMus = UI.trMus === b.dataset.trm ? '' : b.dataset.trm; App.render(); });
+    const q = $('#trQ', root); if (q) { q.oninput = () => { UI.trQ = q.value; clearTimeout(this._qt); this._qt = setTimeout(() => { const pos = q.selectionStart; App.render(); const n = $('#trQ'); if (n) { n.focus(); n.setSelectionRange(pos, pos); } }, 220); }; }
+    /* the library shows a still frame (light), the rest moves */
+    for (const svg of $$('svg[data-static]', root)) { const E = EXI[svg.dataset.mv]; if (E && MOVES[E.pat]) Moves.draw(svg, MOVES[E.pat], .999); svg.parentElement.onmouseenter = () => { svg.removeAttribute('data-static'); Moves.start(svg.parentElement); }; }
+    Moves.start(root);
+  },
+};
+/* Moves.start skips still frames */
+{ const oS = Moves.start.bind(Moves); Moves.start = function (root) { const R = root || document; const st = $$('svg[data-static]', R); st.forEach(s => s._mv = s._mv || { still: true }); oS(R); st.forEach(s => { if (s._mv && s._mv.still) delete s._mv; }); }; }
+ACT.trainWizard = () => trainWizard();
+ACT.trainQuick = () => { UI.trTab = 'piano'; if (UI.view !== 'train') go('train'); setTimeout(() => { const el = $('.tr-quick'); el && el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 250); };
+ACT.trProgress = () => gymProgress();
+ACT.gymPlans = () => go('train');
+ACT.trainNow = () => { const n = Train.next(); if (n) trainPlay(n.id); else go('train'); };
+CMD_ACT.push(['Allenati adesso', 'flame', () => ACT.trainNow()], ['Crea la scheda di allenamento', 'flame', () => trainWizard()], ['Esercizi: come si fanno', 'flame', () => { UI.trTab = 'esercizi'; go('train'); }]);
+/* Today: the session of the day */
+TODAY_CARDS.train = 'Allenamento';
+if (!TODAY_DEFAULT.includes('train')) { const i = TODAY_DEFAULT.indexOf('health'); TODAY_DEFAULT.splice(i >= 0 ? i + 1 : TODAY_DEFAULT.length, 0, 'train'); }
+TODAY_EXTRA.train = () => { const p = Train.plan(); if (!p || !Train.todayPlanned() || Train.doneOn(todayK())) return ''; const n = Train.next(); if (!n) return '';
+  return `<section class="card span-6 tr-today"><div class="tr-next-h"><span class="grow" style="min-width:0"><small class="muted">🏋️ Oggi ti alleni</small><b>${esc(n.name)}</b><span class="muted" style="font-size:13.5px">${n.ex.length} esercizi · ~${Train.minutes(n)} min</span></span><button class="btn primary" data-act="trainNow">${ico('play', 'sm')}Inizia</button></div><div class="tr-thumbs sm">${n.ex.slice(0, 4).map(e => `<span class="tr-th">${Moves.svg(e.id || 'squat', 58)}<small>${esc(e.n)}</small></span>`).join('')}</div></section>`; };
+{ const oR = App.render.bind(App); App.render = function () { const r = oR.apply(this, arguments); if (UI.view === 'today') { const c = $('.tr-today'); if (c) Moves.start(c); } return r; }; }
+/* the alert on training days */
+{ const old = Alerts.list.bind(Alerts); Alerts.list = function (hours = 48) { const out = old(hours), now = Date.now(), p = Train.plan(); if (!p || p.notif === false) return out;
+    for (let i = 0; i <= Math.ceil(hours / 24); i++) { const k = addDK(todayK(), i); if (!(p.days || []).includes(dowIdx(k)) || Train.doneOn(k)) continue; const key = 'tr:' + k, at = this.at(k, p.at || '18:00'); const n = Train.next(); if (!this.fired[key] && at >= now - 10 * 60e3 && at <= now + hours * 36e5) out.push({ key, at, title: `🏋️ Oggi: ${n ? n.name : 'allenamento'}`, body: n ? `${n.ex.length} esercizi · circa ${Train.minutes(n)} minuti` : 'Apri la scheda', view: 'train' }); }
+    return out; }; }
+
+/* =========================================================
+   CORSI DI LINGUA — contenuti pronti (inglese, spagnolo,
+   francese, tedesco): 12 unità dal livello A1 all'A2, ognuna
+   con parole, frasi e un consiglio di grammatica. Le altre
+   lingue si generano con l'AI la prima volta e restano salvate.
+   Formato: parole "italiano=lingua;…", frasi "italiano=lingua/variante;…"
+   ========================================================= */
+const LG_UNITS = [
+  ['Saluti e cortesia', '👋'], ['Presentarsi', '🙋'], ['Cibo e bevande', '🍎'], ['Famiglia e persone', '👨‍👩‍👧'], ['Numeri, giorni e orari', '🕐'], ['In città', '🏙️'],
+  ['Casa e oggetti', '🏠'], ['Studio e lavoro', '🎓'], ['Tempo libero', '⚽'], ['Viaggi e trasporti', '✈️'], ['Al ristorante e a fare spese', '🍽️'], ['Salute e corpo', '🩺'],
+];
+const LG_DATA = {
+  inglese: { code: 'en-GB', units: [
+    { w: 'ciao=hello;arrivederci=goodbye;grazie=thank you;per favore=please;sì=yes;no=no;buongiorno=good morning;buonanotte=good night;scusa=sorry;benvenuto=welcome', s: 'Ciao, come stai?=Hello, how are you?/Hi, how are you?;Sto bene, grazie.=I am fine, thank you./I\'m fine, thank you./I am fine, thanks.;Buongiorno, signora.=Good morning, madam.;Grazie mille!=Thank you very much!/Thanks a lot!;Scusa, non capisco.=Sorry, I do not understand./Sorry, I don\'t understand.;Ci vediamo domani.=See you tomorrow.', tip: 'In inglese "you" vale sia per "tu" che per "lei": il tono lo danno parole come "please" e "thank you".' },
+    { w: 'nome=name;io=I;tu=you;lui=he;lei=she;studente=student;italiano=Italian;anni=years;città=city;amico=friend', s: 'Mi chiamo Marco.=My name is Marco./I am Marco./I\'m Marco.;Sono italiano.=I am Italian./I\'m Italian.;Ho vent\'anni.=I am twenty years old./I\'m twenty years old./I am twenty./I\'m twenty.;Lei è mia amica.=She is my friend./She\'s my friend.;Di dove sei?=Where are you from?;Vivo a Roma.=I live in Rome.', tip: 'L\'età si dice con "to be": I am twenty (non "I have twenty").' },
+    { w: 'acqua=water;pane=bread;mela=apple;caffè=coffee;latte=milk;formaggio=cheese;pollo=chicken;uovo=egg;vino=wine;zucchero=sugar', s: 'Bevo l\'acqua.=I drink water./I drink the water.;Mangio una mela.=I eat an apple./I am eating an apple./I\'m eating an apple.;Vorrei un caffè, per favore.=I would like a coffee, please./I\'d like a coffee, please.;Il pane è buono.=The bread is good.;Non mangio il pollo.=I do not eat chicken./I don\'t eat chicken.;Hai fame?=Are you hungry?', tip: '"An" si usa davanti a suono vocalico: an apple, an egg; altrimenti "a": a coffee.' },
+    { w: 'madre=mother;padre=father;fratello=brother;sorella=sister;figlio=son;figlia=daughter;nonno=grandfather;nonna=grandmother;marito=husband;moglie=wife', s: 'Questa è mia madre.=This is my mother.;Ho un fratello.=I have a brother./I have got a brother./I\'ve got a brother.;Mia sorella è alta.=My sister is tall.;Mio padre lavora molto.=My father works a lot.;Hai figli?=Do you have children?/Have you got children?;La mia famiglia è grande.=My family is big.', tip: 'Alla terza persona singolare il verbo prende la -s: he works, she lives.' },
+    { w: 'uno=one;due=two;tre=three;dieci=ten;lunedì=Monday;venerdì=Friday;oggi=today;domani=tomorrow;ora=hour;settimana=week', s: 'Che ore sono?=What time is it?;Sono le tre.=It is three o\'clock./It\'s three o\'clock./It is three./It\'s three.;Oggi è lunedì.=Today is Monday./It is Monday today.;Lavoro dal lunedì al venerdì.=I work from Monday to Friday.;Ci vediamo alle dieci.=See you at ten.;Una settimana ha sette giorni.=A week has seven days.', tip: 'I giorni della settimana in inglese hanno sempre la maiuscola: Monday, Friday.' },
+    { w: 'strada=street;negozio=shop;banca=bank;stazione=station;ospedale=hospital;parco=park;piazza=square;ponte=bridge;museo=museum;farmacia=pharmacy', s: 'Dov\'è la stazione?=Where is the station?/Where\'s the station?;Gira a destra.=Turn right.;È vicino al parco.=It is near the park./It\'s near the park.;Il museo è chiuso oggi.=The museum is closed today.;Vado in banca.=I am going to the bank./I\'m going to the bank./I go to the bank.;C\'è una farmacia qui?=Is there a pharmacy here?', tip: '"There is" per una cosa, "there are" per più cose: there are two shops.' },
+    { w: 'casa=house;cucina=kitchen;camera=bedroom;letto=bed;tavolo=table;sedia=chair;porta=door;finestra=window;chiave=key;telefono=phone', s: 'La mia casa è piccola.=My house is small.;Il libro è sul tavolo.=The book is on the table.;Chiudi la finestra, per favore.=Close the window, please./Please close the window.;Dove sono le chiavi?=Where are the keys?;La cucina è pulita.=The kitchen is clean.;Ho perso il telefono.=I lost my phone./I have lost my phone./I\'ve lost my phone.', tip: 'Gli aggettivi vanno prima del nome e non cambiano: a small house, small houses.' },
+    { w: 'università=university;esame=exam;libro=book;lezione=lesson;lavoro=job;ufficio=office;capo=boss;riunione=meeting;compito=homework;insegnante=teacher', s: 'Studio ingegneria.=I study engineering./I am studying engineering./I\'m studying engineering.;Domani ho un esame.=I have an exam tomorrow./Tomorrow I have an exam.;La lezione inizia alle nove.=The lesson starts at nine./The class starts at nine.;Lavoro in un ufficio.=I work in an office.;La riunione è finita.=The meeting is over./The meeting has finished.;Devo studiare stasera.=I have to study tonight./I must study tonight.', tip: '"Have to" esprime un obbligo esterno: I have to study; "must" un obbligo sentito da te.' },
+    { w: 'calcio=football;musica=music;film=movie;giocare=to play;leggere=to read;nuotare=to swim;ballare=to dance;cantare=to sing;spiaggia=beach;fine settimana=weekend', s: 'Mi piace la musica.=I like music.;Gioco a calcio il sabato.=I play football on Saturdays./I play football on Saturday.;Leggi molto?=Do you read a lot?;Andiamo al cinema stasera?=Shall we go to the cinema tonight?/Are we going to the cinema tonight?;Non so nuotare.=I cannot swim./I can\'t swim.;Nel fine settimana vado in spiaggia.=At the weekend I go to the beach./On the weekend I go to the beach./I go to the beach at the weekend.', tip: 'Dopo "like", "love", "enjoy" si usa spesso il verbo in -ing: I like swimming.' },
+    { w: 'treno=train;aereo=plane;biglietto=ticket;valigia=suitcase;aeroporto=airport;albergo=hotel;passaporto=passport;viaggio=trip;autobus=bus;mappa=map', s: 'A che ora parte il treno?=What time does the train leave?;Vorrei un biglietto per Londra.=I would like a ticket to London./I\'d like a ticket to London.;Ho una prenotazione.=I have a reservation./I have a booking.;Dov\'è la fermata dell\'autobus?=Where is the bus stop?/Where\'s the bus stop?;Il volo è in ritardo.=The flight is late./The flight is delayed.;Ho perso la valigia.=I lost my suitcase./I have lost my suitcase./I\'ve lost my suitcase.', tip: 'Le domande con verbi normali usano "do/does": What time does the train leave?' },
+    { w: 'menù=menu;conto=bill;prezzo=price;cameriere=waiter;tavolo=table;contanti=cash;carta=card;taglia=size;scarpe=shoes;economico=cheap', s: 'Il conto, per favore.=The bill, please./Can I have the bill, please?;Un tavolo per due.=A table for two.;Quanto costa?=How much is it?/How much does it cost?;Posso pagare con la carta?=Can I pay by card?/Can I pay with a card?;È troppo caro.=It is too expensive./It\'s too expensive.;Avete una taglia più grande?=Do you have a bigger size?/Have you got a bigger size?', tip: 'Per i prezzi si usa "How much": How much is this? How much are these?' },
+    { w: 'testa=head;mal di testa=headache;medico=doctor;febbre=fever;stomaco=stomach;dente=tooth;mano=hand;gamba=leg;medicina=medicine;stanco=tired', s: 'Mi fa male la testa.=I have a headache./My head hurts.;Ho la febbre.=I have a fever./I have a temperature.;Devo andare dal medico.=I have to go to the doctor./I must go to the doctor.;Mi sento stanco.=I feel tired.;Prendi questa medicina.=Take this medicine.;Mi fa male la gamba.=My leg hurts.', tip: 'Il dolore: "my leg hurts" oppure "I have a pain in my leg".' },
+  ] },
+  spagnolo: { code: 'es-ES', units: [
+    { w: 'ciao=hola;arrivederci=adiós;grazie=gracias;per favore=por favor;sì=sí;no=no;buongiorno=buenos días;buonanotte=buenas noches;scusa=perdón;benvenuto=bienvenido', s: 'Ciao, come stai?=Hola, ¿cómo estás?;Sto bene, grazie.=Estoy bien, gracias.;Buongiorno, signora.=Buenos días, señora.;Grazie mille!=¡Muchas gracias!;Scusa, non capisco.=Perdón, no entiendo./Lo siento, no entiendo.;Ci vediamo domani.=Nos vemos mañana./Hasta mañana.', tip: 'Le domande e le esclamazioni hanno il punto anche all\'inizio, rovesciato: ¿…? ¡…!' },
+    { w: 'nome=nombre;io=yo;tu=tú;lui=él;lei=ella;studente=estudiante;italiano=italiano;anni=años;città=ciudad;amico=amigo', s: 'Mi chiamo Marco.=Me llamo Marco./Soy Marco.;Sono italiano.=Soy italiano.;Ho vent\'anni.=Tengo veinte años.;Lei è mia amica.=Ella es mi amiga.;Di dove sei?=¿De dónde eres?;Vivo a Roma.=Vivo en Roma.', tip: '"Ser" per chi sei (soy italiano), "estar" per come o dove stai (estoy bien).' },
+    { w: 'acqua=agua;pane=pan;mela=manzana;caffè=café;latte=leche;formaggio=queso;pollo=pollo;uovo=huevo;vino=vino;zucchero=azúcar', s: 'Bevo l\'acqua.=Bebo agua./Bebo el agua.;Mangio una mela.=Como una manzana.;Vorrei un caffè, per favore.=Quiero un café, por favor./Quisiera un café, por favor.;Il pane è buono.=El pan está bueno./El pan es bueno.;Non mangio il pollo.=No como pollo./No como el pollo.;Hai fame?=¿Tienes hambre?', tip: 'Avere fame/sete si dice con "tener": tengo hambre, tengo sed.' },
+    { w: 'madre=madre;padre=padre;fratello=hermano;sorella=hermana;figlio=hijo;figlia=hija;nonno=abuelo;nonna=abuela;marito=marido;moglie=esposa', s: 'Questa è mia madre.=Esta es mi madre.;Ho un fratello.=Tengo un hermano.;Mia sorella è alta.=Mi hermana es alta.;Mio padre lavora molto.=Mi padre trabaja mucho.;Hai figli?=¿Tienes hijos?;La mia famiglia è grande.=Mi familia es grande.', tip: 'Il possessivo non vuole l\'articolo: mi madre, tu hermano.' },
+    { w: 'uno=uno;due=dos;tre=tres;dieci=diez;lunedì=lunes;venerdì=viernes;oggi=hoy;domani=mañana;ora=hora;settimana=semana', s: 'Che ore sono?=¿Qué hora es?;Sono le tre.=Son las tres.;Oggi è lunedì.=Hoy es lunes.;Lavoro dal lunedì al venerdì.=Trabajo de lunes a viernes.;Ci vediamo alle dieci.=Nos vemos a las diez.;Una settimana ha sette giorni.=Una semana tiene siete días.', tip: 'L\'una si dice "es la una", le altre ore "son las dos, son las tres…".' },
+    { w: 'strada=calle;negozio=tienda;banca=banco;stazione=estación;ospedale=hospital;parco=parque;piazza=plaza;ponte=puente;museo=museo;farmacia=farmacia', s: 'Dov\'è la stazione?=¿Dónde está la estación?;Gira a destra.=Gira a la derecha.;È vicino al parco.=Está cerca del parque.;Il museo è chiuso oggi.=El museo está cerrado hoy.;Vado in banca.=Voy al banco.;C\'è una farmacia qui?=¿Hay una farmacia aquí?', tip: '"Hay" vale per "c\'è" e "ci sono": hay un parque, hay dos tiendas.' },
+    { w: 'casa=casa;cucina=cocina;camera=habitación;letto=cama;tavolo=mesa;sedia=silla;porta=puerta;finestra=ventana;chiave=llave;telefono=teléfono', s: 'La mia casa è piccola.=Mi casa es pequeña.;Il libro è sul tavolo.=El libro está en la mesa./El libro está sobre la mesa.;Chiudi la finestra, per favore.=Cierra la ventana, por favor.;Dove sono le chiavi?=¿Dónde están las llaves?;La cucina è pulita.=La cocina está limpia.;Ho perso il telefono.=He perdido el teléfono./Perdí el teléfono.', tip: 'Il passato prossimo si forma con "haber": he perdido, has comido.' },
+    { w: 'università=universidad;esame=examen;libro=libro;lezione=clase;lavoro=trabajo;ufficio=oficina;capo=jefe;riunione=reunión;compito=tarea;insegnante=profesor', s: 'Studio ingegneria.=Estudio ingeniería.;Domani ho un esame.=Mañana tengo un examen.;La lezione inizia alle nove.=La clase empieza a las nueve.;Lavoro in un ufficio.=Trabajo en una oficina.;La riunione è finita.=La reunión ha terminado./La reunión terminó.;Devo studiare stasera.=Tengo que estudiar esta noche.', tip: 'Il dovere: "tener que" + infinito → tengo que estudiar.' },
+    { w: 'calcio=fútbol;musica=música;film=película;giocare=jugar;leggere=leer;nuotare=nadar;ballare=bailar;cantare=cantar;spiaggia=playa;fine settimana=fin de semana', s: 'Mi piace la musica.=Me gusta la música.;Gioco a calcio il sabato.=Juego al fútbol los sábados./Juego fútbol los sábados.;Leggi molto?=¿Lees mucho?;Andiamo al cinema stasera?=¿Vamos al cine esta noche?;Non so nuotare.=No sé nadar.;Nel fine settimana vado in spiaggia.=El fin de semana voy a la playa.', tip: '"Gustar" funziona come "piacere": me gusta el cine, me gustan los libros.' },
+    { w: 'treno=tren;aereo=avión;biglietto=billete;valigia=maleta;aeroporto=aeropuerto;albergo=hotel;passaporto=pasaporte;viaggio=viaje;autobus=autobús;mappa=mapa', s: 'A che ora parte il treno?=¿A qué hora sale el tren?;Vorrei un biglietto per Madrid.=Quiero un billete para Madrid./Quisiera un billete para Madrid.;Ho una prenotazione.=Tengo una reserva.;Dov\'è la fermata dell\'autobus?=¿Dónde está la parada del autobús?;Il volo è in ritardo.=El vuelo tiene retraso./El vuelo está retrasado.;Ho perso la valigia.=He perdido la maleta./Perdí la maleta.', tip: 'Partire si dice spesso "salir": el tren sale a las ocho.' },
+    { w: 'menù=menú;conto=cuenta;prezzo=precio;cameriere=camarero;tavolo=mesa;contanti=efectivo;carta=tarjeta;taglia=talla;scarpe=zapatos;economico=barato', s: 'Il conto, per favore.=La cuenta, por favor.;Un tavolo per due.=Una mesa para dos.;Quanto costa?=¿Cuánto cuesta?/¿Cuánto es?;Posso pagare con la carta?=¿Puedo pagar con tarjeta?;È troppo caro.=Es demasiado caro.;Avete una taglia più grande?=¿Tienen una talla más grande?', tip: '"Cuánto" concorda: ¿cuánto cuesta? ¿cuántos zapatos?' },
+    { w: 'testa=cabeza;mal di testa=dolor de cabeza;medico=médico;febbre=fiebre;stomaco=estómago;dente=diente;mano=mano;gamba=pierna;medicina=medicina;stanco=cansado', s: 'Mi fa male la testa.=Me duele la cabeza.;Ho la febbre.=Tengo fiebre.;Devo andare dal medico.=Tengo que ir al médico.;Mi sento stanco.=Me siento cansado./Estoy cansado.;Prendi questa medicina.=Toma esta medicina.;Mi fa male la gamba.=Me duele la pierna.', tip: '"Doler" come "gustar": me duele la cabeza, me duelen los pies.' },
+  ] },
+  francese: { code: 'fr-FR', units: [
+    { w: 'ciao=salut;arrivederci=au revoir;grazie=merci;per favore=s\'il vous plaît;sì=oui;no=non;buongiorno=bonjour;buonanotte=bonne nuit;scusa=pardon;benvenuto=bienvenue', s: 'Ciao, come stai?=Salut, comment ça va ?/Salut, ça va ?;Sto bene, grazie.=Je vais bien, merci./Ça va bien, merci.;Buongiorno, signora.=Bonjour, madame.;Grazie mille!=Merci beaucoup !;Scusa, non capisco.=Pardon, je ne comprends pas./Désolé, je ne comprends pas.;Ci vediamo domani.=À demain./On se voit demain.', tip: 'In francese prima di ? ! : ; si mette uno spazio.' },
+    { w: 'nome=nom;io=je;tu=tu;lui=il;lei=elle;studente=étudiant;italiano=italien;anni=ans;città=ville;amico=ami', s: 'Mi chiamo Marco.=Je m\'appelle Marco.;Sono italiano.=Je suis italien.;Ho vent\'anni.=J\'ai vingt ans.;Lei è mia amica.=Elle est mon amie.;Di dove sei?=Tu viens d\'où ?/D\'où viens-tu ?;Vivo a Roma.=J\'habite à Rome./Je vis à Rome.', tip: 'Davanti a vocale "mon" resta maschile anche con nomi femminili: mon amie.' },
+    { w: 'acqua=eau;pane=pain;mela=pomme;caffè=café;latte=lait;formaggio=fromage;pollo=poulet;uovo=œuf;vino=vin;zucchero=sucre', s: 'Bevo l\'acqua.=Je bois de l\'eau.;Mangio una mela.=Je mange une pomme.;Vorrei un caffè, per favore.=Je voudrais un café, s\'il vous plaît.;Il pane è buono.=Le pain est bon.;Non mangio il pollo.=Je ne mange pas de poulet./Je ne mange pas le poulet.;Hai fame?=Tu as faim ?/As-tu faim ?', tip: 'La negazione avvolge il verbo: je ne mange pas.' },
+    { w: 'madre=mère;padre=père;fratello=frère;sorella=sœur;figlio=fils;figlia=fille;nonno=grand-père;nonna=grand-mère;marito=mari;moglie=femme', s: 'Questa è mia madre.=C\'est ma mère./Voici ma mère.;Ho un fratello.=J\'ai un frère.;Mia sorella è alta.=Ma sœur est grande.;Mio padre lavora molto.=Mon père travaille beaucoup.;Hai figli?=Tu as des enfants ?/As-tu des enfants ?;La mia famiglia è grande.=Ma famille est grande.', tip: '"Grand" vuol dire sia alto sia grande: ma sœur est grande.' },
+    { w: 'uno=un;due=deux;tre=trois;dieci=dix;lunedì=lundi;venerdì=vendredi;oggi=aujourd\'hui;domani=demain;ora=heure;settimana=semaine', s: 'Che ore sono?=Quelle heure est-il ?;Sono le tre.=Il est trois heures.;Oggi è lunedì.=Aujourd\'hui, c\'est lundi./Aujourd\'hui c\'est lundi.;Lavoro dal lunedì al venerdì.=Je travaille du lundi au vendredi.;Ci vediamo alle dieci.=On se voit à dix heures./Rendez-vous à dix heures.;Una settimana ha sette giorni.=Une semaine a sept jours.', tip: 'I giorni e i mesi sono minuscoli: lundi, janvier.' },
+    { w: 'strada=rue;negozio=magasin;banca=banque;stazione=gare;ospedale=hôpital;parco=parc;piazza=place;ponte=pont;museo=musée;farmacia=pharmacie', s: 'Dov\'è la stazione?=Où est la gare ?;Gira a destra.=Tournez à droite./Tourne à droite.;È vicino al parco.=C\'est près du parc.;Il museo è chiuso oggi.=Le musée est fermé aujourd\'hui.;Vado in banca.=Je vais à la banque.;C\'è una farmacia qui?=Il y a une pharmacie ici ?/Y a-t-il une pharmacie ici ?', tip: '"Il y a" = c\'è / ci sono.' },
+    { w: 'casa=maison;cucina=cuisine;camera=chambre;letto=lit;tavolo=table;sedia=chaise;porta=porte;finestra=fenêtre;chiave=clé;telefono=téléphone', s: 'La mia casa è piccola.=Ma maison est petite.;Il libro è sul tavolo.=Le livre est sur la table.;Chiudi la finestra, per favore.=Ferme la fenêtre, s\'il te plaît./Fermez la fenêtre, s\'il vous plaît.;Dove sono le chiavi?=Où sont les clés ?;La cucina è pulita.=La cuisine est propre.;Ho perso il telefono.=J\'ai perdu mon téléphone./J\'ai perdu le téléphone.', tip: 'Il passato prossimo: avoir + participio → j\'ai perdu.' },
+    { w: 'università=université;esame=examen;libro=livre;lezione=cours;lavoro=travail;ufficio=bureau;capo=chef;riunione=réunion;compito=devoir;insegnante=professeur', s: 'Studio ingegneria.=J\'étudie l\'ingénierie./Je fais des études d\'ingénieur.;Domani ho un esame.=Demain, j\'ai un examen./J\'ai un examen demain.;La lezione inizia alle nove.=Le cours commence à neuf heures.;Lavoro in un ufficio.=Je travaille dans un bureau.;La riunione è finita.=La réunion est finie./La réunion est terminée.;Devo studiare stasera.=Je dois étudier ce soir.', tip: '"Devoir" + infinito: je dois partir.' },
+    { w: 'calcio=football;musica=musique;film=film;giocare=jouer;leggere=lire;nuotare=nager;ballare=danser;cantare=chanter;spiaggia=plage;fine settimana=week-end', s: 'Mi piace la musica.=J\'aime la musique.;Gioco a calcio il sabato.=Je joue au football le samedi./Je joue au foot le samedi.;Leggi molto?=Tu lis beaucoup ?/Lis-tu beaucoup ?;Andiamo al cinema stasera?=On va au cinéma ce soir ?;Non so nuotare.=Je ne sais pas nager.;Nel fine settimana vado in spiaggia.=Le week-end, je vais à la plage.', tip: '"Le samedi" = ogni sabato; "samedi" = questo sabato.' },
+    { w: 'treno=train;aereo=avion;biglietto=billet;valigia=valise;aeroporto=aéroport;albergo=hôtel;passaporto=passeport;viaggio=voyage;autobus=bus;mappa=carte', s: 'A che ora parte il treno?=À quelle heure part le train ?;Vorrei un biglietto per Parigi.=Je voudrais un billet pour Paris.;Ho una prenotazione.=J\'ai une réservation.;Dov\'è la fermata dell\'autobus?=Où est l\'arrêt de bus ?;Il volo è in ritardo.=Le vol est en retard.;Ho perso la valigia.=J\'ai perdu ma valise.', tip: '"Je voudrais" è il modo gentile per chiedere qualcosa.' },
+    { w: 'menù=carte;conto=addition;prezzo=prix;cameriere=serveur;tavolo=table;contanti=espèces;carta=carte bancaire;taglia=taille;scarpe=chaussures;economico=pas cher', s: 'Il conto, per favore.=L\'addition, s\'il vous plaît.;Un tavolo per due.=Une table pour deux.;Quanto costa?=Combien ça coûte ?/C\'est combien ?;Posso pagare con la carta?=Je peux payer par carte ?/Est-ce que je peux payer par carte ?;È troppo caro.=C\'est trop cher.;Avete una taglia più grande?=Vous avez une taille plus grande ?/Avez-vous une taille plus grande ?', tip: '"Est-ce que" trasforma una frase in domanda senza cambiare l\'ordine.' },
+    { w: 'testa=tête;mal di testa=mal de tête;medico=médecin;febbre=fièvre;stomaco=ventre;dente=dent;mano=main;gamba=jambe;medicina=médicament;stanco=fatigué', s: 'Mi fa male la testa.=J\'ai mal à la tête.;Ho la febbre.=J\'ai de la fièvre.;Devo andare dal medico.=Je dois aller chez le médecin.;Mi sento stanco.=Je me sens fatigué./Je suis fatigué.;Prendi questa medicina.=Prends ce médicament.;Mi fa male la gamba.=J\'ai mal à la jambe.', tip: 'Il dolore: "avoir mal à" + parte del corpo → j\'ai mal au dos.' },
+  ] },
+  tedesco: { code: 'de-DE', units: [
+    { w: 'ciao=hallo;arrivederci=tschüss;grazie=danke;per favore=bitte;sì=ja;no=nein;buongiorno=guten Morgen;buonanotte=gute Nacht;scusa=Entschuldigung;benvenuto=willkommen', s: 'Ciao, come stai?=Hallo, wie geht es dir?/Hallo, wie geht\'s?;Sto bene, grazie.=Mir geht es gut, danke./Mir geht\'s gut, danke.;Buongiorno, signora.=Guten Morgen, Frau.;Grazie mille!=Vielen Dank!/Danke schön!;Scusa, non capisco.=Entschuldigung, ich verstehe nicht.;Ci vediamo domani.=Bis morgen.', tip: 'Tutti i sostantivi tedeschi si scrivono con la maiuscola.' },
+    { w: 'nome=Name;io=ich;tu=du;lui=er;lei=sie;studente=Student;italiano=Italiener;anni=Jahre;città=Stadt;amico=Freund', s: 'Mi chiamo Marco.=Ich heiße Marco./Mein Name ist Marco.;Sono italiano.=Ich bin Italiener.;Ho vent\'anni.=Ich bin zwanzig Jahre alt./Ich bin zwanzig.;Lei è mia amica.=Sie ist meine Freundin.;Di dove sei?=Woher kommst du?;Vivo a Roma.=Ich wohne in Rom./Ich lebe in Rom.', tip: 'Il verbo è sempre al secondo posto: Heute wohne ich in Rom.' },
+    { w: 'acqua=Wasser;pane=Brot;mela=Apfel;caffè=Kaffee;latte=Milch;formaggio=Käse;pollo=Hähnchen;uovo=Ei;vino=Wein;zucchero=Zucker', s: 'Bevo l\'acqua.=Ich trinke Wasser.;Mangio una mela.=Ich esse einen Apfel.;Vorrei un caffè, per favore.=Ich möchte einen Kaffee, bitte./Ich hätte gern einen Kaffee, bitte.;Il pane è buono.=Das Brot ist gut./Das Brot schmeckt gut.;Non mangio il pollo.=Ich esse kein Hähnchen.;Hai fame?=Hast du Hunger?', tip: '"Kein" nega i nomi: ich esse kein Fleisch; "nicht" nega il resto.' },
+    { w: 'madre=Mutter;padre=Vater;fratello=Bruder;sorella=Schwester;figlio=Sohn;figlia=Tochter;nonno=Großvater;nonna=Großmutter;marito=Mann;moglie=Frau', s: 'Questa è mia madre.=Das ist meine Mutter.;Ho un fratello.=Ich habe einen Bruder.;Mia sorella è alta.=Meine Schwester ist groß.;Mio padre lavora molto.=Mein Vater arbeitet viel.;Hai figli?=Hast du Kinder?;La mia famiglia è grande.=Meine Familie ist groß.', tip: 'Dopo "haben" il complemento va all\'accusativo: einen Bruder.' },
+    { w: 'uno=eins;due=zwei;tre=drei;dieci=zehn;lunedì=Montag;venerdì=Freitag;oggi=heute;domani=morgen;ora=Stunde;settimana=Woche', s: 'Che ore sono?=Wie spät ist es?/Wie viel Uhr ist es?;Sono le tre.=Es ist drei Uhr.;Oggi è lunedì.=Heute ist Montag.;Lavoro dal lunedì al venerdì.=Ich arbeite von Montag bis Freitag.;Ci vediamo alle dieci.=Wir sehen uns um zehn Uhr./Bis um zehn.;Una settimana ha sette giorni.=Eine Woche hat sieben Tage.', tip: '"Uhr" per l\'orario, "Stunde" per la durata: drei Stunden.' },
+    { w: 'strada=Straße;negozio=Geschäft;banca=Bank;stazione=Bahnhof;ospedale=Krankenhaus;parco=Park;piazza=Platz;ponte=Brücke;museo=Museum;farmacia=Apotheke', s: 'Dov\'è la stazione?=Wo ist der Bahnhof?;Gira a destra.=Biegen Sie rechts ab./Geh nach rechts.;È vicino al parco.=Es ist in der Nähe vom Park./Es ist nahe dem Park.;Il museo è chiuso oggi.=Das Museum ist heute geschlossen.;Vado in banca.=Ich gehe zur Bank.;C\'è una farmacia qui?=Gibt es hier eine Apotheke?', tip: '"Es gibt" + accusativo = c\'è / ci sono.' },
+    { w: 'casa=Haus;cucina=Küche;camera=Zimmer;letto=Bett;tavolo=Tisch;sedia=Stuhl;porta=Tür;finestra=Fenster;chiave=Schlüssel;telefono=Handy', s: 'La mia casa è piccola.=Mein Haus ist klein.;Il libro è sul tavolo.=Das Buch ist auf dem Tisch./Das Buch liegt auf dem Tisch.;Chiudi la finestra, per favore.=Mach bitte das Fenster zu./Schließ bitte das Fenster.;Dove sono le chiavi?=Wo sind die Schlüssel?;La cucina è pulita.=Die Küche ist sauber.;Ho perso il telefono.=Ich habe mein Handy verloren.', tip: 'Il participio va in fondo: Ich habe das Handy verloren.' },
+    { w: 'università=Universität;esame=Prüfung;libro=Buch;lezione=Unterricht;lavoro=Arbeit;ufficio=Büro;capo=Chef;riunione=Besprechung;compito=Hausaufgabe;insegnante=Lehrer', s: 'Studio ingegneria.=Ich studiere Ingenieurwesen.;Domani ho un esame.=Morgen habe ich eine Prüfung./Ich habe morgen eine Prüfung.;La lezione inizia alle nove.=Der Unterricht beginnt um neun Uhr./Die Vorlesung beginnt um neun Uhr.;Lavoro in un ufficio.=Ich arbeite in einem Büro.;La riunione è finita.=Die Besprechung ist vorbei./Das Meeting ist vorbei.;Devo studiare stasera.=Ich muss heute Abend lernen.', tip: 'Con i verbi modali (müssen, können) l\'infinito va in fondo.' },
+    { w: 'calcio=Fußball;musica=Musik;film=Film;giocare=spielen;leggere=lesen;nuotare=schwimmen;ballare=tanzen;cantare=singen;spiaggia=Strand;fine settimana=Wochenende', s: 'Mi piace la musica.=Ich mag Musik./Ich höre gern Musik.;Gioco a calcio il sabato.=Ich spiele samstags Fußball./Am Samstag spiele ich Fußball.;Leggi molto?=Liest du viel?;Andiamo al cinema stasera?=Gehen wir heute Abend ins Kino?;Non so nuotare.=Ich kann nicht schwimmen.;Nel fine settimana vado in spiaggia.=Am Wochenende gehe ich an den Strand./Am Wochenende fahre ich an den Strand.', tip: '"Gern" dopo il verbo dice che ti piace farlo: ich lese gern.' },
+    { w: 'treno=Zug;aereo=Flugzeug;biglietto=Fahrkarte;valigia=Koffer;aeroporto=Flughafen;albergo=Hotel;passaporto=Reisepass;viaggio=Reise;autobus=Bus;mappa=Karte', s: 'A che ora parte il treno?=Wann fährt der Zug ab?/Um wie viel Uhr fährt der Zug?;Vorrei un biglietto per Berlino.=Ich möchte eine Fahrkarte nach Berlin.;Ho una prenotazione.=Ich habe eine Reservierung.;Dov\'è la fermata dell\'autobus?=Wo ist die Bushaltestelle?;Il volo è in ritardo.=Der Flug hat Verspätung.;Ho perso la valigia.=Ich habe meinen Koffer verloren.', tip: 'Verso una città si usa "nach": nach Berlin, nach Italien.' },
+    { w: 'menù=Speisekarte;conto=Rechnung;prezzo=Preis;cameriere=Kellner;tavolo=Tisch;contanti=Bargeld;carta=Karte;taglia=Größe;scarpe=Schuhe;economico=billig', s: 'Il conto, per favore.=Die Rechnung, bitte./Zahlen, bitte.;Un tavolo per due.=Einen Tisch für zwei.;Quanto costa?=Wie viel kostet das?/Was kostet das?;Posso pagare con la carta?=Kann ich mit Karte zahlen?;È troppo caro.=Das ist zu teuer.;Avete una taglia più grande?=Haben Sie eine größere Größe?', tip: 'Nei negozi si dà del lei: Haben Sie…? Können Sie…?' },
+    { w: 'testa=Kopf;mal di testa=Kopfschmerzen;medico=Arzt;febbre=Fieber;stomaco=Magen;dente=Zahn;mano=Hand;gamba=Bein;medicina=Medikament;stanco=müde', s: 'Mi fa male la testa.=Ich habe Kopfschmerzen./Mein Kopf tut weh.;Ho la febbre.=Ich habe Fieber.;Devo andare dal medico.=Ich muss zum Arzt gehen./Ich muss zum Arzt.;Mi sento stanco.=Ich fühle mich müde./Ich bin müde.;Prendi questa medicina.=Nimm dieses Medikament.;Mi fa male la gamba.=Mein Bein tut weh.', tip: '"Weh tun": mein Bein tut weh, meine Füße tun weh.' },
+  ] },
+};
+const LG_CODE = { inglese: 'en-GB', spagnolo: 'es-ES', francese: 'fr-FR', tedesco: 'de-DE', portoghese: 'pt-PT', giapponese: 'ja-JP', cinese: 'zh-CN', russo: 'ru-RU', arabo: 'ar-SA', altro: '' };
+
+/* =========================================================
+   LINGUE — come un'app di lingue vera: percorso a unità e
+   lezioni, esercizi brevi e vari (scegli, abbina, componi la
+   frase, ascolta, scrivi, pronuncia), cuori, serie di giorni,
+   XP e obiettivo giornaliero, gemme, missioni del giorno,
+   ripasso intelligente dei punti deboli e guida di ogni unità.
+   ========================================================= */
+const LG = {
+  /* ---------- state ---------- */
+  st(l) { l.course ||= { done: {}, best: {} }; l.items ||= {}; l.xpDays ||= {}; l.hearts ??= 5; l.heartAt ||= Date.now(); l.gems ??= 50; l.freeze ??= 0; l.goal ||= 20; l.freezeUsed ||= []; l.quests ||= {}; return l; },
+  cur() { const id = UI.lgId || (S.langs[0] && S.langs[0].id); return S.langs.find(x => x.id === id) || S.langs[0] || null; },
+  code(l) { return LG_CODE[l.lang] || ''; },
+  /* ---------- course content ---------- */
+  parse(u) { const sp = s => String(s || '').split(';').map(x => x.trim()).filter(Boolean).map(x => { const i = x.indexOf('='); return [x.slice(0, i).trim(), x.slice(i + 1).trim()]; }).filter(x => x[0] && x[1]);
+    return { w: sp(u.w).map(([it, t]) => ({ it, t: t.split('/').map(z => z.trim()) })), s: sp(u.s).map(([it, t]) => ({ it, t: t.split('/').map(z => z.trim()) })), tip: u.tip || '', title: u.title, icon: u.icon }; },
+  units(l) { const B = LG_DATA[l.lang]; const base = B ? B.units.map((u, i) => ({ ...this.parse(u), title: LG_UNITS[i][0], icon: LG_UNITS[i][1] })) : LG_UNITS.map((x, i) => (l.aiUnits || {})[i] ? { ...this.parse(l.aiUnits[i]), title: x[0], icon: x[1] } : { title: x[0], icon: x[1], todo: true, w: [], s: [], tip: '' });
+    for (const x of (l.extraUnits || [])) base.push({ ...this.parse(x), title: x.title, icon: x.icon || '✨' }); return base; },
+  /** 5 steps per unit: 4 lessons + the unit review */
+  nodes(l) { const U = this.units(l), N = []; U.forEach((u, ui) => { for (let k = 0; k < 5; k++) N.push({ ui, k, key: `${ui}.${k}`, review: k === 4 }); }); return N; },
+  isDone(l, key) { return !!this.st(l).course.done[key]; },
+  current(l) { return this.nodes(l).find(n => !this.isDone(l, n.key)) || null; },
+  unlocked(l, n) { const N = this.nodes(l), i = N.findIndex(x => x.key === n.key); return i === 0 || this.isDone(l, n.key) || (i > 0 && this.isDone(l, N[i - 1].key)) || !!(this.st(l).course.skipTo != null && n.ui <= this.st(l).course.skipTo); },
+  /** items of a lesson: lesson 1 → first half of words + 2 sentences, lesson 2 → second half, 3 → mix, 4 → all harder, 5 → review of everything */
+  lessonItems(l, n) { const u = this.units(l)[n.ui]; if (!u || u.todo) return []; const W = u.w.map((x, i) => ({ ...x, kind: 'w', key: `${n.ui}:w${i}` })), Sx = u.s.map((x, i) => ({ ...x, kind: 's', key: `${n.ui}:s${i}` })), h = Math.ceil(W.length / 2);
+    if (n.k === 0) return [...W.slice(0, h), ...Sx.slice(0, 2)]; if (n.k === 1) return [...W.slice(h), ...Sx.slice(2, 4)]; if (n.k === 2) return [...W, ...Sx.slice(3)]; return [...W, ...Sx]; },
+  known(l) { const U = this.units(l), out = []; U.forEach((u, ui) => { if (!this.nodes(l).some(n => n.ui === ui && this.isDone(l, n.key))) return; u.w.forEach((x, i) => out.push({ ...x, kind: 'w', key: `${ui}:w${i}` })); u.s.forEach((x, i) => out.push({ ...x, kind: 's', key: `${ui}:s${i}` })); }); return out; },
+  /* ---------- memory of each word/sentence ---------- */
+  strength(l, key) { const it = this.st(l).items[key]; if (!it) return 0; const days = (Date.now() - it.last) / 864e5; return it.s * Math.exp(-days / (2 + 12 * it.s)); },
+  learn(l, key, ok) { const I = this.st(l).items, it = I[key] ||= { s: 0, n: 0, wrong: 0, last: Date.now() }; it.s = ok ? it.s + (1 - it.s) * .35 : it.s * .5; it.n++; if (!ok) it.wrong++; it.last = Date.now(); },
+  weak(l, n = 12) { return this.known(l).map(x => ({ x, s: this.strength(l, x.key) })).sort((a, b) => a.s - b.s).slice(0, n).map(z => z.x); },
+  /* ---------- streak, XP, hearts ---------- */
+  xpToday(l) { return this.st(l).xpDays[todayK()] || 0; },
+  addXP(l, xp) { const D = this.st(l).xpDays; D[todayK()] = (D[todayK()] || 0) + xp; for (const k of Object.keys(D)) if (dayDiff(k, todayK()) > 400) delete D[k]; },
+  streak(l) { const D = this.st(l).xpDays, F = new Set(this.st(l).freezeUsed); let n = 0, k = D[todayK()] ? todayK() : addDK(todayK(), -1); while (D[k] || F.has(k)) { n++; k = addDK(k, -1); } return n; },
+  /** a missed day eats a freeze, if there is one */
+  checkFreeze(l) { const L = this.st(l), y = addDK(todayK(), -1); if (L.xpDays[y] || L.freezeUsed.includes(y) || !Object.keys(L.xpDays).some(k => k < y)) return; const prev = addDK(y, -1); if (!(L.xpDays[prev] || L.freezeUsed.includes(prev))) return; if (L.freeze > 0) { L.freeze--; L.freezeUsed.push(y); L.freezeUsed = L.freezeUsed.slice(-30); save('langs'); setTimeout(() => Island.toast({ icon: 'flame', c: 'var(--blue)', t: '🧊 Protezione serie usata', s: `Ieri non ti sei esercitato: la serie di ${cap(l.lang)} è salva`, ms: 3600 }), 1500); } },
+  infinite() { return S.profile.lgHearts === false; },
+  hearts(l) { const L = this.st(l); if (this.infinite()) return 5; const per = 4 * 3600e3; while (L.hearts < 5 && Date.now() - L.heartAt >= per) { L.hearts++; L.heartAt += per; } if (L.hearts >= 5) L.heartAt = Date.now(); return L.hearts; },
+  nextHeart(l) { const L = this.st(l); return L.hearts >= 5 ? 0 : Math.max(0, 4 * 3600e3 - (Date.now() - L.heartAt)); },
+  /* ---------- daily quests ---------- */
+  QUESTS: [['xp', 'Guadagna {n} XP', [20, 30, 40], 10], ['lessons', 'Completa {n} lezioni', [2, 3], 10], ['perfect', 'Fai {n} lezione perfetta|Fai {n} lezioni perfette', [1, 2], 15], ['listen', 'Ascolta {n} frasi', [5, 8], 10], ['combo', 'Rispondi bene {n} volte di fila', [8, 12], 10], ['review', 'Ripassa i punti deboli', [1], 15]],
+  quests(l) { const L = this.st(l), k = todayK(); if (L.quests.k !== k) { const r = this.rnd(k + l.id), pick = [...this.QUESTS].sort(() => r() - .5).slice(0, 3); L.quests = { k, list: pick.map(([id, t, ns, g]) => { const n = ns[Math.floor(r() * ns.length)]; return { id, n, t: (n === 1 && t.includes('|') ? t.split('|')[0] : t.split('|').pop()).replace('{n}', n), g, p: 0, done: false }; }) }; save('langs'); } return L.quests.list; },
+  quest(l, id, v = 1, abs) { let msg = null; for (const q of this.quests(l)) if (q.id === id && !q.done) { q.p = abs ? Math.max(q.p, v) : q.p + v; if (q.p >= q.n) { q.done = true; this.st(l).gems += q.g; msg = q; } } if (msg) setTimeout(() => { Island.toast({ icon: 'star', c: 'var(--yellow)', t: 'Missione completata!', s: `${msg.t} · +${msg.g} 💎`, ms: 2600 }); Sound.xp(); }, 1400); },
+  rnd(seed) { let h = 2166136261; for (const c of String(seed)) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return () => { h ^= h << 13; h ^= h >>> 17; h ^= h << 5; return ((h >>> 0) % 10000) / 10000; }; },
+  /* ---------- voice ---------- */
+  voices: [],
+  voice(code) { if (!('speechSynthesis' in window) || !code) return null; const V = (this.voices = speechSynthesis.getVoices()).filter(v => v.lang && v.lang.toLowerCase().startsWith(code.slice(0, 2).toLowerCase())); if (!V.length) return null; return V.find(v => /premium|enhanced|natural|neural/i.test(v.name)) || V.find(v => /google/i.test(v.name)) || V.find(v => v.lang.replace('_', '-').toLowerCase() === code.toLowerCase()) || V[0]; },
+  canSpeak(l) { return !!this.voice(this.code(l)); },
+  say(l, text, slow) { try { const v = this.voice(this.code(l)); if (!v) return false; speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(String(text)); u.voice = v; u.lang = v.lang; u.rate = slow ? .62 : .95; speechSynthesis.speak(u); return true; } catch (_) { return false; } },
+  canListen(l) { const R = window.SpeechRecognition || window.webkitSpeechRecognition; return !!R && !!this.code(l) && S.profile.lgMic !== false && !(this._micOff > Date.now()) && !window.orbitaDesktop && !window.OrbitaAndroid; },
+  /* ---------- answer checking ---------- */
+  norm(s) { return String(s || '').toLowerCase().normalize('NFC').replace(/[’`´]/g, '\'').replace(/[¿¡!?.,;:«»"“”()\-–—]/g, ' ').replace(/\s+/g, ' ').trim(); },
+  bare(s) { return this.norm(s).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ß/g, 'ss').replace(/œ/g, 'oe'); },
+  lev(a, b) { const m = a.length, n = b.length; if (!m) return n; if (!n) return m; let p = Array.from({ length: n + 1 }, (_, j) => j); for (let i = 1; i <= m; i++) { const c = [i]; for (let j = 1; j <= n; j++) c[j] = Math.min(p[j] + 1, c[j - 1] + 1, p[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); p = c; } return p[n]; },
+  /** → {ok, typo, best} */
+  check(ans, variants) { const a = this.norm(ans), ab = this.bare(ans); let best = variants[0], typo = false;
+    for (const v of variants) { if (this.norm(v) === a) return { ok: true, best: v }; }
+    for (const v of variants) { if (this.bare(v) === ab) return { ok: true, typo: 'accenti', best: v }; const d = this.lev(this.bare(v), ab); if (d <= Math.max(1, Math.floor(this.bare(v).length / 12))) { typo = true; best = v; } }
+    return typo ? { ok: true, typo: 'refuso', best } : { ok: false, best }; },
+  tokens(s) { return String(s).replace(/([¿¡])/g, '$1 ').split(/\s+/).map(w => w.replace(/^[¿¡]+/, '').replace(/[.,!?;:]+$/, '')).filter(Boolean); },
+  /* ---------- building a lesson ---------- */
+  build(l, items, mode) {
+    const r = this.rnd(Date.now()), sh = A => A.map(x => [r(), x]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
+    const W = items.filter(x => x.kind === 'w'), Sx = items.filter(x => x.kind === 's'), all = [...this.known(l), ...items], pool = all.filter(x => x.kind === 'w');
+    const listen = this.canSpeak(l), speak = this.canListen(l), ex = [];
+    const mc = (it, rev) => { const others = sh(pool.filter(x => x.key !== it.key && x.t[0] !== it.t[0] && x.it !== it.it)).slice(0, 3); return { type: rev ? 'mcqR' : 'mcq', it, opts: sh([it, ...others]) }; };
+    const build = (it, rev, hear) => { const tgt = rev ? this.tokens(it.it) : this.tokens(it.t[0]); const src = rev ? pool.map(x => x.it) : pool.map(x => x.t[0]); const extra = sh([...new Set(src.flatMap(x => this.tokens(x)))].filter(w => !tgt.some(t => t.toLowerCase() === w.toLowerCase()))).slice(0, Math.min(4, Math.max(2, Math.round(tgt.length / 2)))); return { type: hear ? 'listen' : rev ? 'buildR' : 'build', it, tiles: sh([...tgt, ...extra]) }; };
+    const fill = it => { const T = this.tokens(it.t[0]); if (T.length < 3) return null; const i = T.reduce((b, w, j) => w.length > T[b].length ? j : b, 0), others = sh(pool.map(x => x.t[0]).filter(x => !x.includes(' ') && x.toLowerCase() !== T[i].toLowerCase())).slice(0, 2); return { type: 'fill', it, before: T.slice(0, i).join(' '), after: T.slice(i + 1).join(' '), opts: sh([T[i], ...others]), ans: T[i] }; };
+    if (mode === 'test') { for (const it of sh(items).slice(0, 10)) ex.push(it.kind === 's' ? (r() < .5 ? { type: 'type', it } : build(it)) : { type: 'type', it }); return ex; }
+    if (mode === 'practice') { for (const it of sh(items).slice(0, 10)) ex.push(it.kind === 'w' ? (r() < .5 ? mc(it, r() < .5) : { type: 'type', it }) : r() < .4 && listen ? build(it, false, true) : r() < .5 ? build(it) : { type: 'type', it }); if (W.length >= 4) ex.splice(2, 0, { type: 'pairs', pairs: sh(W).slice(0, 5) }); return ex; }
+    const k = mode;
+    /* introduce new words first */
+    const fresh = W.filter(x => !this.st(l).items[x.key]);
+    for (const it of fresh.slice(0, 5)) ex.push({ ...mc(it, false), fresh: true });
+    if (W.length >= 4) ex.push({ type: 'pairs', pairs: sh(W).slice(0, 5) });
+    for (const it of sh(W).slice(0, k >= 2 ? 3 : 2)) ex.push(k >= 2 && r() < .5 ? { type: 'type', it } : mc(it, true));
+    for (const it of Sx) { ex.push(build(it, k >= 1 && r() < .35)); if (k >= 2) ex.push(r() < .5 ? { type: 'type', it } : fill(it) || build(it)); if (listen && (k >= 1 || r() < .5)) ex.push(build(it, false, true)); if (speak && k >= 2 && r() < .5) ex.push({ type: 'speak', it }); }
+    if (k >= 3 && listen) for (const it of sh(Sx).slice(0, 2)) ex.push({ type: 'listenType', it });
+    const f = Sx.map(fill).filter(Boolean); if (f.length) ex.push(f[0]);
+    /* fresh first, then shuffled, ~14 */
+    const head = ex.filter(e => e.fresh), rest = sh(ex.filter(e => !e.fresh));
+    return [...head, ...rest].slice(0, k >= 3 ? 16 : 14);
+  },
+};
+setTimeout(() => { try { 'speechSynthesis' in window && speechSynthesis.getVoices(); if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = () => { LG.voices = speechSynthesis.getVoices(); }; } catch (_) {} }, 800);
+
+/* ---------- AI units for languages without a built-in course ---------- */
+async function lgGenUnit(l, ui, extra) {
+  const sample = await Cap.get('sample'); if (!sample) { aiUnavailable(); return false; }
+  const topic = extra ? extra : LG_UNITS[ui][0], lvl = extra ? 'B1' : ui < 6 ? 'A1' : 'A2', nonLatin = /giapponese|cinese|russo|arabo/.test(l.lang);
+  const r = await sample.json(`Sei un autore di corsi di lingua. Prepara un'unità di ${l.lang} per italiani, livello ${lvl}, argomento "${topic}". Rispondi solo con JSON {"words": [10 oggetti {"it": parola italiana, "t": traduzione in ${l.lang}${nonLatin ? ' (scrittura originale)' : ''}}], "sentences": [6 oggetti {"it": frase italiana breve e naturale, "t": [traduzione principale, eventuali varianti corrette]}], "tip": un consiglio di grammatica in italiano di una riga}. ${nonLatin ? 'Dopo ogni traduzione aggiungi tra parentesi quadre la trascrizione in caratteri latini, es. "こんにちは [konnichiwa]".' : ''} Parole e frasi coerenti tra loro, frasi di 3-8 parole.`, { cache: false });
+  const W = (r && r.words || []).filter(x => x && x.it && x.t), Sx = (r && r.sentences || []).filter(x => x && x.it && x.t);
+  if (W.length < 6 || Sx.length < 3) throw new Error('Unità non valida');
+  const enc = s => String(s).replace(/[;=]/g, ',');
+  const u = { w: W.map(x => `${enc(x.it)}=${enc(Array.isArray(x.t) ? x.t[0] : x.t)}`).join(';'), s: Sx.map(x => `${enc(x.it)}=${(Array.isArray(x.t) ? x.t : [x.t]).map(enc).join('/')}`).join(';'), tip: String(r.tip || '') };
+  if (extra) { (l.extraUnits ||= []).push({ ...u, title: cap(extra), icon: '✨' }); } else (l.aiUnits ||= {})[ui] = u;
+  save('langs'); return true;
+}
+
+/* ---------- the lesson player ---------- */
+function lgPlay(l, opts = {}) {
+  LG.st(l); LG.checkFreeze(l);
+  let items = opts.items || [], exs;
+  if (opts.node) items = LG.lessonItems(l, opts.node);
+  if (!items.length) return;
+  exs = LG.build(l, items, opts.mode != null ? opts.mode : opts.node ? opts.node.k : 0);
+  const usesHearts = !opts.practice && !LG.infinite();
+  if (usesHearts && LG.hearts(l) <= 0) return lgNoHearts(l);
+  const st = { i: 0, ok: 0, wrong: 0, combo: 0, best: 0, t0: Date.now(), answered: false, sel: null, built: [], again: new Set(), listened: 0, firstTry: new Map() };
+  const sh = openSheet({ title: '', wide: true, left: { label: '✕', act: api => { if (st.i > 1 && !st.quitAsk) { st.quitAsk = true; Island.toast({ icon: 'x', c: 'var(--orange)', t: 'Vuoi davvero uscire?', s: 'Perdi i progressi di questa lezione. Tocca ✕ di nuovo per uscire.', ms: 2600 }); return; } api.close(); } }, body: `<div class="lgp" id="lgP"></div>`, onClose() { try { speechSynthesis.cancel(); } catch (_) {} document.removeEventListener('keydown', key, true); } });
+  sh.el.classList.add('lg-sheet'); const B = $('#lgP', sh.el);
+  const title = { mcq: 'Scegli la traduzione giusta', mcqR: 'Cosa significa?', pairs: 'Abbina le coppie', build: 'Traduci questa frase', buildR: 'Traduci in italiano', listen: 'Scrivi quello che senti', listenType: 'Scrivi quello che senti', type: 'Scrivi in ' + l.lang, fill: 'Completa la frase', speak: 'Leggi ad alta voce' };
+  const spk = (t, slow) => `<button class="lg-spk${slow ? ' slow' : ''}" data-say="${esc(t)}" data-slow="${slow ? 1 : ''}" aria-label="${slow ? 'Ascolta piano' : 'Ascolta'}">${slow ? '🐢' : '🔊'}</button>`;
+  const head = () => { const prog = Math.round(st.i / exs.length * 100); return `<div class="lgp-top"><div class="lgp-bar"><i style="width:${prog}%"></i>${st.combo >= 3 ? `<b class="lgp-combo">${st.combo} di fila 🔥</b>` : ''}</div>${usesHearts ? `<span class="lgp-h">❤️ ${LG.hearts(l)}</span>` : '<span class="lgp-h">∞</span>'}</div>`; };
+  let checkFn = null;
+  const footer = (can) => `<div class="lgp-foot" id="lgF"><button class="btn plain" id="lgSkip">${exs[st.i] && /speak|listen/.test(exs[st.i].type) ? (exs[st.i].type === 'speak' ? 'Non posso parlare ora' : 'Non posso ascoltare ora') : 'Salta'}</button><span class="grow"></span><button class="btn primary big lg-check" id="lgC" ${can ? '' : 'disabled'}>Controlla</button></div>`;
+  const enable = on => { const c = $('#lgC', B); if (c) c.disabled = !on; };
+  const sayT = (t, slow) => { if (LG.say(l, t, slow)) { st.listened++; } };
+  const paint = () => {
+    const e = exs[st.i]; if (!e) return end(); st.answered = false; st.sel = null; st.built = []; checkFn = null;
+    let body = '';
+    if (e.type === 'mcq') body = `<div class="lgp-q">${e.fresh ? '<span class="lg-new">NUOVA PAROLA</span>' : ''}<h2>Come si dice «${esc(e.it.it)}»?</h2></div><div class="lg-opts">${e.opts.map((o, j) => `<button class="lg-opt" data-o="${j}"><kbd>${j + 1}</kbd><span>${esc(o.t[0])}</span></button>`).join('')}</div>`;
+    else if (e.type === 'mcqR') body = `<div class="lgp-q"><h2 class="lg-tl">${spk(e.it.t[0])} ${esc(e.it.t[0])}</h2></div><div class="lg-opts">${e.opts.map((o, j) => `<button class="lg-opt" data-o="${j}"><kbd>${j + 1}</kbd><span>${esc(o.it)}</span></button>`).join('')}</div>`;
+    else if (e.type === 'pairs') { const L = e.pairs.map(p => p.key), A = LG.rnd(st.i + 'a'), Bq = LG.rnd(st.i + 'b'); const left = [...e.pairs].sort(() => A() - .5), right = [...e.pairs].sort(() => Bq() - .5); body = `<div class="lgp-q"><h2>${title.pairs}</h2></div><div class="lg-pairs"><div>${left.map(p => `<button class="lg-pr" data-pl="${p.key}">${esc(p.it)}</button>`).join('')}</div><div>${right.map(p => `<button class="lg-pr" data-pr="${p.key}">${esc(p.t[0])}</button>`).join('')}</div></div>`; void L; }
+    else if (/build|listen$/.test(e.type) || e.type === 'buildR' || e.type === 'listen') { const prompt = e.type === 'listen' ? `<div class="lg-ear">${spk(e.it.t[0])}${spk(e.it.t[0], true)}</div>` : e.type === 'buildR' ? `<h2 class="lg-tl">${spk(e.it.t[0])} ${esc(e.it.t[0])}</h2>` : `<h2>${esc(e.it.it)}</h2>`;
+      body = `<div class="lgp-q"><small class="muted">${title[e.type]}</small>${prompt}</div><div class="lg-line" id="lgLine"></div><div class="lg-tiles" id="lgTiles">${e.tiles.map((w, j) => `<button class="lg-tile" data-t="${j}">${esc(w)}</button>`).join('')}</div>`; }
+    else if (e.type === 'type' || e.type === 'listenType') body = `<div class="lgp-q"><small class="muted">${e.type === 'type' ? 'Scrivi in ' + l.lang : title.listenType}</small>${e.type === 'type' ? `<h2>${esc(e.it.it)}</h2>` : `<div class="lg-ear">${spk(e.it.t[0])}${spk(e.it.t[0], true)}</div>`}</div><textarea class="input lg-in" id="lgIn" rows="2" placeholder="Scrivi qui…" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>${/fr|es|de|pt/.test(LG.code(l)) ? `<div class="lg-acc">${({ fr: 'éèêàçùâîôûëœ', es: 'áéíóúñ¿¡ü', de: 'äöüß', pt: 'ãõáéíóúçâêô' })[LG.code(l).slice(0, 2)].split('').map(c => `<button data-acc="${c}">${c}</button>`).join('')}</div>` : ''}`;
+    else if (e.type === 'fill') body = `<div class="lgp-q"><small class="muted">${title.fill}</small><h2 class="muted" style="font-size:16px">${esc(e.it.it)}</h2><h2 class="lg-fill">${esc(e.before)} <span class="lg-blank" id="lgBl">____</span> ${esc(e.after)}</h2></div><div class="lg-opts row3">${e.opts.map((o, j) => `<button class="lg-opt" data-o="${j}"><kbd>${j + 1}</kbd><span>${esc(o)}</span></button>`).join('')}</div>`;
+    else if (e.type === 'speak') body = `<div class="lgp-q"><small class="muted">${title.speak}</small><h2 class="lg-tl">${spk(e.it.t[0])} ${esc(e.it.t[0])}</h2><p class="muted">${esc(e.it.it)}</p></div><button class="lg-mic" id="lgMic">🎙️<span>Tocca e parla</span></button><p class="muted" id="lgHeard" style="text-align:center;min-height:22px"></p>`;
+    B.innerHTML = head() + `<div class="lgp-body">${body}</div>` + footer(false);
+    /* wiring */
+    $$('[data-say]', B).forEach(b => b.onclick = () => sayT(b.dataset.say, !!b.dataset.slow));
+    if (e.type === 'mcqR' || e.type === 'listen' || e.type === 'listenType' || e.type === 'buildR') setTimeout(() => sayT(e.it.t[0]), 250);
+    if (e.type === 'mcq' && e.fresh) { /* tap an option to hear it */ }
+    $$('[data-o]', B).forEach(b => b.onclick = () => { if (st.answered) return; $$('[data-o]', B).forEach(x => x.classList.remove('sel')); b.classList.add('sel'); st.sel = +b.dataset.o; if (e.type === 'mcq') sayT(e.opts[st.sel].t[0]); if (e.type === 'fill') { $('#lgBl', B).textContent = e.opts[st.sel]; } enable(true); });
+    if (e.type === 'mcq' || e.type === 'mcqR') checkFn = () => { const o = e.opts[st.sel]; return { ok: o.key === e.it.key, sol: e.type === 'mcq' ? e.it.t[0] : e.it.it }; };
+    if (e.type === 'fill') checkFn = () => ({ ok: e.opts[st.sel] === e.ans, sol: e.it.t[0] });
+    if (e.type === 'pairs') { let a = null, b2 = null, left = e.pairs.length, miss = 0;
+      const tryM = () => { if (!a || !b2) return; const A = $(`[data-pl="${a}"]`, B), Bb = $(`[data-pr="${b2}"]`, B); if (a === b2) { A.classList.add('ok'); Bb.classList.add('ok'); A.disabled = Bb.disabled = true; Sound.tone([880], .08, 0, .05); const it = e.pairs.find(p => p.key === a); LG.learn(l, a, true); sayT(it.t[0]); left--; if (!left) { st.pairsMiss = miss; enable(true); checkFn = () => ({ ok: true, sol: '' }); setTimeout(() => $('#lgC', B) && $('#lgC', B).click(), 350); } } else { miss++; A.classList.add('bad'); Bb.classList.add('bad'); Sound.tone([220], .12, 0, .05); setTimeout(() => { A.classList.remove('bad', 'sel'); Bb.classList.remove('bad', 'sel'); }, 450); } a = b2 = null; $$('.lg-pr.sel', B).forEach(x => x.classList.remove('sel')); };
+      $$('[data-pl]', B).forEach(x => x.onclick = () => { $$('[data-pl]', B).forEach(y => y.classList.remove('sel')); x.classList.add('sel'); a = x.dataset.pl; tryM(); });
+      $$('[data-pr]', B).forEach(x => x.onclick = () => { $$('[data-pr]', B).forEach(y => y.classList.remove('sel')); x.classList.add('sel'); b2 = x.dataset.pr; const it = e.pairs.find(p => p.key === b2); if (it) sayT(it.t[0]); tryM(); }); }
+    if (/^(build|buildR|listen)$/.test(e.type)) { const line = $('#lgLine', B), tiles = $('#lgTiles', B);
+      const draw = () => { line.innerHTML = st.built.map((j, p) => `<button class="lg-tile in" data-b="${p}">${esc(e.tiles[j])}</button>`).join(''); $$('[data-t]', tiles).forEach(x => x.classList.toggle('used', st.built.includes(+x.dataset.t))); $$('[data-b]', line).forEach(x => x.onclick = () => { if (st.answered) return; st.built.splice(+x.dataset.b, 1); draw(); }); enable(st.built.length > 0); };
+      $$('[data-t]', tiles).forEach(x => x.onclick = () => { if (st.answered || st.built.includes(+x.dataset.t)) return; st.built.push(+x.dataset.t); if (e.type !== 'buildR') { /* hear the word */ } draw(); });
+      draw(); checkFn = () => { const ans = st.built.map(j => e.tiles[j]).join(' '); const V = e.type === 'buildR' ? [e.it.it] : e.it.t; const r = LG.check(ans, V); return { ok: r.ok && !r.typo, sol: e.type === 'buildR' ? e.it.it : e.it.t[0], alt: r.ok ? null : null }; }; }
+    if (e.type === 'type' || e.type === 'listenType') { const inp = $('#lgIn', B); setTimeout(() => inp.focus(), 60); inp.oninput = () => enable(!!inp.value.trim()); inp.onkeydown = ev => { if (ev.key === 'Enter') { ev.preventDefault(); const c = $('#lgC', B); if (c && !c.disabled) c.click(); } };
+      $$('[data-acc]', B).forEach(b => b.onclick = () => { const s0 = inp.selectionStart, s1 = inp.selectionEnd; inp.value = inp.value.slice(0, s0) + b.dataset.acc + inp.value.slice(s1); inp.focus(); inp.setSelectionRange(s0 + 1, s0 + 1); enable(true); });
+      checkFn = () => { const r = LG.check(inp.value, e.it.t); return { ok: r.ok, typo: r.typo, sol: r.best || e.it.t[0], other: r.ok && LG.norm(r.best) !== LG.norm(e.it.t[0]) ? e.it.t[0] : (r.ok && e.it.t.length > 1 ? null : null) }; }; }
+    if (e.type === 'speak') { const R = window.SpeechRecognition || window.webkitSpeechRecognition, mic = $('#lgMic', B); let rec = null, heard = '';
+      mic.onclick = () => { if (rec) { try { rec.stop(); } catch (_) {} return; } try { rec = new R(); rec.lang = LG.code(l); rec.interimResults = true; rec.maxAlternatives = 3; mic.classList.add('on'); mic.querySelector('span').textContent = 'Ti ascolto…';
+          rec.onresult = ev => { heard = [...ev.results].map(x => x[0].transcript).join(' '); $('#lgHeard', B).textContent = '«' + heard + '»'; enable(true); };
+          rec.onerror = ev => { mic.classList.remove('on'); rec = null; if (/not-allowed|service-not-allowed|network/.test(ev.error)) { LG._micOff = Date.now() + 3600e3; Island.toast({ icon: 'mic', c: 'var(--orange)', t: 'Microfono non disponibile', s: 'Salto gli esercizi di pronuncia per un\'ora', ms: 2600 }); skip(); } };
+          rec.onend = () => { mic.classList.remove('on'); mic.querySelector('span').textContent = heard ? 'Riprova' : 'Tocca e parla'; rec = null; };
+          rec.onaudioend = () => { if (rec && rec.ai) mic.querySelector('span').textContent = 'Un attimo…'; };
+          rec.start(); } catch (_) { skip(); } };
+      checkFn = () => { const a = LG.bare(heard).split(' ').filter(Boolean), t = LG.bare(e.it.t[0]).split(' ').filter(Boolean); const hit = t.filter(w => a.some(x => x === w || LG.lev(x, w) <= 1)).length; return { ok: t.length && hit / t.length >= .7, sol: e.it.t[0], speak: Math.round(hit / Math.max(1, t.length) * 100) }; }; }
+    $('#lgC', B).onclick = check; $('#lgSkip', B).onclick = skip;
+  };
+  const skip = () => { const e = exs[st.i]; if (e && /speak/.test(e.type)) LG._micOff = Date.now() + 3600e3; if (e && /listen/.test(e.type)) LG._earOff = Date.now() + 3600e3; if (e && /speak|listen/.test(e.type)) { exs = exs.filter((x, j) => j <= st.i || !(e.type === 'speak' ? x.type === 'speak' : /listen/.test(x.type))); st.i++; return paint(); } feedback({ ok: false, sol: e.it ? (e.type === 'buildR' || e.type === 'mcqR' ? e.it.it : e.it.t[0]) : '' }, true); };
+  const feedback = (r, skipped) => {
+    const e = exs[st.i]; st.answered = true;
+    if (e.it) LG.learn(l, e.it.key, r.ok);
+    if (r.ok) { st.ok++; st.combo++; st.best = Math.max(st.best, st.combo); Sound.done(); if (!st.firstTry.has(st.i)) st.firstTry.set(st.i, true); }
+    else { st.wrong++; st.combo = 0; Sound.tone([196, 147], .22, .1, .07); navigator.vibrate && navigator.vibrate(80); if (usesHearts) { const L = LG.st(l); if (L.hearts >= 5) L.heartAt = Date.now(); L.hearts = Math.max(0, L.hearts - 1); } if (e.it && !st.again.has(e.it.key)) { st.again.add(e.it.key); exs.push({ ...e, again: true }); } }
+    if (e.it && r.ok && !/listen/.test(e.type)) setTimeout(() => sayT(e.it.t[0]), 120);
+    const F = $('#lgF', B), praise = ['Ottimo!', 'Perfetto!', 'Esatto!', 'Bravissimo!', 'Così si fa!', 'Grande!'][Math.floor(Math.random() * 6)];
+    F.className = 'lgp-foot ' + (r.ok ? 'ok' : 'bad');
+    F.innerHTML = `<div class="grow lg-fb"><b>${r.ok ? (r.typo === 'refuso' ? '✓ Quasi perfetto' : r.typo === 'accenti' ? '✓ Giusto, occhio agli accenti' : '✓ ' + praise) : skipped ? 'Soluzione' : '✗ Soluzione corretta:'}</b>${r.ok ? (r.typo ? `<span>${esc(r.sol)}</span>` : r.other ? `<span>Si dice anche: ${esc(r.other)}</span>` : '') : `<span>${esc(r.sol)}</span>`}${r.speak != null && !r.ok ? `<small>Ho capito il ${r.speak}% delle parole</small>` : ''}</div><button class="btn big ${r.ok ? 'lg-go' : 'lg-go bad'}" id="lgN">Continua</button>`;
+    $('#lgN', B).onclick = next; $('#lgN', B).focus();
+    const bar = $('.lgp-bar i', B); if (bar) bar.style.width = Math.round((st.i + 1) / exs.length * 100) + '%';
+    const h = $('.lgp-h', B); if (h && usesHearts) h.textContent = '❤️ ' + LG.hearts(l);
+    if (usesHearts && LG.hearts(l) <= 0) { $('#lgN', B).textContent = 'Continua'; $('#lgN', B).onclick = () => fail(); }
+  };
+  const check = () => { if (st.answered) return next(); if (!checkFn) return; const r = checkFn(); feedback(r); };
+  const next = () => { st.i++; paint(); };
+  const key = ev => { if (!document.body.contains(B)) return; if (ev.target && /INPUT|TEXTAREA/.test(ev.target.tagName) && ev.key !== 'Enter') return; const n = +ev.key; if (n >= 1 && n <= 4) { const b = $(`[data-o="${n - 1}"]`, B); if (b) { ev.preventDefault(); b.click(); } } if (ev.key === 'Enter') { const nx = $('#lgN', B), c = $('#lgC', B); if (nx) { ev.preventDefault(); nx.click(); } else if (c && !c.disabled) { ev.preventDefault(); c.click(); } } };
+  document.addEventListener('keydown', key, true);
+  const fail = () => { B.innerHTML = `<div class="lg-end"><div class="lg-end-big">💔</div><h2>Hai finito i cuori</h2><p class="muted">Nessun problema: i cuori tornano da soli (uno ogni 4 ore). Intanto puoi fare un ripasso che non costa cuori e ti regala un cuore.</p><div class="lg-end-acts"><button class="btn primary big" id="lgPr">Ripasso (+1 ❤️)</button><button class="btn" id="lgX">Esci</button></div></div>`; save('langs'); $('#lgX', B).onclick = () => sh.close(); $('#lgPr', B).onclick = () => { sh.close(); lgPractice(l, true); }; };
+  const end = () => {
+    const L = LG.st(l), perfect = st.wrong === 0, xp = opts.practice ? 8 : opts.test ? 0 : 10 + (perfect ? 5 : 0) + (st.best >= 10 ? 3 : 0), before = LG.streak(l), firstToday = !LG.xpToday(l);
+    const acc = Math.round(st.ok / Math.max(1, st.ok + st.wrong) * 100), secs = Math.round((Date.now() - st.t0) / 1000);
+    if (opts.test) { const pass = st.wrong <= 3; if (pass) { L.course.skipTo = Math.max(L.course.skipTo ?? -1, opts.test.ui); for (let u = 0; u < opts.test.ui; u++) for (let k = 0; k < 5; k++) L.course.done[`${u}.${k}`] ||= Date.now(); } save('langs');
+      B.innerHTML = `<div class="lg-end"><div class="lg-end-big">${pass ? '🚀' : '📚'}</div><h2>${pass ? 'Test superato!' : 'Non ancora'}</h2><p class="muted">${pass ? `Sei passato direttamente all'unità ${opts.test.ui + 1}.` : `${st.wrong} errori: ne servono al massimo 3. Riprova dopo qualche lezione.`}</p><button class="btn primary big" id="lgX">Continua</button></div>`; $('#lgX', B).onclick = () => { sh.close(); App.render(); }; return; }
+    LG.addXP(l, xp); if (!opts.practice && !opts.test) L.gems += perfect ? 10 : 5; if (opts.practice && opts.heart) { L.hearts = Math.min(5, L.hearts + 1); }
+    if (opts.node) { const was = L.course.done[opts.node.key]; L.course.done[opts.node.key] = Date.now(); L.course.best[opts.node.key] = Math.max(L.course.best[opts.node.key] || 0, acc); if (!was && opts.node.k === 4) { L.gems += 30; setTimeout(() => { confetti(160); Sound.level(); }, 300); } }
+    LG.quest(l, 'xp', LG.xpToday(l), true); if (!opts.practice) LG.quest(l, 'lessons'); if (perfect && !opts.practice) LG.quest(l, 'perfect'); if (st.listened) LG.quest(l, 'listen', st.listened); LG.quest(l, 'combo', st.best, true); if (opts.practice) LG.quest(l, 'review');
+    Lang.mark(l); save('langs'); Game.add(xp, `${cap(l.lang)}: lezione`, { silent: true });
+    const after = LG.streak(l), goal = L.goal, today = LG.xpToday(l);
+    B.innerHTML = `<div class="lg-end"><div class="lg-end-big">${perfect ? '🏆' : '🎉'}</div><h2>${opts.practice ? 'Ripasso fatto!' : perfect ? 'Lezione perfetta!' : 'Lezione completata!'}</h2>
+      <div class="lg-end-g"><div class="y"><small>XP</small><b>+${xp}</b></div><div class="g"><small>Precisione</small><b>${acc}%</b></div><div class="b"><small>Tempo</small><b>${Math.floor(secs / 60)}:${pad(secs % 60)}</b></div></div>
+      ${firstToday && after > before ? `<div class="lg-streak">🔥 <b>${after}</b> ${after === 1 ? 'giorno' : 'giorni'} di fila!</div>` : ''}
+      <div class="lg-goal"><span>Obiettivo di oggi</span><i><b style="width:${Math.min(100, Math.round(today / goal * 100))}%"></b></i><small>${today}/${goal} XP${today >= goal ? ' ✓' : ''}</small></div>
+      <button class="btn primary big" id="lgX">Continua</button></div>`;
+    if (perfect) confetti(90); Sound.level();
+    $('#lgX', B).onclick = () => { sh.close(); if (UI.view === 'lang') App.render(); else App.refresh(); };
+  };
+  paint(); return sh;
+}
+function lgNoHearts(l) { const t = LG.nextHeart(l); openSheet({ title: 'Cuori finiti', left: { label: 'Chiudi' }, body: `<div class="lg-end"><div class="lg-end-big">💔</div><p>Il prossimo cuore arriva tra <b>${Math.floor(t / 3600e3)} h ${Math.round(t % 3600e3 / 60e3)} min</b>.</p><div class="lg-end-acts"><button class="btn primary" id="lhP">Ripasso: +1 ❤️</button><button class="btn" id="lhB" ${LG.st(l).gems >= 350 ? '' : 'disabled'}>Ricarica tutto · 350 💎</button></div><p class="muted" style="font-size:13px">Puoi anche disattivare i cuori in Impostazioni lingue.</p></div>`, onMount: el => { $('#lhP', el).onclick = () => { Sheets[Sheets.length - 1].close(); lgPractice(l, true); }; $('#lhB', el).onclick = () => { const L = LG.st(l); L.gems -= 350; L.hearts = 5; save('langs'); Sheets[Sheets.length - 1].close(); App.render(); }; } }); }
+function lgPractice(l, heart) { const W = LG.weak(l, 12); const items = W.length >= 4 ? W : LG.lessonItems(l, LG.nodes(l)[0]); return lgPlay(l, { items, mode: 'practice', practice: true, heart }); }
+async function lgStartNode(l, n) {
+  const u = LG.units(l)[n.ui];
+  if (u.todo) { Island.toast({ icon: 'spark', c: 'var(--purple)', t: 'Preparo l\'unità…', s: 'La prima volta la scrivo con l\'AI, poi resta salvata', ms: 3000 }); try { await lgGenUnit(l, n.ui); } catch (e) { aiError(e); return; } App.render(); }
+  return lgPlay(l, { node: n });
+}
+function lgGuide(l, ui) { const u = LG.units(l)[ui]; if (!u || u.todo) return;
+  openSheet({ title: `Guida · ${u.title}`, wide: true, left: { label: 'Chiudi' }, body: `${u.tip ? `<div class="lg-tip">💡 ${esc(u.tip)}</div>` : ''}<div class="section-h">Frasi chiave</div><div class="list">${u.s.map(x => `<div class="row"><button class="lg-spk" data-say="${esc(x.t[0])}">🔊</button><span class="grow" style="min-width:0"><div class="t" style="white-space:normal">${esc(x.t[0])}</div><div class="s" style="white-space:normal">${esc(x.it)}</div></span></div>`).join('')}</div><div class="section-h">Parole</div><div class="lg-words">${u.w.map(x => `<button class="lg-word" data-say="${esc(x.t[0])}"><b>${esc(x.t[0])}</b><small>${esc(x.it)}</small><i style="--s:${Math.round(LG.strength(l, `${ui}:w${u.w.indexOf(x)}`) * 100)}%"></i></button>`).join('')}</div>`,
+    onMount: el => $$('[data-say]', el).forEach(b => b.onclick = () => LG.say(l, b.dataset.say)) }); }
+function lgSettings(l) { const L = LG.st(l);
+  openSheet({ title: `${LANGS[l.lang] || '🌍'} ${cap(l.lang)}`, left: { label: 'Chiudi' }, right: { label: 'Fine', act: s => { s.close(); App.render(); } },
+    body: `<div class="field"><span class="lbl">Obiettivo giornaliero</span>${seg('lgg', [[10, 'Rilassato · 10 XP'], [20, 'Normale · 20'], [30, 'Serio · 30'], [50, 'Intenso · 50']], L.goal)}</div>
+      <div class="list flat"><div class="row"><span class="grow"><div class="t">Cuori</div><div class="s">Ogni errore costa un cuore; tornano da soli. Spegnili se preferisci imparare senza limiti.</div></span>${toggleBtn('lgH', S.profile.lgHearts !== false)}</div>
+      <div class="row"><span class="grow"><div class="t">Esercizi di pronuncia</div><div class="s">Usano il microfono (dove il dispositivo lo permette)</div></span>${toggleBtn('lgM', S.profile.lgMic !== false)}</div>
+      <div class="row"><span class="grow"><div class="t">Voce per l'ascolto</div><div class="s">${LG.canSpeak(l) ? esc((LG.voice(LG.code(l)) || {}).name || '') : 'Nessuna voce installata per questa lingua su questo dispositivo: gli esercizi di ascolto vengono saltati'}</div></span></div>
+      <div class="row"><span class="grow"><div class="t">Protezioni della serie 🧊</div><div class="s">Se salti un giorno la serie non si rompe · ne hai ${L.freeze}/2</div></span><button class="btn sm" id="lgF" ${L.freeze >= 2 || L.gems < 200 ? 'disabled' : ''}>200 💎</button></div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button class="btn" id="lgWords">${ico('cards', 'sm')}Le mie parole (flashcard)</button><button class="btn" id="lgTr">✍️ Traduci frasi con l'AI</button><button class="btn" id="lgCv">💬 Conversazione con l'AI</button></div>
+      <button class="btn danger plain" id="lgDel" style="align-self:flex-start;margin-top:10px">${ico('trash', 'sm')}Togli questa lingua</button>`,
+    onMount: el => { wireSeg(el, 'lgg', v => { L.goal = +v; save('langs'); }); wireToggle($('#lgH', el), on => { S.profile.lgHearts = on; save('profile'); }); wireToggle($('#lgM', el), on => { S.profile.lgMic = on; save('profile'); });
+      $('#lgF', el).onclick = e => { L.gems -= 200; L.freeze++; save('langs'); e.currentTarget.disabled = L.freeze >= 2 || L.gems < 200; Island.toast({ icon: 'flame', c: 'var(--blue)', t: '🧊 Protezione aggiunta', ms: 1600 }); };
+      $('#lgWords', el).onclick = () => { Sheets[Sheets.length - 1].close(); Srs.session(Lang.note(l).id); };
+      $('#lgTr', el).onclick = () => { Sheets[Sheets.length - 1].close(); langTranslate(l.id); };
+      $('#lgCv', el).onclick = () => { Sheets[Sheets.length - 1].close(); Lang.mark(l); go('assistant'); setTimeout(() => Assistant.send(`Facciamo pratica di ${l.lang} (livello ${l.level || 'A1'}). Parla solo in ${l.lang} con frasi semplici adatte al mio livello, fammi una domanda alla volta su argomenti di tutti i giorni e, dopo ogni mia risposta, correggi gli errori in italiano tra parentesi. Inizia tu.`), 250); };
+      $('#lgDel', el).onclick = e => inlineConfirm(e.currentTarget, `Togliere ${cap(l.lang)}?`, 'Togli', () => { S.langs = S.langs.filter(z => z !== l); save('langs'); Sheets[Sheets.length - 1].close(); UI.lgId = null; App.render(); }); } }); }
+
+/* ---------- the section ---------- */
+VIEWS.lang = {
+  actions: () => `${ACT.photoTranslate ? `<button class="btn sm" data-act="photoTranslate">📷<span class="hide-narrow">Traduci foto</span></button>` : ''}<button class="btn sm" data-act="langAdd">${ico('plus', 'sm')}<span class="hide-narrow">Lingua</span></button>`,
+  render() {
+    if (!S.langs.length) return `<h1 class="large-title">Lingue</h1><section class="card lg-welcome"><div class="lg-w-big">🌍</div><h2>Che lingua vuoi imparare?</h2><p class="muted">Lezioni da 3-5 minuti con esercizi veri: scegli, abbina, componi la frase, ascolta, scrivi e pronuncia. Serie di giorni, obiettivo giornaliero e ripasso dei punti deboli.</p><div class="lg-pick">${Object.entries(LANGS).filter(([k]) => k !== 'altro').map(([k, f]) => `<button class="card lg-pk" data-lgn="${k}"><span>${f}</span><b>${cap(k)}</b><small class="muted">${LG_DATA[k] ? 'Corso completo' : 'Con l\'AI'}</small></button>`).join('')}</div></section>`;
+    const l = LG.cur(); LG.st(l); LG.checkFreeze(l);
+    const U = LG.units(l), N = LG.nodes(l), cur = LG.current(l), today = LG.xpToday(l), goal = l.goal, hs = LG.hearts(l), Q = LG.quests(l);
+    const top = `<div class="lg-top">${S.langs.length > 1 ? `<div class="lg-switch">${S.langs.map(x => `<button class="${x === l ? 'on' : ''}" data-lgs="${x.id}">${LANGS[x.lang] || '🌍'}</button>`).join('')}</div>` : `<span class="lg-flag1">${LANGS[l.lang] || '🌍'}</span>`}<span class="grow"></span><span class="lg-stat" title="Giorni di fila">🔥 <b>${LG.streak(l)}</b></span><span class="lg-stat" title="Gemme">💎 <b>${l.gems}</b></span><span class="lg-stat" title="Cuori">${LG.infinite() ? '❤️ <b>∞</b>' : `❤️ <b>${hs}</b>`}</span><button class="icon-btn" data-lgset="1" aria-label="Impostazioni">${ico('gear', 'sm')}</button></div>`;
+    const side = `<aside class="lg-side"><section class="card lg-goalc"><div class="card-h"><h3>Obiettivo di oggi</h3></div><div class="lg-goal"><i><b style="width:${Math.min(100, Math.round(today / goal * 100))}%"></b></i><small>${today}/${goal} XP${today >= goal ? ' ✓' : ''}</small></div></section>
+      <section class="card"><div class="card-h"><h3>Missioni del giorno</h3></div>${Q.map(q => `<div class="lg-q ${q.done ? 'done' : ''}"><span>${q.done ? '✅' : '🎯'}</span><span class="grow"><b>${esc(q.t)}</b><i><b style="width:${Math.min(100, Math.round(q.p / q.n * 100))}%"></b></i></span><small>${q.done ? '✓' : `+${q.g} 💎`}</small></div>`).join('')}</section>
+      <section class="card lg-prac"><b>Allenati sui punti deboli</b><small class="muted">${LG.known(l).length ? `Le ${Math.min(12, LG.known(l).length)} parole e frasi che ricordi meno` : 'Completa la prima lezione per sbloccarlo'}</small><button class="btn" data-lgprac="1" ${LG.known(l).length ? '' : 'disabled'}>💪 Ripassa</button></section></aside>`;
+    let path = '';
+    U.forEach((u, ui) => {
+      const nodes = N.filter(n => n.ui === ui), unitDone = nodes.every(n => LG.isDone(l, n.key)), col = ['#58CC02', '#1CB0F6', '#CE82FF', '#FF9600', '#FF4B4B', '#2B70C9'][ui % 6];
+      path += `<section class="lg-unit" style="--uc:${col}"><div class="lg-uh"><div class="grow"><small>Unità ${ui + 1}${unitDone ? ' · completata ✓' : ''}</small><b>${u.icon} ${esc(u.title)}</b></div>${!u.todo ? `<button class="lg-guide" data-lgg="${ui}">📖 Guida</button>` : ''}</div><div class="lg-nodes">${nodes.map((n, j) => { const done = LG.isDone(l, n.key), un = LG.unlocked(l, n), isCur = cur && cur.key === n.key, off = [0, 46, 66, 46, 0][j]; return `<div class="lg-nw" style="--x:${(ui % 2 ? -1 : 1) * off}px">${isCur ? `<span class="lg-bubble">${done ? 'RIPETI' : 'INIZIA'}</span>` : ''}<button class="lg-node ${done ? 'done' : un ? 'open' : 'lock'} ${isCur ? 'cur' : ''} ${n.review ? 'rev' : ''}" data-lgnode="${n.key}" aria-label="Lezione ${j + 1}">${n.review ? (done ? '🏆' : '🏁') : done ? '★' : un ? '★' : '🔒'}</button></div>`; }).join('')}</div>${!unitDone && ui > 0 && !nodes.some(n => LG.unlocked(l, n)) ? `<button class="lg-jump" data-lgtest="${ui}">⏩ Sai già queste cose? Fai il test e salta qui</button>` : ''}</section>`;
+    });
+    if (!LG_DATA[l.lang] || N.every(n => LG.isDone(l, n.key))) path += `<section class="lg-unit lg-more"><button class="btn" data-lgmore="1">${ico('spark', 'sm')}Nuova unità su misura con l'AI</button></section>`;
+    return `<h1 class="large-title">Lingue</h1>${top}<div class="lg-layout"><div class="lg-path">${cur ? `<button class="card lg-cont" data-lgnode="${cur.key}"><span>${U[cur.ui].icon}</span><span class="grow"><small class="muted">${today ? 'Continua' : 'Inizia la lezione di oggi'}</small><b>Unità ${cur.ui + 1} · ${cur.review ? 'Ripasso dell\'unità' : 'Lezione ' + (cur.k + 1)}</b></span><span class="btn primary">${ico('play', 'sm')}Via</span></button>` : ''}${path}</div>${side}</div>`;
+  },
+  mount(root) {
+    const l = LG.cur();
+    $$('[data-lgn]', root).forEach(b => b.onclick = () => { const o = { id: uid(), lang: b.dataset.lgn, level: 'A1', daily: 10, days: [], created: Date.now() }; S.langs.push(o); LG.st(o); Lang.note(o); save('langs'); UI.lgId = o.id; App.render(); });
+    $$('[data-lgs]', root).forEach(b => b.onclick = () => { UI.lgId = b.dataset.lgs; App.render(); });
+    $$('[data-lgset]', root).forEach(b => b.onclick = () => lgSettings(l));
+    $$('[data-lgg]', root).forEach(b => b.onclick = () => lgGuide(l, +b.dataset.lgg));
+    $$('[data-lgprac]', root).forEach(b => b.onclick = () => lgPractice(l));
+    $$('[data-lgtest]', root).forEach(b => b.onclick = () => { const ui = +b.dataset.lgtest, items = LG.units(l).slice(0, ui).flatMap((u, i) => [...u.w.map((x, j) => ({ ...x, kind: 'w', key: `${i}:w${j}` })), ...u.s.map((x, j) => ({ ...x, kind: 's', key: `${i}:s${j}` }))]); if (items.length < 6) return; lgPlay(l, { items, mode: 'test', test: { ui }, practice: true }); });
+    $$('[data-lgmore]', root).forEach(b => b.onclick = async () => { const t = prompt('Di cosa vuoi parlare nella nuova unità? (es. "colloquio di lavoro", "meccanica e auto")'); if (!t) return; b.disabled = true; b.textContent = 'Preparo l\'unità…'; try { await lgGenUnit(l, null, t.trim()); App.render(); } catch (e) { aiError(e); b.disabled = false; } });
+    $$('[data-lgnode]', root).forEach(b => b.onclick = () => { const n = LG.nodes(l).find(x => x.key === b.dataset.lgnode); if (!n) return; if (!LG.unlocked(l, n)) { Island.toast({ icon: 'lock', c: 'var(--gray)', t: 'Ancora chiusa', s: 'Completa prima le lezioni precedenti', ms: 1800 }); return; } lgStartNode(l, n); });
+    const c = $('.lg-node.cur', root); if (c && UI._lgScroll !== l.id) { UI._lgScroll = l.id; setTimeout(() => c.scrollIntoView({ block: 'center', behavior: 'smooth' }), 120); }
+  },
+};
+ACT.langToday = () => { go('lang'); const l = LG.cur(); if (!l) return; setTimeout(() => { const n = LG.current(l); if (n) lgStartNode(l, n); }, 250); };
+TODAY_EXTRA.lang = () => { if (!S.langs.length) return ''; const L = S.langs.map(l => (LG.st(l), l)); const pend = L.filter(l => LG.xpToday(l) < l.goal); if (!pend.length) return '';
+  return `<section class="card span-6 lg-today"><div class="card-h"><h3>Lingue</h3><button class="more" data-go="lang">Apri${ico('right', 'sm')}</button></div>${pend.slice(0, 2).map(l => { const t = LG.xpToday(l), s = LG.streak(l); return `<div class="lg-td"><span class="lg-tdf">${LANGS[l.lang] || '🌍'}</span><span class="grow" style="min-width:0"><b>${cap(l.lang)}</b>${s ? ` <span class="lg-fire">🔥 ${s}</span>` : ''}<div class="lg-goal sm"><i><b style="width:${Math.min(100, Math.round(t / l.goal * 100))}%"></b></i><small>${t}/${l.goal} XP</small></div><small class="muted">${t ? 'Ancora un po\' per l\'obiettivo' : s ? 'Fai una lezione per non perdere la serie' : '3 minuti per iniziare la serie'}</small></span><button class="btn primary sm" data-act="lgGo" data-lg="${l.id}">${ico('play', 'sm')}</button></div>`; }).join('')}</section>`; };
+ACT.lgGo = el => { const l = S.langs.find(x => x.id === el.dataset.lg); if (!l) return; UI.lgId = l.id; const n = LG.current(l); if (n) lgStartNode(l, n); else { go('lang'); } };
+/* streak reminder in the evening */
+{ const old = Alerts.list.bind(Alerts); Alerts.list = function (hours = 48) { const out = old(hours), now = Date.now();
+    for (const l of S.langs || []) { LG.st(l); const k = todayK(); if (LG.xpToday(l) || !LG.streak(l)) continue; const key = `lg:${l.id}:${k}`, at = this.at(k, '20:30'); if (!this.fired[key] && at >= now - 10 * 60e3 && at <= now + hours * 36e5) out.push({ key, at, title: `🔥 ${cap(l.lang)}: la serie di ${LG.streak(l)} giorni ti aspetta`, body: 'Bastano 3 minuti: una lezione e la serie continua', view: 'lang' }); }
+    return out; }; }
+
+/* =========================================================
+   CRONOLOGIA — oltre al cestino (che recupera ciò che elimini),
+   Orbita tiene le versioni dei tuoi dati degli ultimi 30 giorni:
+   una nota riscritta male, un quaderno cancellato a metà, un
+   esame modificato per sbaglio… scegli il momento e lo rimetti
+   com'era. Tutto resta sul dispositivo (IndexedDB), a parte.
+   ========================================================= */
+const Hist = {
+  DAYS: 30, GAP: 10 * 60e3, p: null, last: {}, timers: {},
+  open() { return this.p ||= new Promise(res => { try { const r = indexedDB.open('orbita-hist', 1); r.onupgradeneeded = () => { const s = r.result.createObjectStore('v', { keyPath: 'k' }); s.createIndex('id', 'id'); }; r.onsuccess = () => res(r.result); r.onerror = r.onblocked = () => res(null); } catch (_) { res(null); } }); },
+  async tx(mode, fn) { const db = await this.open(); if (!db) return null; return new Promise(res => { try { const t = db.transaction('v', mode), s = t.objectStore('v'); const out = fn(s); t.oncomplete = () => res(out && out.result !== undefined ? out.result : out); t.onerror = t.onabort = () => res(null); } catch (_) { res(null); } }); },
+  async put(id, json) { return this.tx('readwrite', s => s.put({ k: id + '|' + Date.now(), id, at: Date.now(), size: json.length, v: json })); },
+  async list(id) { const db = await this.open(); if (!db) return []; return new Promise(res => { try { const out = [], r = db.transaction('v').objectStore('v').index('id').openCursor(IDBKeyRange.only(id)); r.onsuccess = () => { const c = r.result; if (c) { out.push({ k: c.value.k, at: c.value.at, size: c.value.size }); c.continue(); } else res(out.sort((a, b) => b.at - a.at)); }; r.onerror = () => res([]); } catch (_) { res([]); } }); },
+  async get(k) { const db = await this.open(); if (!db) return null; return new Promise(res => { try { const r = db.transaction('v').objectStore('v').get(k); r.onsuccess = () => res(r.result || null); r.onerror = () => res(null); } catch (_) { res(null); } }); },
+  async ids() { const db = await this.open(); if (!db) return {}; return new Promise(res => { try { const out = {}, r = db.transaction('v').objectStore('v').openCursor(); r.onsuccess = () => { const c = r.result; if (c) { const v = c.value; (out[v.id] ||= { n: 0, at: 0 }); out[v.id].n++; out[v.id].at = Math.max(out[v.id].at, v.at); c.continue(); } else res(out); }; r.onerror = () => res({}); } catch (_) { res({}); } }); },
+  /** drop what's older than 30 days, and keep at most 60 versions per document (25 for boards) */
+  async prune() { const db = await this.open(); if (!db) return; const lim = Date.now() - this.DAYS * 864e5, per = {};
+    await new Promise(res => { try { const t = db.transaction('v', 'readwrite'), r = t.objectStore('v').openCursor(null, 'prev'); r.onsuccess = () => { const c = r.result; if (!c) return; const v = c.value, n = per[v.id] = (per[v.id] || 0) + 1, max = /^board-/.test(v.id) ? 25 : 60; if (v.at < lim || n > max) c.delete(); c.continue(); }; t.oncomplete = t.onerror = () => res(); } catch (_) { res(); } }); },
+  /** remember the state of a document, at most every 10 minutes of editing */
+  snap(id, force) { if (!/^(note|board)-/.test(id) && !CORE.includes(id) || /^(game|music|focuslog|aikeys|inbox)$/.test(id)) return;
+    clearTimeout(this.timers[id]); this.timers[id] = setTimeout(async () => { const now = Date.now(); if (!force && now - (this.last[id] || 0) < this.GAP) return; const v = Store.valueOf(id); if (v == null) return; let j; try { j = JSON.stringify(v); } catch (_) { return; } if (j.length > 8e6) return; this.last[id] = now; await this.put(id, j); }, force ? 0 : 6000); },
+  label(id) { if (id.startsWith('note-')) { const n = S.notes[id.slice(5)]; return n ? 'Nota: ' + (n.title || 'senza titolo') : 'Nota eliminata'; } if (id.startsWith('board-')) { const b = S.boards[id.slice(6)]; return b ? 'Lavagna: ' + (b.title || 'senza titolo') : 'Lavagna eliminata'; } return (typeof TRASH_N !== 'undefined' && TRASH_N[id]) || { events: 'Calendario', tasks: 'Promemoria', exams: 'Esami', health: 'Salute', langs: 'Lingue', recipes: 'Ricettario', shop: 'Spesa', pantry: 'Dispensa', contacts: 'Rubrica', profile: 'Impostazioni e profilo', courses: 'Corsi', projects: 'Progetti', money: 'Finanze', journal: 'Diario', habits: 'Abitudini', goals: 'Obiettivi', trips: 'Trasferte', docs: 'Documenti', social: 'Social' }[id] || cap(id); },
+  /** what changed between a version and now, in words */
+  diff(id, old) { const now = Store.valueOf(id);
+    if (id.startsWith('note-')) { const a = String((old && (old.text || old.html)) || '').replace(/<[^>]+>/g, ''), b = String((now && (now.text || now.html)) || '').replace(/<[^>]+>/g, ''); return now ? `${a.length} caratteri (ora ${b.length})` : 'la nota oggi non c\'è più'; }
+    if (id.startsWith('board-')) { const n = o => (o && o.strokes ? o.strokes.length : 0) + ((o && o.pages) || []).reduce((s, p) => s + ((p.strokes || []).length), 0); return now ? `${n(old)} tratti (ora ${n(now)})` : 'la lavagna oggi non c\'è più'; }
+    const arrs = v => Array.isArray(v) ? { '': v } : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([, x]) => Array.isArray(x) && x.some(y => y && y.id))) : {};
+    const A = arrs(old), Bn = arrs(now); let gone = 0, added = 0, changed = 0;
+    for (const k of Object.keys(A)) { const m = new Map((Bn[k] || []).filter(x => x && x.id).map(x => [x.id, JSON.stringify(x)])); for (const x of A[k]) { if (!x || !x.id) continue; if (!m.has(x.id)) gone++; else if (m.get(x.id) !== JSON.stringify(x)) changed++; } const ids = new Set(A[k].map(x => x && x.id)); for (const x of Bn[k] || []) if (x && x.id && !ids.has(x.id)) added++; }
+    return [gone ? `${gone} ${gone === 1 ? 'elemento che oggi manca' : 'elementi che oggi mancano'}` : '', changed ? `${changed} modificat${changed === 1 ? 'o' : 'i'} da allora` : '', added ? `${added} aggiunt${added === 1 ? 'o' : 'i'} dopo` : ''].filter(Boolean).join(' · ') || 'uguale a oggi'; },
+  /** put a version back: everything, or only what's missing */
+  restore(id, old, onlyMissing) {
+    Hist.snap(id, true); /* the current state becomes a version too: you can always go back */
+    if (onlyMissing && !/^(note|board)-/.test(id)) { const now = Store.valueOf(id); const put = (arrOld, arrNow) => { const ids = new Set(arrNow.map(x => x && x.id)); let n = 0; for (const x of arrOld) if (x && x.id && !ids.has(x.id)) { arrNow.push(x); n++; } return n; };
+      let n = 0; if (Array.isArray(old) && Array.isArray(now)) n = put(old, now); else if (old && now) for (const k of Object.keys(old)) if (Array.isArray(old[k]) && Array.isArray(now[k])) n += put(old[k], now[k]);
+      save(id, 60); App.refresh(); return n; }
+    Store.apply(id, old); save(id, 60); App.refresh(); return -1; },
+};
+{ const oT = Store.touch.bind(Store); Store.touch = function (id, delay) { try { Hist.snap(id); } catch (_) {} return oT(id, delay); }; }
+/* a daily baseline of everything, quietly, a while after start */
+setTimeout(async () => { try { await Hist.prune(); const k = 'orbita.histBase'; let b = 0; try { b = +localStorage.getItem(k) || 0; } catch (_) {} if (Date.now() - b < 20 * 3600e3) return; await Store.heavyReady; for (const id of Store.docIdsLocal()) { if (/^(game|music|focuslog|aikeys|inbox)$/.test(id)) continue; const v = Store.valueOf(id); if (v == null) continue; try { await Hist.put(id, JSON.stringify(v)); Hist.last[id] = Date.now(); } catch (_) {} } try { localStorage.setItem(k, String(Date.now())); } catch (_) {} } catch (_) {} }, 9000);
+
+function histSheet(focusId) {
+  const sh = openSheet({ title: 'Cronologia', wide: true, left: { label: 'Chiudi' }, right: { label: '🗑️ Cestino', primary: false, act: () => ACT.trash() }, body: `<div id="hiB" class="hi"><p class="muted">Carico le versioni…</p></div>` });
+  const B = $('#hiB', sh.el);
+  const when = t => { const d = new Date(t), k = dkey(d); return `${relDay(k, true)} alle ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+  const area = async id => { const L = await Hist.list(id);
+    B.innerHTML = `<button class="btn plain" id="hiBack">${ico('left', 'sm')}Tutte le aree</button><h3 style="margin:4px 0">${esc(Hist.label(id))}</h3><p class="muted" style="margin:0;font-size:14px">Tocca un momento per vedere cosa cambia rispetto a oggi e rimetterlo com'era.</p><div class="list" id="hiL">${L.map(v => `<button class="row" data-hv="${esc(v.k)}"><span class="tile-ico" style="background:var(--indigo)">${ico('clock')}</span><span class="grow"><div class="t">${when(v.at)}</div><div class="s" data-hs="${esc(v.k)}">…</div></span>${ico('right', 'sm chev')}</button>`).join('') || '<div class="row"><span class="muted">Ancora nessuna versione salvata</span></div>'}</div>`;
+    $('#hiBack', B).onclick = home;
+    for (const v of L.slice(0, 25)) Hist.get(v.k).then(o => { const s = $(`[data-hs="${CSS.escape(v.k)}"]`, B); if (s && o) try { s.textContent = Hist.diff(id, JSON.parse(o.v)); } catch (_) {} });
+    $$('[data-hv]', B).forEach(b => b.onclick = async () => { const o = await Hist.get(b.dataset.hv); if (!o) return; const old = JSON.parse(o.v), arr = !/^(note|board)-/.test(id), d = Hist.diff(id, old);
+      const prev = id.startsWith('note-') ? `<div class="hi-prev">${esc(String(old.text || String(old.html || '').replace(/<[^>]+>/g, ' ')).slice(0, 1500))}</div>` : '';
+      openSheet({ title: when(o.at), left: { label: 'Annulla' }, body: `<p style="margin:0"><b>${esc(Hist.label(id))}</b> com'era ${when(o.at).toLowerCase()}: ${esc(d)}.</p>${prev}
+        <div class="list">${arr && /mancan/.test(d) ? `<button class="row" id="hiMiss"><span class="tile-ico" style="background:var(--green)">${ico('plus')}</span><span class="grow"><div class="t">Recupera solo quello che manca</div><div class="s">Rimette gli elementi che oggi non ci sono, senza toccare il resto</div></span></button>` : ''}
+        <button class="row" id="hiAll"><span class="tile-ico" style="background:var(--orange)">${ico('refresh')}</span><span class="grow"><div class="t">Torna esattamente a questa versione</div><div class="s">Lo stato di adesso resta in cronologia: puoi sempre tornare indietro</div></span></button></div>`,
+        onMount: el => { const done = (n) => { Sheets[Sheets.length - 1].close(); Island.toast({ icon: 'refresh', c: 'var(--green)', t: n > 0 ? `${n} ${n === 1 ? 'elemento recuperato' : 'elementi recuperati'}` : 'Versione ripristinata', s: Hist.label(id), ms: 2400 }); setTimeout(() => area(id), 300); };
+          const m = $('#hiMiss', el); if (m) m.onclick = () => done(Hist.restore(id, old, true));
+          $('#hiAll', el).onclick = () => done(Hist.restore(id, old, false)); } }); }); };
+  const home = async () => { const I = await Hist.ids(), ids = Object.keys(I).sort((a, b) => I[b].at - I[a].at);
+    const grp = { 'Studio e lavoro': [], 'Note e lavagne': [], 'Vita': [], 'Altro': [] };
+    for (const id of ids) { const g = /^(note|board)-/.test(id) ? 'Note e lavagne' : /^(events|tasks|exams|courses|projects|goals|docs|thesis|hours|applies)$/.test(id) ? 'Studio e lavoro' : /^(money|health|habits|journal|shop|pantry|recipes|langs|trips|contacts)$/.test(id) ? 'Vita' : 'Altro'; grp[g].push(id); }
+    B.innerHTML = `<p class="muted" style="margin:0;font-size:14px">Orbita salva una versione dei tuoi dati ogni 10 minuti di modifiche e una al giorno, per ${Hist.DAYS} giorni, solo su questo dispositivo. Per ciò che hai eliminato c'è anche il <a href="#" id="hiTr">cestino</a>.</p>` + Object.entries(grp).filter(([, L]) => L.length).map(([g, L]) => `<div class="section-h">${g}</div><div class="list">${L.slice(0, 40).map(id => `<button class="row" data-ha="${esc(id)}"><span class="grow" style="min-width:0"><div class="t">${esc(Hist.label(id))}</div><div class="s">${I[id].n} ${I[id].n === 1 ? 'versione' : 'versioni'} · l'ultima ${when(I[id].at).toLowerCase()}</div></span>${ico('right', 'sm chev')}</button>`).join('')}</div>`).join('') + (ids.length ? '' : '<div class="empty"><b>Ancora nessuna versione</b><p>Le versioni compaiono man mano che usi Orbita.</p></div>');
+    $$('[data-ha]', B).forEach(b => b.onclick = () => area(b.dataset.ha)); const t = $('#hiTr', B); if (t) t.onclick = e => { e.preventDefault(); ACT.trash(); }; };
+  if (focusId) area(focusId); else home();
+  return sh;
+}
+ACT.history = () => histSheet();
+CMD_ACT.push(['Cronologia e versioni', 'clock', () => histSheet()], ['Cestino', 'trash', () => ACT.trash()]);
+/* notes: "versions" from the note itself */
+Promise.resolve().then(() => { const V = VIEWS.settings; if (!V) return; const oR = V.render, oM = V.mount;
+  V.render = function () { const h = oR.apply(this, arguments); const row = `<button class="row" data-act="history"><span class="tile-ico" style="background:var(--indigo)">${ico('clock')}</span><span class="grow"><div class="t">Cronologia e ripristino</div><div class="s">Rimetti com'era una nota, una lavagna, il calendario… fino a ${Hist.DAYS} giorni fa</div></span>${ico('right', 'sm chev')}</button><button class="row" data-act="bugReport"><span class="tile-ico" style="background:var(--red)">${ico('flag')}</span><span class="grow"><div class="t">Segnala un problema</div><div class="s">Prepara un riepilogo tecnico da mandare, senza i tuoi dati personali</div></span>${ico('right', 'sm chev')}</button>`;
+    if (h.includes('data-act="history"')) return h; const at = '<div class="section-h">I tuoi dati</div><div class="list flat">'; return h.includes(at) ? h.replace(at, at + row) : h + `<div class="section-h">I tuoi dati</div><div class="list flat">${row}</div>`; };
+  V.mount = oM; if (UI.view === 'settings') App.render(); });
+
+/* =========================================================
+   SEGNALA UN PROBLEMA — raccoglie da solo quello che serve per
+   capire un errore (versione, dispositivo, schermata, ultimi
+   passi, errori tecnici, stato di sincronizzazione e archivio)
+   SENZA dati personali: niente testi, nomi, email, chiavi.
+   Lo copi e lo incolli nella chat con Claude.
+   ========================================================= */
+const Bug = {
+  errs: [], steps: [],
+  clean(s) { return String(s || '').replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, '‹email›').replace(/(AIza[\w-]{20,}|EAA[\w]{20,}|sk-[\w-]{16,}|eyJ[\w-]+\.[\w-]+\.[\w-]+|gh[pous]_[\w]{20,})/g, '‹chiave›').replace(/(https?:\/\/[^\s?#"']+)[?#][^\s"']*/g, '$1?‹…›').replace(/\b\d{6,}\b/g, '‹n›').slice(0, 600); },
+  err(msg, stack) { this.errs.push({ t: Date.now(), v: UI.view, m: this.clean(msg), s: this.clean(String(stack || '').split('\n').slice(0, 4).join(' ⏎ ')) }); if (this.errs.length > 30) this.errs.shift(); },
+  step(s) { this.steps.push(`${new Date().toTimeString().slice(0, 8)} ${s}`); if (this.steps.length > 30) this.steps.shift(); },
+  size(k) { try { return (localStorage.getItem(k) || '').length; } catch (_) { return -1; } },
+  async report(what) {
+    const ua = navigator.userAgent, plat = window.orbitaDesktop ? `Programma per computer (${window.orbitaDesktop.platform || ''})` : window.OrbitaAndroid ? 'App Android' : /iPad|Macintosh/.test(ua) && navigator.maxTouchPoints > 1 ? 'iPad (browser/Home)' : /iPhone/.test(ua) ? 'iPhone' : /Android/.test(ua) ? 'Android (browser)' : IN_CLAUDE ? 'Dentro Claude' : 'Browser';
+    let shell = ''; try { if (window.orbitaDesktop) { const i = await window.orbitaDesktop.info(); shell = i.version; } else if (window.OrbitaAndroid) shell = JSON.parse(window.OrbitaAndroid.info()).version; } catch (_) {}
+    const build = (document.querySelector('meta[name="orbita-build"]') || {}).content || 'artifact';
+    const cnt = { eventi: (S.events || []).length, promemoria: (S.tasks || []).length, esami: (S.exams || []).length, note: Object.keys(S.notes || {}).length, lavagne: Object.keys(S.boards || {}).length, documenti: (S.docs || []).length, movimenti: ((S.money || {}).tx || []).length, lingue: (S.langs || []).length, schede: ((S.health || {}).plans || []).length };
+    let est = null; try { est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null; } catch (_) {}
+    const ai = (() => { try { const c = typeof AIK !== 'undefined' && AIK.conf ? AIK.conf() : null; return c && c.provider ? c.provider + (c.model ? ' / ' + c.model : '') : 'nessuna'; } catch (_) { return '?'; } })();
+    const L = [
+      '### Segnalazione Orbita', what ? `**Cosa è successo:** ${this.clean(what)}` : '**Cosa è successo:** (non descritto)', '',
+      `- Versione: ${build}${shell ? ` · contenitore ${shell}` : ''}`, `- Dispositivo: ${plat} · ${innerWidth}×${innerHeight} @${devicePixelRatio}x · ${navigator.language}`,
+      `- Browser: ${this.clean(ua.replace(/\(.*?\)/, '(…)'))}`, `- Schermata: ${UI.view}${Sheets.length ? ` · ${Sheets.length} finestre aperte` : ''} · tema ${document.documentElement.getAttribute('data-theme') || 'auto'}`,
+      `- Sincronizzazione: ${Store.syncState || '?'} · modo ${Store.mode} · cloud ${typeof Cloud !== 'undefined' && Cloud.ready && Cloud.ready() ? 'collegato' : 'no'} · server notifiche ${typeof Phone !== 'undefined' && Phone.fnUrl && Phone.fnUrl() ? 'impostato' : 'no'}`,
+      `- Archivio: locale ${Math.round(this.size(LS_KEY) / 1024)} KB · parte pesante in IndexedDB ${Store.idb ? 'sì' : 'no'}${est ? ` · usati ${Math.round((est.usage || 0) / 1048576)} MB su ${Math.round((est.quota || 0) / 1048576)} MB` : ''}`,
+      `- Intelligenza artificiale: ${ai} · online ${navigator.onLine ? 'sì' : 'no'}`,
+      `- Quantità (solo numeri): ${Object.entries(cnt).map(([k, v]) => `${k} ${v}`).join(', ')}`, '',
+      `**Ultimi passi**`, ...(this.steps.length ? this.steps.slice(-20).map(s => '- ' + s) : ['- (nessuno)']), '',
+      `**Errori tecnici (${this.errs.length})**`, ...(this.errs.length ? this.errs.slice(-15).map(e => `- ${new Date(e.t).toTimeString().slice(0, 8)} [${e.v}] ${e.m}${e.s ? `\n  ${e.s}` : ''}`) : ['- nessun errore registrato in questa sessione']),
+    ];
+    return L.join('\n');
+  },
+};
+window.addEventListener('error', e => Bug.err(e.message || (e.error && e.error.message), e.error && e.error.stack));
+window.addEventListener('unhandledrejection', e => { const r = e.reason; if (r && /AbortError|aborted/i.test(String(r.name || r.message || r))) return; Bug.err('Promessa non gestita: ' + (r && (r.message || r) || ''), r && r.stack); });
+{ const oE = console.error.bind(console); console.error = function (...a) { try { Bug.err('console.error: ' + a.map(x => x && x.message ? x.message : typeof x === 'string' ? x : '').join(' '), a.find(x => x && x.stack) && a.find(x => x && x.stack).stack); } catch (_) {} return oE(...a); }; }
+{ const oG = go; go = function (v, o) { Bug.step('apre ' + v); return oG(v, o); }; }
+document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('[data-act],[data-go]'); if (b) Bug.step((b.dataset.act ? 'azione ' + b.dataset.act : 'vai a ' + b.dataset.go)); }, true);
+{ const oS = openSheet; openSheet = function (o) { try { Bug.step('finestra «' + Bug.clean((o && o.title) || '').slice(0, 40) + '»'); } catch (_) {} return oS.apply(this, arguments); }; }
+function bugSheet() {
+  const sh = openSheet({ title: 'Segnala un problema', wide: true, left: { label: 'Chiudi' },
+    body: `<p class="muted" style="margin:0;font-size:14px">Scrivi in due righe cosa non va. Sotto preparo un riepilogo tecnico <b>senza i tuoi dati personali</b> (niente testi, nomi, email o chiavi): copialo e incollalo nella chat con Claude.</p>
+      <textarea class="input" id="bgW" rows="3" placeholder="Es. «Quando tocco Salva sullo scontrino non succede niente»"></textarea>
+      <details class="bg-d" open><summary>Riepilogo tecnico</summary><pre id="bgR" class="bg-pre">Preparo…</pre></details>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="bgC">${ico('copy', 'sm')}Copia</button><button class="btn" id="bgS">${ico('download', 'sm')}Salva come file</button></div>`,
+    onMount: el => { const R = $('#bgR', el), W = $('#bgW', el); let txt = ''; const make = async () => { txt = await Bug.report(W.value.trim()); R.textContent = txt; }; make(); W.oninput = () => { clearTimeout(W._t); W._t = setTimeout(make, 300); };
+      $('#bgC', el).onclick = async () => { await make(); copyText(txt); Island.toast({ icon: 'copy', c: 'var(--green)', t: 'Copiato', s: 'Incollalo nella chat con Claude', ms: 2200 }); };
+      $('#bgS', el).onclick = async () => { await make(); saveFile(`orbita-segnalazione-${todayK()}.md`, txt, 'text/markdown'); }; } });
+  return sh;
+}
+ACT.bugReport = () => bugSheet();
+CMD_ACT.push(['Segnala un problema', 'flag', () => bugSheet()]);
+
+/* =========================================================
+   SESSIONE D'ESAME — quando si avvicina un appello Orbita
+   guarda l'intera sessione: gli esami in fila con i giorni
+   che mancano e quanto sei pronto, la media che ti serve per
+   arrivare al tuo obiettivo, un tocco per rimandare ciò che
+   non è urgente a dopo la sessione e i ripassi da fare nei
+   tempi morti. Si somma alla modalità esame dei giorni prima.
+   ========================================================= */
+const Sess = {
+  P() { return { on: true, lead: 21, ...(S.profile.sess || {}) }; },
+  /** the cluster of planned exams starting with the next one (exams less than 3 weeks apart) */
+  get() { if (!this.P().on) return null; const t = todayK(), E = (S.exams || []).filter(x => x.status === 'planned' && x.date && x.date >= t).sort((a, b) => a.date.localeCompare(b.date)); if (!E.length) return null;
+    if (dayDiff(t, E[0].date) > this.P().lead) return null; const L = [E[0]]; for (const x of E.slice(1)) if (dayDiff(L[L.length - 1].date, x.date) <= 21) L.push(x); else break;
+    return { exams: L, from: t, to: L[L.length - 1].date }; },
+  ready(x) { try { const c = StudyPlan.course(x), P = StudyPlan.P(), prog = c ? Courses.prog(c) : 0, total = Math.round((+x.cfu || 6) * (+x.hpc || P.hpc) * 60), done = StudyPlan.done(x, c); return Math.max(0, Math.min(1, (done + prog * total * .85) / Math.max(1, total))); } catch (_) { return 0; } },
+  /** the average you need on these exams to reach your target */
+  need(L) { const st = Exams.stats(), tg = +S.profile.targetMedia || 27, w = L.reduce((s, x) => s + (+x.cfu || 0), 0); if (!w) return null; const need = (tg * (st.cfuG + w) - st.sum) / w; return { tg, need, now: st.w, w, ok: need <= 30.5, easy: need <= st.w }; },
+  /** tasks that can wait until after the session */
+  movable(s) { const end = s.to, words = s.exams.map(x => kNorm(x.name).split(' ').filter(w => w.length > 3)).flat(); return (S.tasks || []).filter(t => !t.done && !t.flag && !(t.prio >= 2) && t.due && t.due <= end && dayDiff(todayK(), t.due) > 1 && !words.some(w => kNorm(t.title || '').includes(w)) && !/esame|studi|ripass|appello|tesi/i.test(t.title || '')); },
+  postpone(s) { const L = this.movable(s), to = addDK(s.to, 1), prev = L.map(t => [t.id, t.due || null]); for (const t of L) t.due = to; save('tasks'); App.refresh();
+    Island.toast({ icon: 'clock', c: 'var(--indigo)', t: `${L.length} ${L.length === 1 ? 'promemoria spostato' : 'promemoria spostati'} a dopo la sessione`, s: fmtLong(to), action: { label: 'Annulla', fn: () => { for (const [id, d] of prev) { const t = S.tasks.find(z => z.id === id); if (t) t.due = d; } save('tasks'); App.refresh(); } }, ms: 6000 }); },
+};
+TODAY_CARDS.session = "Sessione d'esame";
+if (!TODAY_DEFAULT.includes('session')) { const i = TODAY_DEFAULT.indexOf('exammode'); TODAY_DEFAULT.splice(i >= 0 ? i + 1 : 0, 0, 'session'); }
+if (typeof ExamMode !== 'undefined') ExamMode.KEEP.add('session');
+TODAY_EXTRA.session = () => { const s = Sess.get(); if (!s) return ''; const N = Sess.need(s.exams), mv = Sess.movable(s).length, due = typeof Srs !== 'undefined' ? Srs.all().filter(z => Srs.isDue(z.c)).length : 0;
+  return `<section class="card span-12 ss-card"><div class="card-h"><h3>🎓 Sessione d'esame</h3><span class="muted" style="font-size:13px">${s.exams.length} ${s.exams.length === 1 ? 'esame' : 'esami'} · fino al ${fmtLong(s.to).toLowerCase()}</span></div>
+    <div class="ss-line">${s.exams.map(x => { const n = dayDiff(todayK(), x.date), r = Math.round(Sess.ready(x) * 100); return `<button class="ss-ex" data-go="exams"><span class="ss-n"><b>${n === 0 ? 'Oggi' : n}</b><small>${n === 0 ? '' : n === 1 ? 'giorno' : 'giorni'}</small></span><span class="grow" style="min-width:0"><b>${esc(x.name)}</b><small class="muted">${fmtLong(x.date)}${x.cfu ? ' · ' + x.cfu + ' CFU' : ''}</small><i class="ss-r"><b style="width:${r}%;background:${r >= 75 ? 'var(--green)' : r >= 40 ? 'var(--orange)' : 'var(--red)'}"></b></i><small>${r}% pronto</small></span></button>`; }).join('')}</div>
+    ${N ? `<div class="ss-need ${N.ok ? '' : 'hard'}">${N.need <= 18 ? `🎯 Con qualsiasi voto resti sopra la media obiettivo di <b>${String(N.tg).replace('.', ',')}</b>` : N.ok ? `🎯 Per arrivare a <b>${String(N.tg).replace('.', ',')}</b> di media ti serve circa <b>${N.need.toFixed(1).replace('.', ',')}</b> in ${s.exams.length === 1 ? 'questo esame' : 'questi esami'}${N.now ? ` (ora hai ${N.now.toFixed(2).replace('.', ',')})` : ''}` : `🎯 Con questi esami la media di <b>${String(N.tg).replace('.', ',')}</b> non è raggiungibile: punta al massimo che puoi, ogni voto alto alza la media`}</div>` : ''}
+    <div class="ss-acts"><button class="btn primary sm" data-act="startFocus">${ico('timer', 'sm')}Studia ora</button>${due ? `<button class="btn sm" data-act="exmCards">${ico('cards', 'sm')}${due} ripassi da fare</button>` : ''}${mv ? `<button class="btn sm" data-act="sessPostpone">${ico('clock', 'sm')}Rimanda ${mv} cose non urgenti a dopo</button>` : ''}<button class="btn sm plain" data-act="sessOff">Nascondi</button></div></section>`; };
+ACT.sessPostpone = () => { const s = Sess.get(); if (s) Sess.postpone(s); };
+ACT.sessOff = () => { S.profile.sess = { ...Sess.P(), on: false }; save('profile'); App.refresh(); Island.toast({ icon: 'grad', t: 'Scheda sessione nascosta', s: 'La riattivi in Esami e media', action: { label: 'Annulla', fn: () => { S.profile.sess = { ...Sess.P(), on: true }; save('profile'); App.refresh(); } }, ms: 4000 }); };
+/* exams page: switch it back on */
+{ const V = VIEWS.exams; if (V) { const oA = V.actions; V.actions = () => (Sess.P().on ? '' : `<button class="btn sm" data-act="sessOn">🎓<span class="hide-narrow">Sessione</span></button>`) + (oA ? oA() : ''); } }
+ACT.sessOn = () => { S.profile.sess = { ...Sess.P(), on: true }; save('profile'); App.refresh(); };
+/* during the session, short idle moments become flashcard reviews: a gentle nudge mid-afternoon */
+{ const old = Alerts.list.bind(Alerts); Alerts.list = function (hours = 48) { const out = old(hours), s = Sess.get(); if (!s) return out; const now = Date.now(); for (let i = 0; i <= Math.ceil(hours / 24); i++) { const k = addDK(todayK(), i); if (k > s.to) break; const key = 'ss:' + k, at = this.at(k, '16:30'); const due = typeof Srs !== 'undefined' ? Srs.all().filter(z => Srs.isDue(z.c, k)).length : 0; if (due >= 5 && !this.fired[key] && at >= now - 10 * 60e3 && at <= now + hours * 36e5) out.push({ key, at, title: `🧠 ${due} ripassi veloci`, body: 'Cinque minuti di flashcard: in sessione fanno la differenza', view: 'today' }); } return out; }; }
+
+/* =========================================================
+   VOCE OVUNQUE — il riconoscimento vocale dove il browser non
+   ce l'ha:
+   — nell'app Android parla il riconoscitore di Android (la
+     WebView non ne ha uno suo);
+   — nel programma per computer (e nei browser senza) Orbita
+     registra, capisce da solo quando hai finito di parlare e fa
+     trascrivere l'audio all'IA collegata (Google Gemini).
+   Si presenta come l'API standard SpeechRecognition, così
+   dettatura, “Parla con Orbita”, registratore e pronuncia delle
+   lingue funzionano ovunque senza cambiare nulla.
+   ========================================================= */
+const NativeSR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+const SpeechX = {
+  android() { const A = window.OrbitaAndroid; return !!(A && typeof A.listen === 'function'); },
+  aiProv() { if (typeof AIX === 'undefined' || !AIX.T) return ''; return AIX.keyed.gemini ? 'gemini' : AIX.keyed.openrouter ? 'openrouter' : ''; },
+  canRecord() { return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder && (window.AudioContext || window.webkitAudioContext)); },
+  /** how this device understands speech: 'native' | 'android' | 'ai' | '' */
+  mode() { if (IN_CLAUDE) return ''; if (this.android()) { try { return window.OrbitaAndroid.canListen() ? 'android' : (this.aiProv() && this.canRecord() ? 'ai' : ''); } catch (_) { return 'android'; } }
+    if (NativeSR && !DESK) return 'native'; return this.aiProv() && this.canRecord() ? 'ai' : ''; },
+  ok() { return !!this.mode(); },
+  SR() { const m = this.mode(); return m === 'native' ? NativeSR : m === 'android' ? AndroidRec : m === 'ai' ? AIRec : null; },
+  /* ---- audio → 16 kHz mono WAV (what every AI service accepts) ---- */
+  async wav(blob) { const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext, C = new (window.AudioContext || window.webkitAudioContext)();
+    let buf; try { buf = await C.decodeAudioData(await blob.arrayBuffer()); } finally { try { C.close(); } catch (_) {} }
+    const rate = 16000, len = Math.max(1, Math.ceil(buf.duration * rate)), off = new AC(1, len, rate), src = off.createBufferSource(); src.buffer = buf; src.connect(off.destination); src.start(); const r = await off.startRendering(), d = r.getChannelData(0);
+    /* normalise quiet recordings so the AI hears them clearly */
+    let pk = 0; for (let i = 0; i < d.length; i++) pk = Math.max(pk, Math.abs(d[i])); const g = pk > 0 && pk < .5 ? Math.min(6, .7 / pk) : 1;
+    const out = new DataView(new ArrayBuffer(44 + d.length * 2)), w = (o, s) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)); };
+    w(0, 'RIFF'); out.setUint32(4, 36 + d.length * 2, true); w(8, 'WAVE'); w(12, 'fmt '); out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true); out.setUint32(24, rate, true); out.setUint32(28, rate * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true); w(36, 'data'); out.setUint32(40, d.length * 2, true);
+    for (let i = 0; i < d.length; i++) { const v = Math.max(-1, Math.min(1, d[i] * g)); out.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true); }
+    const u8 = new Uint8Array(out.buffer); let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return { b64: btoa(s), sec: buf.duration }; },
+  LN: { it: 'italiano', en: 'inglese', es: 'spagnolo', fr: 'francese', de: 'tedesco', pt: 'portoghese', ja: 'giapponese', zh: 'cinese', ko: 'coreano', ru: 'russo', ar: 'arabo', nl: 'olandese', pl: 'polacco', sv: 'svedese', tr: 'turco', el: 'greco', hi: 'hindi' },
+  /** the AI writes down what was said; → text ('' = nothing heard) */
+  async transcribe(blob, lang) { const p = this.aiProv(); if (!p) throw { error: 'service-not-allowed' };
+    const { b64, sec } = await this.wav(blob); if (sec < .35) return '';
+    const code = String(lang || 'it-IT'), ln = this.LN[code.slice(0, 2).toLowerCase()] || code;
+    const ask = `Trascrivi parola per parola quello che viene detto in questo audio. La lingua attesa è ${ln} (${code}). Scrivi solo la trascrizione con la punteggiatura normale, senza commenti, traduzioni o virgolette. Se non si sente parlare nessuno, rispondi esattamente: [silenzio]`;
+    const body = m => ({ model: m, temperature: 0, max_tokens: 600, messages: [{ role: 'user', content: [{ type: 'text', text: ask }, { type: 'input_audio', input_audio: { data: b64, format: 'wav' } }] }] });
+    const tried = new Set(); let model = p === 'gemini' ? (this._gm || await AIX.alt('gemini', tried, false) || 'gemini-2.5-flash') : 'google/gemini-2.5-flash';
+    for (let n = 0; n < 3; n++) { tried.add(model); const r = await AIX.T.ai.chat('sx' + Date.now().toString(36) + n, p, body(model));
+      if (r && r.ok) { if (p === 'gemini') this._gm = model; const t = String((((r.json || {}).choices || [])[0] || {}).message ? r.json.choices[0].message.content || '' : '').trim().replace(/^["“«]+|["”»]+$/g, ''); return /^\[?silenzio\]?\.?$/i.test(t) ? '' : t; }
+      if (p === 'gemini' && r && (r.code === 'model_not_found' || AIX.busy(r))) { const alt = await AIX.alt('gemini', tried, false); if (alt) { model = alt; continue; } }
+      throw { error: r && r.code === 'network' ? 'network' : r && r.code === 'bad_key' ? 'not-allowed' : 'network', message: (r && r.message) || '' }; }
+    throw { error: 'network' }; },
+};
+/* a result list shaped like the browser's own */
+const srRes = (t, fin, alts) => { const r = (alts && alts.length ? alts : [{ t, c: .9 }]).map(a => ({ transcript: a.t, confidence: a.c })); r.isFinal = !!fin; r.item = i => r[i]; return r; };
+const srList = a => { const L = a.slice(); L.item = i => L[i]; return L; };
+class SRBase {
+  constructor() { this.lang = 'it-IT'; this.continuous = false; this.interimResults = false; this.maxAlternatives = 1; this.finals = []; this.live = false; }
+  fire(n, e) { const f = this['on' + n]; if (typeof f === 'function') { try { f.call(this, e || {}); } catch (err) { console.error(err); } } }
+  emit(interim, alts) { const L = this.finals.slice(); if (interim) L.push(srRes(interim, false, alts)); this.fire('result', { results: srList(L), resultIndex: Math.max(0, this.finals.length - (interim ? 0 : 1)) }); }
+}
+/* ---------- Android: the system recogniser through the app ---------- */
+const SR_LIVE = new Map();
+window.__androidSR = (id, type, d) => { const r = SR_LIVE.get(id); if (r) r._ev(type, d || {}); };
+class AndroidRec extends SRBase {
+  start() { if (this.live) throw new Error('già in ascolto'); this.live = true; this.stopped = false; this.finals = []; this.go(); }
+  go() { this.id = 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); SR_LIVE.set(this.id, this); try { window.OrbitaAndroid.listen(this.id, this.lang || 'it-IT', !!this.interimResults); } catch (_) { this._ev('error', { error: 'audio-capture' }); this._ev('end', {}); } }
+  stop() { this.stopped = true; try { window.OrbitaAndroid.stopListen(); } catch (_) {} }
+  abort() { this.stopped = true; this.aborted = true; try { window.OrbitaAndroid.abortListen(); } catch (_) {} }
+  _ev(type, d) {
+    if (type === 'start') { if (!this.began) { this.began = true; this.fire('start'); this.fire('audiostart'); } return; }
+    if (type === 'speechstart') return this.fire('speechstart');
+    if (type === 'speechend') return this.fire('speechend');
+    if (type === 'result') { if (this.aborted) return; const a = (d.alts || []).slice(0, Math.max(1, this.maxAlternatives || 1)), t = a[0] ? a[0].t : ''; if (!t) return;
+      if (d.final) { this.finals.push(srRes(t, true, a)); this.emit(); } else if (this.interimResults) this.emit(t, a); return; }
+    if (type === 'error') { if (this.continuous && !this.stopped && d.error === 'no-speech') return; /* keep listening through pauses */ this.lastErr = d.error; this.fire('error', { error: d.error, message: '' }); if (d.error !== 'no-speech') this.stopped = true; return; }
+    if (type === 'end') { SR_LIVE.delete(this.id); if (this.continuous && !this.stopped && !this.aborted) { setTimeout(() => this.go(), 120); return; } this.live = false; this.began = false; this.fire('audioend'); this.fire('end'); }
+  }
+}
+/* ---------- everywhere else: record, detect the pause, let the AI transcribe ---------- */
+class AIRec extends SRBase {
+  get ai() { return true; }
+  async start() { if (this.live) throw new Error('già in ascolto'); this.live = true; this.stopped = false; this.aborted = false; this.finals = []; this.queue = Promise.resolve(); this.pending = 0;
+    try { this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
+    catch (e) { this.live = false; this.fire('error', { error: /NotAllowed|Security/i.test(e && e.name) ? 'not-allowed' : 'audio-capture', message: String(e && e.message || '') }); this.fire('end'); return; }
+    if (this.stopped) { this.cleanup(); this.live = false; this.fire('end'); return; }
+    const AC = window.AudioContext || window.webkitAudioContext; this.ac = new AC(); const src = this.ac.createMediaStreamSource(this.stream); this.an = this.ac.createAnalyser(); this.an.fftSize = 1024; src.connect(this.an); this.buf = new Float32Array(this.an.fftSize);
+    this.fire('start'); this.fire('audiostart'); this.t0 = Date.now(); this.floor = null; this.seg(); this.tick = setInterval(() => this.vad(), 90); }
+  /* one recorded piece of speech */
+  seg() { const ch = []; this.spoke = false; this.lastLoud = 0; this.segAt = Date.now(); const mt = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'].find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+    this.mr = new MediaRecorder(this.stream, mt ? { mimeType: mt } : undefined); this.mr._ch = ch; this.mr.ondataavailable = e => { if (e.data && e.data.size) ch.push(e.data); }; this.mr.start(250); }
+  level() { this.an.getFloatTimeDomainData(this.buf); let s = 0; for (const v of this.buf) s += v * v; return Math.sqrt(s / this.buf.length); }
+  vad() { if (!this.mr || this.mr.state !== 'recording') return; const l = this.level(), now = Date.now();
+    if (this.floor == null) { if (now - this.t0 > 280) this.floor = Math.max(.004, l); return; } if (!this.spoke) this.floor = this.floor * .95 + l * .05;
+    const thr = Math.max(.018, this.floor * 3.2); if (l > thr) { if (!this.spoke) { this.spoke = true; this.fire('speechstart'); } this.lastLoud = now; }
+    const quiet = now - this.lastLoud, dur = now - this.segAt;
+    if (!this.spoke && !this.continuous && now - this.t0 > 7000) { this.noSpeech = true; this.stop(); return; }
+    if (this.spoke && (quiet > (this.continuous ? 1100 : 1400) || dur > (this.continuous ? 25000 : 15000))) { this.fire('speechend'); if (this.continuous && !this.stopped) this.cut(true); else this.stop(); }
+    if (this.continuous && !this.spoke && dur > 30000) this.cut(false); }
+  /** close the current piece; transcribe it if someone spoke (pieces are written in order) */
+  cut(next) { const mr = this.mr, spoke = this.spoke; if (!mr) return this.queue; this.mr = null;
+    const done = new Promise(res => { mr.onstop = () => res(); try { mr.stop(); } catch (_) { res(); } });
+    if (next && !this.stopped) this.seg();
+    this.queue = this.queue.then(() => done).then(async () => { if (!spoke || this.aborted) return;
+      const blob = new Blob(mr._ch, { type: mr.mimeType || 'audio/webm' }); let t = '';
+      try { t = await SpeechX.transcribe(blob, this.lang); } catch (e) { if (!this.aborted) { this.failed = true; this.fire('error', { error: e.error || 'network', message: e.message || '' }); } return; }
+      if (this.aborted) return; if (t) { this.finals.push(srRes(t, true)); this.emit(); } else this.noSpeech = true; });
+    return this.queue; }
+  async stop() { if (this.stopped) return; this.stopped = true; clearInterval(this.tick); const spoke = this.spoke || this.finals.length;
+    if (this.mr) this.fire('audioend'); await this.cut(false); this.cleanup();
+    if (!this.aborted && !this.failed && !this.finals.length && (this.noSpeech || !spoke)) this.fire('error', { error: 'no-speech', message: '' });
+    this.live = false; this.fire('end'); }
+  abort() { this.aborted = true; this.stop(); }
+  cleanup() { clearInterval(this.tick); try { this.stream && this.stream.getTracks().forEach(t => t.stop()); } catch (_) {} try { this.ac && this.ac.close(); } catch (_) {} this.stream = null; this.ac = null; }
+}
+/* everything that asks for window.SpeechRecognition now gets the right one */
+{ const def = (k, get) => { try { Object.defineProperty(window, k, { configurable: true, get, set() {} }); } catch (_) {} };
+  if (!IN_CLAUDE) { def('SpeechRecognition', () => SpeechX.SR()); def('webkitSpeechRecognition', () => SpeechX.SR()); } }
+/* the parts of Orbita that used to switch the microphone off on the computer and on Android */
+Voice.can = () => SpeechX.ok();
+Dictate.ok = () => SpeechX.ok();
+try { Object.defineProperty(Rec, 'SR', { configurable: true, get: () => SpeechX.SR() }); } catch (_) {}
+Rec.canTx = () => { const m = SpeechX.mode(); return m === 'native' || m === 'ai'; }; /* on Android the recorder already holds the microphone */
+LG.canListen = function (l) { return SpeechX.ok() && !!this.code(l) && S.profile.lgMic !== false && !(this._micOff > Date.now()); };
+
+/* =========================================================
+   CONDIVIDI CON ORBITA + CONTAPASSI (app Android)
+   — da Galleria, Chrome, WhatsApp, Gmail… “Condividi → Orbita”:
+     un testo diventa promemoria, evento, nota, spesa o lista
+     della spesa; una foto diventa scontrino, appunti, biglietto
+     organizzato in agenda, dispensa, documento o foto del giorno.
+     Con l'IA collegata Orbita ti dice anche cosa gli sembra.
+   — i passi contati dal telefono finiscono da soli in Salute e
+     Allenamento, con l'obiettivo del giorno.
+   ========================================================= */
+/** hand files to an action that normally opens the file picker */
+function feedFiles(files, run) {
+  const P = HTMLInputElement.prototype, oc = P.click; let used = false;
+  const restore = () => { if (P.click !== oc) P.click = oc; };
+  P.click = function () { if (used || this.type !== 'file') return oc.apply(this, arguments); used = true; restore();
+    try { const dt = new DataTransfer(); files.forEach(f => dt.items.add(f)); this.files = dt.files; } catch (_) { try { Object.defineProperty(this, 'files', { value: files, configurable: true }); } catch (__) {} }
+    this.dispatchEvent(new Event('change', { bubbles: true })); };
+  setTimeout(restore, 8000); try { run(); } catch (e) { restore(); throw e; } }
+const b64File = (f) => { const bin = atob(f.data || ''), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return new File([u], f.name || 'condiviso', { type: f.type || 'application/octet-stream' }); };
+const ShareIn = {
+  /** what a shared photo looks like, asked to the AI (quick, optional) */
+  async guess(file) { const sample = await Cap.get('sample').catch(() => null); if (!sample) return null;
+    try { const r = await sample.json(`Guarda l'immagine e rispondi solo con un JSON {"kind": uno tra "ticket" (biglietto di treno/aereo/bus, prenotazione, invito, convocazione o screenshot di un'email con data e ora), "receipt" (scontrino o fattura), "notes" (appunti, lavagna, slide, pagina di libro), "food" (frigo, dispensa, prodotti alimentari), "doc" (documento, modulo, tessera, contratto), "photo" (foto normale di persone, posti, momenti), "why": massimo 8 parole in italiano su cosa vedi}`, { images: [file], max_tokens: 120 });
+      return r && r.kind ? r : null; } catch (_) { return null; } },
+  sheet(d) {
+    const files = (d.files || []).map(b64File), text = [d.subject, d.text].filter(Boolean).join(d.subject && d.text && !d.text.includes(d.subject) ? '\n' : '').trim() || '', imgs = files.filter(f => /^image\//.test(f.type)), pdf = files.find(f => f.type === 'application/pdf'), url = (text.match(/https?:\/\/\S+/) || [])[0] || '';
+    if (!files.length && !text) return;
+    const urls = imgs.map(f => URL.createObjectURL(f)), Q = text && !files.length ? QuickX.preview(text) : null;
+    const A = [];
+    if (files.length) {
+      A.push(['ticket', '✨', 'Organizza in agenda', 'Biglietti, prenotazioni, inviti, email con date', () => smartScan({ files })]);
+      A.push(['receipt', '🧾', 'Scontrino o fattura', 'Diventa una spesa nelle Finanze (e garanzia)', () => feedFiles([files[0]], () => ACT.receiptScan())]);
+      if (imgs.length) A.push(['notes', '📝', 'Appunti in una nota', 'Trascrive lavagna, slide, quaderno', () => feedFiles(imgs.slice(0, 1), () => ACT.photoNote())]);
+      if (imgs.length && ACT.pantryPhoto) A.push(['food', '🥫', 'In dispensa', 'Riconosce i prodotti e le scadenze', () => feedFiles(imgs.slice(0, 3), () => ACT.pantryPhoto())]);
+      A.push(['doc', '📄', 'Salva in Documenti', files.length > 1 ? `${files.length} file` : files[0].name, async () => { const n = await Docs.upload(files).catch(() => 0); App.refresh(); Island.toast({ icon: 'folder', c: 'var(--green)', t: 'Salvato in Documenti', s: files.length > 1 ? `${files.length} file` : files[0].name, ms: 2200 }); void n; }]);
+      if (imgs.length && typeof DayPic !== 'undefined') A.push(['photo', '📸', 'Foto del giorno', 'Nel diario di oggi', async () => { await DayPic.set(todayK(), imgs[0], ''); App.refresh(); Island.toast({ icon: 'image', c: 'var(--green)', t: 'Foto del giorno salvata', ms: 2000 }); }]);
+    } else {
+      if (Q && !url && Q.kind !== 'none' && Q.kind !== 'invalid' && Q.kind !== 'note') A.push(['quick', Q.icon, `${Q.label}: ${Q.title}`.slice(0, 80), Q.chips.join(' · '), async () => { const r = await QuickX.commit(text); Island.toast({ icon: r.ok ? 'check' : 'x', c: r.ok ? 'var(--green)' : 'var(--orange)', t: r.msg, ms: 2400 }); }]);
+      A.push(['task', '☑️', 'Promemoria', text.split('\n')[0].slice(0, 70), () => editTask(null, { title: text.split('\n')[0].slice(0, 140), notes: text.includes('\n') || url ? text : '' })]);
+      A.push(['ticket', '✨', 'Organizza in agenda', 'Legge date, orari e luoghi (email, messaggi, prenotazioni)', () => smartScan({ text })]);
+      A.push(['note', '📝', 'Nota', url ? 'Con il link' : text.split('\n')[0].slice(0, 70), () => { const [first, ...rest] = text.split('\n'); const n = Notes.create({ title: (url && first.trim() === url ? 'Link da leggere' : first).slice(0, 90), html: (url && first.trim() === url ? [first, ...rest] : rest).map(l => /^https?:\/\//.test(l.trim()) ? `<p><a href="${esc(l.trim())}" target="_blank" rel="noopener">${esc(l.trim())}</a></p>` : `<p>${esc(l)}</p>`).join(''), text }); UI.noteEditing = false; Island.toast({ icon: 'note', c: 'var(--green)', t: 'Nota salvata', action: { label: 'Apri', fn: () => go('notes') }, ms: 2600 }); void n; }]);
+      if (!url) A.push(['shop', '🛒', 'Lista della spesa', 'Una cosa per riga o separate da virgole', async () => { const r = await QuickX.commit(text.replace(/\n+/g, ', '), 'shop'); Island.toast({ icon: 'list', c: 'var(--green)', t: r.msg, ms: 2200 }); }]);
+      A.push(['ask', '💬', 'Chiedi al Segretario', 'Riassume, risponde, ti propone cosa fare', () => { go('assistant'); setTimeout(() => Assistant.send(`Ho condiviso questo con te: cosa ne faccio? Riassumilo e proponimi le azioni utili in Orbita.\n\n${text.slice(0, 4000)}`), 300); }]);
+    }
+    const sh = openSheet({ title: 'Condiviso con Orbita', wide: true, left: { label: 'Annulla' }, onClose: () => urls.forEach(u => URL.revokeObjectURL(u)),
+      body: `<div class="ib-prev">${imgs.length ? `<div class="ib-imgs">${urls.slice(0, 4).map(u => `<img src="${u}" alt="">`).join('')}${imgs.length > 4 ? `<span>+${imgs.length - 4}</span>` : ''}</div>` : ''}${pdf ? `<div class="ib-file">📄 <b>${esc(pdf.name)}</b> <span class="muted">${Math.max(1, Math.round(pdf.size / 1024))} KB</span></div>` : ''}${text ? `<div class="ib-text">${esc(text.slice(0, 600))}${text.length > 600 ? '…' : ''}</div>` : ''}<div class="ib-ai" id="ibAi" hidden></div></div>
+        <div class="ib-acts">${A.map(([k, e, t, s], i) => `<button class="ib-a" data-iba="${i}" data-k="${k}"><span class="ib-e">${e}</span><span class="grow" style="min-width:0"><b>${esc(t)}</b><small class="muted">${esc(s || '')}</small></span><i class="ib-rec">Consigliato</i>${ico('right', 'sm')}</button>`).join('')}</div>`,
+      onMount: el => { $$('[data-iba]', el).forEach(b => b.onclick = () => { const a = A[+b.dataset.iba]; sh.close(); setTimeout(() => { try { const r = a[4](); if (r && r.catch) r.catch(e => aiError(e)); } catch (e) { aiError(e); } }, 160); });
+        const mark = k => { const b = $(`.ib-a[data-k="${k}"]`, el); if (!b) return; b.classList.add('rec'); b.parentNode.prepend(b); };
+        if (Q && A[0] && A[0][0] === 'quick') mark('quick'); else if (url && !files.length) mark('note');
+        if (imgs.length) { const box = $('#ibAi', el); box.hidden = false; box.innerHTML = '<span class="ib-dot"></span> Guardo cosa hai condiviso…';
+          ShareIn.guess(imgs[0]).then(r => { if (sh.closed) return; if (!r) { box.hidden = true; return; } const K = { ticket: 'ticket', receipt: 'receipt', notes: 'notes', food: 'food', doc: 'doc', photo: 'photo' }[r.kind]; box.innerHTML = `✨ ${esc(cap(r.why || ''))}`; if (K) mark(K); }); }
+        else if (pdf) mark(/fattur|scontrin|ricevut|receipt|invoice/i.test(pdf.name) ? 'receipt' : /bigliett|ticket|prenotaz|booking|boarding|itinerar/i.test(pdf.name) ? 'ticket' : 'doc'); } });
+    Game.add(2, 'Condiviso con Orbita', { silent: true }); return sh; },
+};
+if (AND) {
+  window.__androidShare = () => { let s = ''; try { s = AND.takeShare ? AND.takeShare() : ''; } catch (_) {} if (!s) return; let d = null; try { d = JSON.parse(s); } catch (_) {} if (!d) return;
+    const go2 = () => { if (document.querySelector('.lk-wrap')) return setTimeout(go2, 800); ShareIn.sheet(d); }; go2(); };
+  setTimeout(() => window.__androidShare(), 1400);
+
+  /* ---------- contapassi ---------- */
+  const Ped = {
+    get() { try { return JSON.parse(AND.steps()); } catch (_) { return null; } },
+    on() { const r = this.get(); return !!(r && r.on && r.perm); },
+    /** phone readings → Salute (the higher number wins: Apple Health or a manual entry are never lowered) */
+    merge(r) { r = r || this.get(); if (!r || !r.on) return 0; let ch = 0; const P = Health.P();
+      for (const [k, v] of Object.entries(r.days || {})) { if (!(+v > 0)) continue; const d = Health.dayW(k); if ((+d.steps || 0) < v) { d.steps = Math.round(v); d.stepsSrc = 'phone'; ch++; }
+        if (k === todayK() && d.steps >= (P.stepsGoal || 8000) && !d.stepsXp) { d.stepsXp = 1; Game.add(15, 'Obiettivo passi', { icon: 'flame' }); Island.toast({ icon: 'flame', c: 'var(--orange)', t: `${d.steps.toLocaleString('it-IT')} passi`, s: 'Obiettivo di oggi raggiunto 🎉', ms: 3000 }); } }
+      if (ch) { save('health'); if (['health', 'today', 'train'].includes(UI.view) && !Sheets.length) App.refresh(); } return ch; },
+    sheet() { const r = this.get() || {}, P = Health.P(), d = Health.day(todayK());
+      const days = []; for (let i = 6; i >= 0; i--) { const k = addDK(todayK(), -i); days.push({ k, v: +(Health.day(k).steps) || 0 }); } const mx = Math.max(P.stepsGoal || 8000, ...days.map(x => x.v));
+      return openSheet({ title: '👟 Passi', left: { label: 'Chiudi' },
+        body: `<div class="pd-hero">${hRing((d.steps || 0) / (P.stepsGoal || 8000), 150, 14, 'var(--orange)', `<b class="tnum" style="font-size:28px">${(d.steps || 0).toLocaleString('it-IT')}</b><small>di ${(P.stepsGoal || 8000).toLocaleString('it-IT')}</small>`)}<div class="muted" style="font-size:14px">≈ ${((d.steps || 0) * .00075).toFixed(1).replace('.', ',')} km · ${Health.stepKcal(d.steps, todayK())} kcal</div></div>
+          <div class="pd-week">${days.map(x => `<div class="pd-d ${x.v >= (P.stepsGoal || 8000) ? 'ok' : ''}"><i style="height:${Math.max(3, x.v / mx * 100)}%"></i><small>${DOW_S[(parseD(x.k).getDay() + 6) % 7]}</small></div>`).join('')}</div>
+          ${!r.has ? `<p class="muted" style="margin:0">Questo telefono non ha il contapassi: inserisci i passi a mano.</p>` : r.on && r.perm ? `<div class="row" style="padding:0"><span class="tile-ico" style="background:var(--green)">${ico('check')}</span><span class="grow"><div class="t">Contati dal telefono</div><div class="s">Si aggiornano da soli, anche ad app chiusa</div></span><button class="btn sm plain" id="pdOff">Disattiva</button></div>` : `<button class="btn primary" id="pdOn" style="height:46px">👟 Conta i passi col telefono</button><p class="muted" style="margin:0;font-size:13px">Usa il contapassi del telefono (consuma pochissimo). Android ti chiede il permesso «Attività fisica».</p>`}
+          <button class="btn" id="pdMan">${ico('pencil', 'sm')}Inserisci a mano</button>`,
+        onMount: (el, api) => { const on = $('#pdOn', el), off = $('#pdOff', el); if (on) on.onclick = () => { api.close(); AND.stepsOn(true); }; if (off) off.onclick = () => { AND.stepsOn(false); api.close(); Island.toast({ icon: 'flame', t: 'Contapassi disattivato', ms: 1800 }); };
+          $('#pdMan', el).onclick = () => { api.close(); oSteps(); }; } }); },
+  };
+  window.__androidSteps = flag => { if (flag === -1) { Island.toast({ icon: 'flame', c: 'var(--orange)', t: 'Permesso non concesso', s: 'Impostazioni di Android › App › Orbita › Autorizzazioni › Attività fisica', ms: 4200 }); return; }
+    const n = Ped.merge(); if (flag === 1) Island.toast({ icon: 'flame', c: 'var(--green)', t: 'Contapassi attivo', s: 'Conto da adesso: i passi di oggi crescono man mano', ms: 3200 }); return n; };
+  const oSteps = ACT.hSteps; ACT.hSteps = () => Ped.sheet();
+  setTimeout(() => { if (Ped.on()) { AND.stepsRead(); setInterval(() => { if (!document.hidden && Ped.on()) AND.stepsRead(); }, 5 * 60e3); } }, 2500);
+  window.Ped = Ped;
+}
+/* steps in Allenamento › Progressi (from the phone, Apple Health or typed in) */
+{ const V = VIEWS.train; if (V) { const oR = V.render; V.render = function (...a) { const h = oR.apply(this, a); if ((UI.trTab || 'piano') !== 'progressi') return h;
+    const P = Health.P(), g = P.stepsGoal || 8000, days = []; for (let i = 13; i >= 0; i--) { const k = addDK(todayK(), -i); days.push({ k, v: +(Health.day(k).steps) || 0 }); }
+    const any = days.some(x => x.v), canPhone = AND && window.Ped && !window.Ped.on(); if (!any && !canPhone) return h;
+    const mx = Math.max(g, ...days.map(x => x.v)), wk = days.slice(7).reduce((s, x) => s + x.v, 0), hit = days.slice(7).filter(x => x.v >= g).length;
+    return h + `<section class="card pd-card"><div class="card-h"><h3>👟 Passi</h3><button class="more" data-act="hSteps">${any ? 'Dettagli' : 'Attiva'}${ico('right', 'sm')}</button></div>${any ? `<div class="pd-sum"><div><b class="tnum">${wk.toLocaleString('it-IT')}</b><small>ultimi 7 giorni</small></div><div><b class="tnum">${Math.round(wk / 7).toLocaleString('it-IT')}</b><small>media al giorno</small></div><div><b class="tnum">${hit}/7</b><small>giorni a obiettivo</small></div></div><div class="pd-week wide">${days.map(x => `<div class="pd-d ${x.v >= g ? 'ok' : ''} ${x.k === todayK() ? 'td' : ''}" title="${relDay(x.k, true)}: ${x.v.toLocaleString('it-IT')}"><i style="height:${Math.max(3, x.v / mx * 100)}%"></i><small>${parseD(x.k).getDate()}</small></div>`).join('')}<span class="pd-goal" style="bottom:${g / mx * 100}%"></span></div>` : `<p class="muted" style="margin:0">Il telefono può contare i passi da solo, tutto il giorno: tocca Attiva.</p>`}</section>`; }; } }
+
+/* =========================================================
+   LEGHE DELLE LINGUE — ogni settimana una classifica da 10:
+   tu, i tuoi amici (con una sfida “XP delle lingue”) e, per
+   riempire i posti, compagni di studio virtuali dichiarati come
+   tali, col ritmo tarato sul tuo. I primi 3 salgono di lega, gli
+   ultimi 3 scendono: Bronzo → Argento → … → Diamante. Lunedì
+   arriva il verdetto, con gemme per il podio.
+   ========================================================= */
+const LTIER = [['Bronzo', '🥉', '#CD7F32'], ['Argento', '🥈', '#9AA5B1'], ['Oro', '🥇', '#FFC800'], ['Zaffiro', '🔷', '#1CB0F6'], ['Rubino', '♦️', '#FF4B4B'], ['Smeraldo', '💚', '#2FB344'], ['Ametista', '🔮', '#A560E8'], ['Perla', '🫧', '#C9B8A6'], ['Ossidiana', '🖤', '#3A3A3C'], ['Diamante', '💎', '#38C6F4']];
+const LRIV = [['Giulia', '🦊'], ['Marco', '🐻'], ['Sofia', '🐼'], ['Luca', '🦁'], ['Chiara', '🐨'], ['Matteo', '🐯'], ['Aurora', '🦄'], ['Pietro', '🐸'], ['Elena', '🦋'], ['Davide', '🐺'], ['Martina', '🐧'], ['Andrea', '🦉'], ['Lucía', '🐙'], ['Hans', '🦅'], ['Chloé', '🐰'], ['Tom', '🐶'], ['Yuki', '🐱'], ['Sam', '🐢'], ['Nora', '🦩'], ['Leo', '🐳']];
+/** one weekly league (languages: XP; walking: steps) */
+const mkLeague = C => ({ C,
+  P() { const p = S.profile[C.store] ||= { tier: 0, wk: '', hist: [] }; p.hist ||= []; return p; },
+  wk(k = todayK()) { return dkey(startOfWeek(parseD(k))); },
+  myXP(a, b) { return C.val(a, b); },
+  fmt(v) { return `${Math.round(v).toLocaleString('it-IT')} ${C.unit}`; },
+  /** your usual daily amount in the last 4 weeks (to make the rivals a fair match) */
+  pace(before) { const a = addDK(before, -28), b = addDK(before, -1), t = C.val(a, b); let act = 0; for (let k = a; k <= b; k = addDK(k, 1)) if (C.val(k, k) > 0) act++; return act ? t / act : 0; },
+  rnd(seed) { let h = 2166136261; for (const c of String(seed)) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return () => { h += 0x6D2B79F5; let t = h; t = Math.imul(t ^ t >>> 15, t | 1); t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; }; },
+  /** friends in a challenge on the same measure, with their totals in [a,b] */
+  friends(a, b) { const out = new Map(); if (typeof Chal === 'undefined' || !Share.ready || !Share.ready()) return []; const me = Share.email();
+    for (const sp of Chal.list()) { const v = sp.v || {}, c = v.ch || {}; if (c.metric !== C.metric) continue; for (const [e, r] of Object.entries(v.scores || {})) { if (e === me) continue; const t = Object.entries(r || {}).filter(([k]) => /^\d{4}-/.test(k) && k >= a && k <= b).reduce((s, [, x]) => s + (+x || 0), 0); const n = (v.names || {})[e] || e.split('@')[0]; if (!out.has(e) || out.get(e).xp < t) out.set(e, { id: e, n, xp: t, kind: 'friend', av: '🙂' }); } }
+    return [...out.values()].slice(0, 9); },
+  /** virtual companions: deterministic for the week, moving through the day */
+  rivals(wk, tier, n, full) { if (n <= 0) return []; const r = this.rnd(C.metric + wk + '|' + tier), base0 = C.base[tier], my = this.pace(wk), base = my ? base0 * .5 + Math.min(C.cap, Math.max(C.minPace, my)) * .5 : base0;
+    const names = [...LRIV].sort(() => r() - .5).slice(0, n), now = new Date(), frac = full ? 1 : Math.min(1, (now.getHours() * 60 + now.getMinutes()) / (21 * 60));
+    const elapsed = full ? 7 : Math.min(7, dayDiff(wk, todayK()) + 1);
+    return names.map(([nm, av], i) => { const pace = base * (C.spread[0] + Math.pow(r(), 1.3) * C.spread[1]), act = C.act[0] + r() * C.act[1]; let xp = 0;
+      for (let d = 0; d < 7; d++) { const rr = this.rnd(C.metric + wk + nm + d), on = rr() < act, day = on ? Math.round(pace * (.55 + rr() * .9) / C.round) * C.round : 0; if (d < elapsed - 1) xp += day; else if (d === elapsed - 1) xp += Math.round(day * frac / C.round) * C.round; }
+      return { id: 'v' + i, n: nm, av, xp, kind: 'bot' }; }); },
+  board(wk = this.wk(), full) { const b = addDK(wk, 6), tier = this.P().tier;
+    const fr = this.friends(wk, b), bots = this.rivals(wk, tier, Math.max(0, 9 - fr.length), full), me = { id: 'me', n: 'Tu', av: S.profile.emoji || '😎', xp: this.myXP(wk, b), kind: 'me' };
+    const L = [me, ...fr, ...bots].sort((x, y) => y.xp - x.xp || (x.kind === 'me' ? -1 : y.kind === 'me' ? 1 : 0)); const z = L.length >= 7 ? 3 : 1;
+    return { L, up: tier < LTIER.length - 1 ? z : 0, down: tier > 0 ? z : 0, tier, pos: L.findIndex(x => x.kind === 'me') }; },
+  left() { const end = addDK(this.wk(), 6); return dayDiff(todayK(), end); },
+  /** a new week: the verdict for the one that ended */
+  roll() { const P = this.P(), cur = this.wk(); if (!C.on()) return null; if (!P.wk) { P.wk = cur; save('profile'); return null; } if (P.wk >= cur) return null;
+    const old = P.wk, B = this.board(old, true), mine = B.L[B.pos]; P.wk = cur; let res = null;
+    if (mine.xp > 0) { const from = P.tier, pos = B.pos, n = B.L.length, move = pos < B.up ? 1 : B.down && pos >= n - B.down ? -1 : 0; P.tier = Math.max(0, Math.min(LTIER.length - 1, from + move)); const gems = [30, 20, 10][pos] || 0;
+      if (gems) C.reward(gems); res = { wk: old, from, to: P.tier, pos: pos + 1, n, xp: mine.xp, move, gems }; P.hist.unshift(res); P.hist = P.hist.slice(0, 26); }
+    save('profile'); return res; },
+  card(cls) { const B = this.board(), T = LTIER[B.tier], me = B.L[B.pos], left = this.left(), f = v => C.short(v);
+    return `<section class="card lgl-card ${cls || ''}" data-lgk="${C.metric}" style="--tc:${T[2]}"><div class="card-h"><h3>${T[1]} ${esc(C.name)}</h3><small class="muted">Lega ${T[0]} · ${left === 0 ? 'ultimo giorno' : left + ' g'}</small></div>${me.xp ? `<div class="lgl-mini">${B.L.slice(0, 3).map((x, i) => `<div class="${x.kind === 'me' ? 'me' : ''}"><span>${['🥇', '🥈', '🥉'][i]}</span><span class="grow">${x.av} ${esc(x.n)}</span><b class="tnum">${f(x.xp)}</b></div>`).join('')}${B.pos > 2 ? `<div class="me"><span>${B.pos + 1}</span><span class="grow">${me.av} Tu</span><b class="tnum">${f(me.xp)}</b></div>` : ''}</div>` : `<p class="muted" style="margin:0;font-size:14px">${C.tip0}</p>`}<button class="btn sm" style="width:100%;margin-top:8px">Classifica</button></section>`; },
+});
+const League = mkLeague({ metric: 'xp', store: 'lgL', name: 'Lega delle lingue', unit: 'XP', round: 5, base: [12, 18, 25, 32, 40, 50, 60, 72, 85, 100], cap: 300, minPace: 6, spread: [.35, 1.75], act: [.5, .45],
+  val(a, b) { let t = 0; for (const l of S.langs || []) for (const [k, v] of Object.entries(l.xpDays || {})) if (k >= a && k <= b) t += +v || 0; return t; },
+  on: () => !!(S.langs || []).length, short: v => String(v), reward(g) { const l = LG.cur(); if (l) { LG.st(l).gems += g; save('langs'); } }, prize: g => `+${g} 💎`,
+  tip0: 'Fai una lezione per entrare nella classifica della settimana.', how: 'Gli XP si guadagnano con le lezioni, il ripasso e i test.', more: 'Bastano poche lezioni in più per risalire subito.', emoji: '🦉' });
+const StepLeague = mkLeague({ metric: 'steps', store: 'stL', name: 'Lega dei passi', unit: 'passi', round: 50, base: [4000, 5000, 6000, 7000, 8000, 9000, 10000, 11500, 13000, 15000], cap: 30000, minPace: 1500, spread: [.6, .9], act: [.82, .17],
+  val(a, b) { let t = 0; for (const [k, d] of Object.entries((S.health || {}).days || {})) if (k >= a && k <= b) t += +(d || {}).steps || 0; return t; },
+  on() { for (let i = 0; i < 14; i++) if (+((((S.health || {}).days || {})[addDK(todayK(), -i)]) || {}).steps > 0) return true; return !!(window.Ped && window.Ped.on()); },
+  short: v => v >= 10000 ? `${(v / 1000).toFixed(v >= 100000 ? 0 : 1).replace('.', ',')}k` : Math.round(v).toLocaleString('it-IT'), reward(g) { Game.add(g, 'Podio della lega dei passi', { icon: 'flame' }); }, prize: g => `+${g} XP`,
+  tip0: 'I passi di oggi contano già: muoviti un po\' e sei in classifica.', how: 'I passi arrivano dal telefono, da Apple Salute o inseriti a mano.', more: 'Qualche passeggiata in più e risali subito.', emoji: '👟' });
+const LGS = { xp: League, steps: StepLeague };
+function leagueSheet(Lg = League) { const C = Lg.C, B = Lg.board(), T = LTIER[B.tier], left = Lg.left(), n = B.L.length, hasFr = B.L.some(x => x.kind === 'friend');
+  const rows = B.L.map((x, i) => { const zone = i < B.up ? 'up' : B.down && i >= n - B.down ? 'down' : '';
+    return `${B.down && i === n - B.down ? '<div class="lgl-sep down">▼ Zona retrocessione</div>' : ''}<div class="lgl-row ${zone} ${x.kind}"><span class="lgl-pos">${['🥇', '🥈', '🥉'][i] || i + 1}</span><span class="lgl-av">${x.av}</span><span class="grow" style="min-width:0"><b>${esc(x.n)}</b>${x.kind === 'friend' ? '<small class="lgl-tag fr">amico</small>' : x.kind === 'bot' ? '<small class="lgl-tag">virtuale</small>' : ''}</span><b class="tnum">${Lg.fmt(x.xp)}</b></div>${B.up && i === B.up - 1 ? '<div class="lgl-sep up">▲ Zona promozione</div>' : ''}`; }).join('');
+  const me = B.L[B.pos], next = B.pos >= B.up && B.up ? B.L[B.up - 1] : null;
+  const sh = openSheet({ title: `${T[1]} ${C.name}`, wide: true, left: { label: 'Chiudi' },
+    body: `<div class="lgl-head" style="--tc:${T[2]}"><div class="lgl-badge">${T[1]}</div><div class="grow"><b>Lega ${T[0]}</b><small>${left === 0 ? 'Termina stasera a mezzanotte' : `Termina tra ${left} ${left === 1 ? 'giorno' : 'giorni'}`} · ${B.up ? 'i primi 3 salgono' : 'sei nella lega più alta'}${B.down ? ', gli ultimi 3 scendono' : ''}</small></div></div>
+      <div class="lgl-tiers">${LTIER.map((t, i) => `<span class="${i === B.tier ? 'on' : i < B.tier ? 'past' : ''}" title="${t[0]}" style="--tc:${t[2]}">${i <= B.tier ? t[1] : '🔒'}</span>`).join('')}</div>
+      ${me.xp === 0 ? `<p class="lgl-tip">${C.tip0}</p>` : next ? `<p class="lgl-tip">Ti mancano <b>${Lg.fmt(next.xp - me.xp + C.round)}</b> per entrare nella zona promozione 💪</p>` : B.pos === 0 ? '<p class="lgl-tip">Sei primo! 🔥 Tieni il ritmo fino a domenica.</p>' : ''}
+      <div class="lgl-board">${rows}</div>
+      <p class="muted" style="margin:0;font-size:13px">${hasFr ? 'I tuoi amici sono quelli con l\'etichetta «amico». ' : ''}I compagni «virtuali» non sono persone vere: tengono un ritmo simile al tuo per rendere la gara interessante. ${C.how}</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="lglInv">👋 ${hasFr ? 'Invita altri amici' : 'Sfida i tuoi amici'}</button>${Lg.P().hist.length ? '<button class="btn" id="lglH">🏅 Settimane passate</button>' : ''}</div>`,
+    onMount: (el, api) => { $('#lglInv', el).onclick = () => { api.close(); const sp = typeof Chal !== 'undefined' && Share.ready && Share.ready() ? Chal.list().find(x => ((x.v || {}).ch || {}).metric === C.metric && Share.isOwner(x)) : null; if (sp) inviteSheet(sp); else chalNew({ metric: C.metric, period: 'week', name: `${C.emoji} ${C.name}` }); };
+      const h = $('#lglH', el); if (h) h.onclick = () => openSheet({ title: '🏅 Settimane passate', left: { label: 'Chiudi' }, body: `<div class="list">${Lg.P().hist.map(r => `<div class="row"><span style="font-size:22px">${r.move > 0 ? '⬆️' : r.move < 0 ? '⬇️' : '➖'}</span><span class="grow"><div class="t">${r.pos}° su ${r.n} · ${Lg.fmt(r.xp)}</div><div class="s">Settimana del ${dIt(r.wk)} · ${LTIER[r.from][1]} ${LTIER[r.from][0]}${r.move ? ' → ' + LTIER[r.to][1] + ' ' + LTIER[r.to][0] : ''}${r.gems ? ' · ' + C.prize(r.gems) : ''}</div></span></div>`).join('')}</div>` }); } });
+  return sh; }
+function leagueResult(r, Lg = League) { const C = Lg.C, T = LTIER[r.to], up = r.move > 0, down = r.move < 0;
+  const sh = openSheet({ title: C.name, wide: false, left: { label: 'Chiudi' },
+    body: `<div class="lgl-res ${up ? 'up' : down ? 'down' : ''}" style="--tc:${T[2]}"><div class="lgl-rb">${T[1]}</div><h2>${up ? `Promosso in Lega ${T[0]}!` : down ? `Sei sceso in Lega ${T[0]}` : `Resti in Lega ${T[0]}`}</h2><p>${r.pos}° posto su ${r.n} con <b>${Lg.fmt(r.xp)}</b>${r.gems ? ` · <b>${C.prize(r.gems)}</b>` : ''}</p><p class="muted">${up ? 'Settimana fortissima. La nuova lega è più combattuta: si riparte da zero.' : down ? 'Capita. ' + C.more : 'Una nuova settimana è appena iniziata: punta al podio.'}</p><button class="btn primary" id="lgrGo" style="min-width:180px;height:46px">Vai alla classifica</button></div>` });
+  if (up) setTimeout(() => confetti(120), 250); $('#lgrGo', sh.el).onclick = () => { sh.close(); leagueSheet(Lg); }; return sh; }
+document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('[data-lgk]'); if (b) leagueSheet(LGS[b.dataset.lgk] || League); });
+/* in Lingue: the league card on the side, the verdict when a week has ended */
+{ const V = VIEWS.lang, oR = V.render, oM = V.mount;
+  V.render = function (...a) { const h = oR.apply(this, a); if (!(S.langs || []).length) return h;
+    const card = League.card();
+    const i = h.lastIndexOf('</aside>'); return i >= 0 ? h.slice(0, i) + card + h.slice(i) : h; };
+  V.mount = function (root) { oM && oM.call(this, root);
+    const r = League.roll(); if (r) setTimeout(() => leagueResult(r), 500); }; }
+/* friends see your XP soon after a lesson */
+{ const oA = LG.addXP.bind(LG); LG.addXP = function (...a) { const r = oA(...a); if (typeof Chal !== 'undefined') { clearTimeout(LG._pushT); LG._pushT = setTimeout(() => Chal.push().catch(() => {}), 4000); } return r; }; }
+ACT.league = () => { go('lang'); setTimeout(() => leagueSheet(), 250); };
+CMD_ACT.push(['Lega delle lingue', 'trophy', () => ACT.league()], ['Lega dei passi', 'trophy', () => ACT.stepLeague()]);
+ACT.stepLeague = () => leagueSheet(StepLeague);
+/* the steps league: in Salute and in Allenamento › Progressi, with its Monday verdict */
+for (const v of ['health', 'train']) { const V = VIEWS[v]; if (!V) continue; const oR = V.render, oM = V.mount;
+  V.render = function (...a) { const h = oR.apply(this, a); if (!StepLeague.C.on() || (v === 'train' && (UI.trTab || 'piano') !== 'progressi')) return h; return h + StepLeague.card('stl-card'); };
+  V.mount = function (root) { oM && oM.call(this, root); const r = StepLeague.roll(); if (r) setTimeout(() => leagueResult(r, StepLeague), 500); }; }
+
+/* =========================================================
+   IL TUO MESE · IL TUO ANNO — un riepilogo da sfogliare come le
+   storie: ore di studio, esami, cose fatte, passi e allenamenti,
+   lingue, soldi, viaggi, foto del giorno e umore, con i numeri
+   che si animano, il confronto col periodo prima e il tuo
+   “personaggio”. In fondo una cartolina da salvare o mandare.
+   Tutto calcolato sul dispositivo, niente esce da Orbita.
+   ========================================================= */
+const Wrap = {
+  range(kind, ref) { if (kind === 'year') { const y = +ref; return { a: `${y}-01-01`, b: `${y}-12-31`, label: String(y), title: `Il tuo ${y}`, prev: { a: `${y - 1}-01-01`, b: `${y - 1}-12-31` } }; }
+    const [y, m] = ref.split('-').map(Number), last = new Date(y, m, 0).getDate(), pm = m === 1 ? [y - 1, 12] : [y, m - 1], pl = new Date(pm[0], pm[1], 0).getDate();
+    return { a: `${ref}-01`, b: `${ref}-${pad(last)}`, label: `${MONTHS[m - 1]} ${y}`, title: `Il tuo ${MONTHS[m - 1]}`, prev: { a: `${pm[0]}-${pad(pm[1])}-01`, b: `${pm[0]}-${pad(pm[1])}-${pad(pl)}` } }; },
+  days(a, b) { const out = []; const end = b > todayK() ? todayK() : b; for (let k = a; k <= end; k = addDK(k, 1)) out.push(k); return out; },
+  safe(f, d = null) { try { return f(); } catch (_) { return d; } },
+  /** every number of the period (null where there is no data) */
+  stats(a, b) { const D = this.days(a, b), sf = this.safe.bind(this), G = (S.game && S.game.days) || {}, H = (S.health && S.health.days) || {}, inR = k => k && k >= a && k <= b;
+    const focus = D.reduce((s, k) => s + (+(G[k] || {}).focus || 0), 0), fBest = D.reduce((m, k) => (+(G[k] || {}).focus || 0) > m.v ? { k, v: +(G[k] || {}).focus } : m, { k: null, v: 0 });
+    const subj = sf(() => { const M = {}; for (const f of S.focuslog || []) { const k = dkey(new Date(f.t)); if (!inR(k) || !f.label) continue; M[f.label] = (M[f.label] || 0) + (+f.min || 0); } return Object.entries(M).sort((x, y) => y[1] - x[1])[0] || null; });
+    const tasks = D.reduce((s, k) => s + (+(G[k] || {}).tasks || 0), 0), fDays = D.filter(k => (+(G[k] || {}).focus || 0) > 0).length;
+    const exams = sf(() => (S.exams || []).filter(x => x.status === 'passed' && inR(x.date)).sort((x, y) => (+y.grade || 0) - (+x.grade || 0)), []), avg = sf(() => Exams.stats().w, 0);
+    const steps = D.reduce((s, k) => s + (+(H[k] || {}).steps || 0), 0), sBest = D.reduce((m, k) => (+(H[k] || {}).steps || 0) > m.v ? { k, v: +(H[k] || {}).steps } : m, { k: null, v: 0 }), sGoal = sf(() => D.filter(k => (+(H[k] || {}).steps || 0) >= (Health.P().stepsGoal || 8000)).length, 0);
+    const tl = sf(() => (Train.P().log || []).filter(x => inR(x.k)), []), burn = D.reduce((s, k) => s + ((H[k] || {}).burn || []).reduce((t, x) => t + (+x.min || 0), 0), 0), wN = Math.max(tl.length, D.filter(k => ((H[k] || {}).burn || []).length).length), wMin = Math.max(burn, tl.reduce((s, x) => s + (+x.min || 0), 0)), vol = tl.reduce((s, x) => s + (+x.vol || 0), 0);
+    const langs = sf(() => (S.langs || []).map(l => ({ l, xp: Object.entries(l.xpDays || {}).filter(([k]) => inR(k)).reduce((s, [, v]) => s + (+v || 0), 0) })).filter(x => x.xp).sort((x, y) => y.xp - x.xp), []), xp = langs.reduce((s, x) => s + x.xp, 0);
+    const lStreak = sf(() => { let best = 0, cur = 0; for (const k of D) { if ((S.langs || []).some(l => (l.xpDays || {})[k])) { cur++; best = Math.max(best, cur); } else cur = 0; } return best; }, 0);
+    const tx = sf(() => (S.money.tx || []).filter(t => inR(t.date) && !t.loan && !(typeof Fin !== 'undefined' && Fin.isTr(t))), []), spent = tx.filter(t => t.amt < 0).reduce((s, t) => s - t.amt, 0), earned = tx.filter(t => t.amt > 0).reduce((s, t) => s + t.amt, 0);
+    const cats = {}; tx.filter(t => t.amt < 0).forEach(t => cats[t.cat] = (cats[t.cat] || 0) - t.amt); const topCat = Object.entries(cats).sort((x, y) => y[1] - x[1])[0] || null;
+    const dayMax = sf(() => { const M = {}; tx.filter(t => t.amt < 0).forEach(t => M[t.date] = (M[t.date] || 0) - t.amt); return Object.entries(M).sort((x, y) => y[1] - x[1])[0] || null; });
+    const trips = sf(() => (S.trips || []).filter(t => t.from && t.from <= b && (t.to || t.from) >= a), []);
+    const pics = sf(() => Object.keys(S.daypics || {}).filter(inR).sort(), []);
+    const moods = sf(() => D.map(k => ((S.journal || {}).e || {})[k]).filter(e => e && e.m).map(e => +e.m), []), mAvg = moods.length ? moods.reduce((s, x) => s + x, 0) / moods.length : 0;
+    const mTop = moods.length ? [1, 2, 3, 4, 5].map(m => [m, moods.filter(x => x === m).length]).sort((x, y) => y[1] - x[1])[0][0] : 0;
+    const habit = sf(() => (S.habits || []).map(h => ({ h, n: D.filter(k => Habits.done(h, k)).length })).filter(x => x.n).sort((x, y) => y.n - x.n)[0] || null);
+    const events = sf(() => D.reduce((s, k) => s + itemsOn(k).filter(i => i.kind !== 'task').length, 0), 0);
+    const tsIn = t => t && inR(dkey(new Date(t))), md = sf(() => (S.media || []).filter(m => m.status === 'done' && tsIn(m.doneAt)), []), media = { books: md.filter(m => m.type === 'book'), films: md.filter(m => m.type === 'movie'), series: md.filter(m => m.type === 'tv'), n: md.length };
+    const notes = sf(() => Object.values(S.notes || {}).filter(n => tsIn(n.created)).length, 0), lvl = sf(() => Game.info(), null);
+    return { media, notes, lvl, n: D.length, focus, fBest, fDays, subj, tasks, exams, avg, steps, sBest, sGoal, wN, wMin, vol, langs, xp, lStreak, spent, earned, topCat, dayMax, trips, pics, moods, mAvg, mTop, habit, events }; },
+  persona(s) { const n = Math.max(1, s.n), sc = [
+      ['Il Secchione', '📚', 'Le tue ore di studio parlano da sole: testa giù e risultati.', s.focus / 60 / n * 3 + s.exams.length * 2],
+      ['L\'Atleta', '🏃', 'Passi, allenamenti e costanza: il corpo ringrazia.', s.wN / n * 12 + s.steps / n / 4000],
+      ['Il Poliglotta', '🦉', 'Una lezione dopo l\'altra, le lingue stanno diventando tue.', s.xp / n / 12],
+      ['L\'Esploratore', '🧭', 'Sempre in movimento: viaggi, posti nuovi, valigia pronta.', s.trips.length * 2.5 / Math.max(1, n / 30)],
+      ['Il Narratore', '📸', 'Una foto al giorno: stai scrivendo il tuo diario per immagini.', s.pics.length / n * 4],
+      ['Lo Stratega', '🗂️', 'Liste spuntate e agenda sotto controllo: niente ti sfugge.', s.tasks / n * 1.2]];
+    const top = sc.sort((x, y) => y[3] - x[3])[0]; return top[3] > .6 ? top : ['L\'Equilibrista', '⚖️', 'Un po\' di tutto, senza esagerare: il tuo ritmo è tuo.', 0]; },
+  delta(c, p) { if (!p || !c) return ''; const d = Math.round((c - p) / p * 100); if (Math.abs(d) < 3) return '<span class="rx-dl">come il periodo prima</span>'; return `<span class="rx-dl ${d > 0 ? 'up' : 'dn'}">${d > 0 ? '▲' : '▼'} ${Math.abs(d)}% rispetto al periodo prima</span>`; },
+  /** the stories, only the ones with something to say */
+  slides(kind, ref) { const R = this.range(kind, ref), s = this.stats(R.a, R.b), p = this.stats(R.prev.a, R.prev.b), out = [], num = (v, dec = 0) => `<b class="rx-num" data-n="${v}" data-d="${dec}">0</b>`;
+    const lbl = k => relDay(k, true), h = m => Math.round(m / 6) / 10, kind_ = kind === 'year' ? 'quest\'anno' : 'questo mese';
+    out.push({ bg: 'intro', html: `<div class="rx-orbit"><i></i><i></i><b>🪐</b></div><small class="rx-eye">Orbita presenta</small><h1 class="rx-big">${esc(R.title)}</h1><p class="rx-sub">${kind === 'year' ? 'Dodici mesi in qualche numero' : cap(R.label)} · tocca per andare avanti</p>` });
+    if (s.focus >= 30) out.push({ bg: 'study', html: `<span class="rx-emo">📚</span><small class="rx-eye">Studio e concentrazione</small>${num(h(s.focus), 1)}<p class="rx-unit">ore di focus</p>${this.delta(s.focus, p.focus)}<ul class="rx-facts">${s.fBest.k ? `<li>Giornata record: <b>${lbl(s.fBest.k)}</b> con ${fmtMin(s.fBest.v)}</li>` : ''}<li>Hai studiato in <b>${s.fDays}</b> giorni su ${s.n}</li>${s.subj ? `<li>Materia più studiata: <b>${esc(s.subj[0])}</b> (${fmtMin(s.subj[1])})</li>` : ''}</ul>` });
+    if (s.exams.length) out.push({ bg: 'exam', html: `<span class="rx-emo">🎓</span><small class="rx-eye">Esami</small>${num(s.exams.length)}<p class="rx-unit">${s.exams.length === 1 ? 'esame superato' : 'esami superati'}</p><ul class="rx-facts">${s.exams.slice(0, 4).map(x => `<li><b>${esc(x.name)}</b> · ${x.grade}${x.lode ? ' e lode' : ''}</li>`).join('')}${s.avg ? `<li>Media ponderata oggi: <b>${s.avg.toFixed(2).replace('.', ',')}</b></li>` : ''}</ul>`, fx: s.exams.some(x => +x.grade >= 28) });
+    if (s.tasks >= 5 || s.events >= 5) out.push({ bg: 'done', html: `<span class="rx-emo">✅</span><small class="rx-eye">Cose fatte</small>${num(s.tasks)}<p class="rx-unit">promemoria completati</p>${this.delta(s.tasks, p.tasks)}<ul class="rx-facts">${s.events ? `<li><b>${s.events}</b> impegni in agenda</li>` : ''}${s.notes ? `<li><b>${s.notes}</b> ${s.notes === 1 ? 'nota scritta' : 'note scritte'}</li>` : ''}${s.habit ? `<li>Abitudine più costante: <b>${esc(s.habit.h.name || s.habit.h.title || '')}</b>, ${s.habit.n} volte</li>` : ''}</ul>` });
+    if (s.steps >= 5000 || s.wN) out.push({ bg: 'move', html: `<span class="rx-emo">👟</span><small class="rx-eye">Movimento</small>${s.steps >= 5000 ? `${num(Math.round(s.steps * .00075))}<p class="rx-unit">km a piedi · ${s.steps.toLocaleString('it-IT')} passi</p>${this.delta(s.steps, p.steps)}` : `${num(s.wN)}<p class="rx-unit">allenamenti</p>`}<ul class="rx-facts">${s.steps >= 5000 && s.wN ? `<li><b>${s.wN}</b> allenamenti, ${fmtMin(s.wMin)} in tutto</li>` : s.wMin ? `<li>${fmtMin(s.wMin)} di sport in tutto</li>` : ''}${s.sBest.k ? `<li>Giorno più attivo: <b>${lbl(s.sBest.k)}</b>, ${s.sBest.v.toLocaleString('it-IT')} passi</li>` : ''}${s.sGoal ? `<li>Obiettivo passi raggiunto <b>${s.sGoal}</b> volte</li>` : ''}${s.vol >= 1000 ? `<li>Hai sollevato <b>${Math.round(s.vol / 1000).toLocaleString('it-IT')} tonnellate</b> in tutto</li>` : ''}${s.steps >= 5000 ? `<li>${(s.steps * .00075 / 42.195) >= 1 ? `Come <b>${(s.steps * .00075 / 42.195).toFixed(1).replace('.', ',')} maratone</b>` : `Il ${Math.round(s.steps * .00075 / 42.195 * 100)}% di una maratona`}</li>` : ''}</ul>` });
+    if (s.xp) out.push({ bg: 'lingo', html: `<span class="rx-emo">🦉</span><small class="rx-eye">Lingue</small>${num(s.xp)}<p class="rx-unit">XP guadagnati</p>${this.delta(s.xp, p.xp)}<ul class="rx-facts">${s.langs.slice(0, 3).map(x => `<li>${LANGS[x.l.lang] || '🌍'} <b>${cap(x.l.lang)}</b> · ${x.xp} XP</li>`).join('')}${s.lStreak > 1 ? `<li>Serie più lunga ${kind_}: <b>${s.lStreak} giorni</b> 🔥</li>` : ''}</ul>` });
+    if (s.spent >= 1) out.push({ bg: 'money', html: `<span class="rx-emo">💶</span><small class="rx-eye">Soldi</small><b class="rx-num" data-n="${Math.round(s.spent)}" data-d="0" data-eur="1">0</b><p class="rx-unit">spesi${s.earned ? ` · ${eur(s.earned)} entrati` : ''}</p>${this.delta(s.spent, p.spent).replace('▲', '▲ spesi').replace('▼', '▼ spesi')}<ul class="rx-facts">${s.topCat ? `<li>Dove sono andati di più: <b>${(MCAT[s.topCat[0]] || MCAT.altro)[0]}</b>, ${eur(s.topCat[1])} (${Math.round(s.topCat[1] / s.spent * 100)}%)</li>` : ''}${s.dayMax ? `<li>Giorno più caro: <b>${lbl(s.dayMax[0])}</b>, ${eur(s.dayMax[1])}</li>` : ''}<li>In media <b>${eur(s.spent / Math.max(1, s.n))}</b> al giorno</li>${s.earned > s.spent ? `<li>Messi da parte: <b>${eur(s.earned - s.spent)}</b> 💪</li>` : ''}</ul>` });
+    if (s.media.n) out.push({ bg: 'media', html: `<span class="rx-emo">🍿</span><small class="rx-eye">Libri, film e serie</small>${num(s.media.n)}<p class="rx-unit">${s.media.n === 1 ? 'storia finita' : 'storie finite'}</p><ul class="rx-facts">${[['📚', s.media.books, 'libri', 'libro'], ['🎬', s.media.films, 'film', 'film'], ['📺', s.media.series, 'serie', 'serie']].filter(x => x[1].length).map(x => `<li>${x[0]} <b>${x[1].length}</b> ${x[1].length === 1 ? x[3] : x[2]}: ${x[1].slice(0, 3).map(m => esc(m.title || '')).join(', ')}${x[1].length > 3 ? '…' : ''}</li>`).join('')}</ul>` });
+    if (s.trips.length) out.push({ bg: 'trip', html: `<span class="rx-emo">🧳</span><small class="rx-eye">In giro</small>${num(s.trips.length)}<p class="rx-unit">${s.trips.length === 1 ? 'viaggio' : 'viaggi'}</p><ul class="rx-facts">${s.trips.slice(0, 5).map(t => `<li><b>${esc(t.place || t.title || '')}</b> · ${dIt(t.from)}</li>`).join('')}</ul>` });
+    if (s.pics.length >= 3) { const P = s.pics.slice(-12); out.push({ bg: 'pics', html: `<small class="rx-eye">Una foto al giorno</small>${num(s.pics.length)}<p class="rx-unit">giorni fotografati</p><div class="rx-coll">${P.map((k, i) => `<img src="${(S.daypics[k] || {}).t || ''}" alt="" style="--r:${((i * 37) % 13) - 6}deg;--d:${i * 70}ms">`).join('')}</div>` }); }
+    if (s.moods.length >= 3) { const M = MOODS[s.mTop - 1] || MOODS[2]; out.push({ bg: 'mood', html: `<span class="rx-emo">${['😣', '😕', '😐', '🙂', '😄'][s.mTop - 1]}</span><small class="rx-eye">Come ti sei sentito</small><h2 class="rx-mid" style="color:${M[1]}">Per lo più «${M[0].toLowerCase()}»</h2><p class="rx-unit">${s.moods.length} giorni scritti nel diario</p><div class="rx-moodbar">${[1, 2, 3, 4, 5].map(m => { const c = s.moods.filter(x => x === m).length; return c ? `<i style="flex:${c};background:${MOODS[m - 1][1]}" title="${MOODS[m - 1][0]}: ${c}"></i>` : ''; }).join('')}</div>` }); }
+    const per = this.persona(s);
+    if (out.length >= 2) {
+      out.push({ bg: 'persona', html: `<small class="rx-eye">Il tuo personaggio ${kind === 'year' ? 'dell\'anno' : 'del mese'}</small><span class="rx-emo xl">${per[1]}</span><h1 class="rx-big">${per[0]}</h1><p class="rx-sub">${per[2]}</p>${s.lvl ? `<span class="rx-dl">Livello ${s.lvl.n} · ${esc(s.lvl.title || '')}</span>` : ''}`, fx: true });
+      const tiles = [s.focus >= 30 && ['📚', `${h(s.focus).toLocaleString('it-IT')} h`, 'di focus'], s.exams.length && ['🎓', String(s.exams.length), s.exams.length === 1 ? 'esame' : 'esami'], s.tasks && ['✅', String(s.tasks), 'cose fatte'], s.steps >= 5000 && ['👟', `${Math.round(s.steps * .00075)} km`, 'a piedi'], s.wN && ['💪', String(s.wN), 'allenamenti'], s.xp && ['🦉', `${s.xp}`, 'XP lingue'], s.media.n && ['🍿', String(s.media.n), 'libri, film, serie'], s.trips.length && ['🧳', String(s.trips.length), s.trips.length === 1 ? 'viaggio' : 'viaggi'], s.pics.length >= 3 && ['📸', String(s.pics.length), 'foto']].filter(Boolean).slice(0, 6);
+      out.push({ bg: 'end', end: true, tiles, per, R, html: `<small class="rx-eye">${esc(R.title)} in breve</small><div class="rx-card"><div class="rx-ch"><span>${per[1]}</span><b>${esc(per[0])}</b></div><div class="rx-grid">${tiles.map(t => `<div><span>${t[0]}</span><b>${esc(t[1])}</b><small>${esc(t[2])}</small></div>`).join('')}</div><div class="rx-brand">🪐 Orbita</div></div><div class="rx-btns"><button class="btn primary" data-wr="png">${ico('download', 'sm')}Salva la cartolina</button>${navigator.share ? `<button class="btn" data-wr="share">${ico('share', 'sm')}Condividi</button>` : ''}<button class="btn" data-wr="again">${ico('refresh', 'sm')}Rivedi</button></div>` });
+    }
+    return { R, s, out }; },
+  /** the postcard as an image (1080×1350) */
+  async png(sl) { const W = 1080, H = 1350, c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d'), F = '-apple-system, "SF Pro Display", "Segoe UI", Roboto, sans-serif';
+    const g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#2E1A7A'); g.addColorStop(.55, '#5B2BD9'); g.addColorStop(1, '#FF5E7E'); x.fillStyle = g; x.fillRect(0, 0, W, H);
+    x.globalAlpha = .18; x.strokeStyle = '#fff'; x.lineWidth = 3; x.beginPath(); x.ellipse(W * .82, H * .14, 260, 90, -.35, 0, Math.PI * 2); x.stroke(); x.globalAlpha = 1;
+    x.fillStyle = 'rgba(255,255,255,.75)'; x.font = `600 34px ${F}`; x.fillText(sl.R.title.toUpperCase(), 80, 130);
+    x.font = '120px serif'; x.fillText(sl.per[1], 80, 300); x.fillStyle = '#fff'; x.font = `800 76px ${F}`; x.fillText(sl.per[0], 80, 400);
+    const T = sl.tiles, cols = 2, cw = (W - 160 - 30) / cols, rh = 230; T.forEach((t, i) => { const cx = 80 + (i % cols) * (cw + 30), cy = 470 + Math.floor(i / cols) * (rh + 26);
+      x.fillStyle = 'rgba(255,255,255,.14)'; const r = 36; x.beginPath(); x.moveTo(cx + r, cy); x.arcTo(cx + cw, cy, cx + cw, cy + rh, r); x.arcTo(cx + cw, cy + rh, cx, cy + rh, r); x.arcTo(cx, cy + rh, cx, cy, r); x.arcTo(cx, cy, cx + cw, cy, r); x.fill();
+      x.font = '58px serif'; x.fillStyle = '#fff'; x.fillText(t[0], cx + 34, cy + 82); x.font = `800 64px ${F}`; x.fillText(t[1], cx + 34, cy + 160); x.font = `500 32px ${F}`; x.fillStyle = 'rgba(255,255,255,.8)'; x.fillText(t[2], cx + 34, cy + 204); });
+    x.fillStyle = 'rgba(255,255,255,.85)'; x.font = `700 36px ${F}`; x.fillText('🪐 Orbita', 80, H - 70);
+    return await new Promise(r => c.toBlob(r, 'image/png')); },
+};
+function wrapPlay(kind, ref) { const { out } = Wrap.slides(kind, ref);
+  if (out.length < 3) { Island.toast({ icon: 'star', c: 'var(--orange)', t: 'Ancora pochi dati', s: kind === 'year' ? 'Usa Orbita qualche settimana e il tuo anno prenderà forma' : 'Scegli un mese in cui hai usato di più Orbita', ms: 3200 }); return; }
+  const el = document.createElement('div'); el.className = 'rx-wrap'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Riepilogo');
+  el.innerHTML = `<div class="rx-bars">${out.map(() => '<i><b></b></i>').join('')}</div><button class="rx-x" aria-label="Chiudi">✕</button><div class="rx-stage"></div><button class="rx-nav prev" aria-label="Indietro"></button><button class="rx-nav next" aria-label="Avanti"></button>`;
+  document.body.appendChild(el); requestAnimationFrame(() => el.classList.add('on'));
+  const stage = $('.rx-stage', el), bars = $$('.rx-bars i', el); let i = -1, t0 = 0, raf = 0, paused = false, pAt = 0; const DUR = 6500;
+  const count = root => $$('.rx-num', root).forEach(b => { const n = +b.dataset.n, d = +b.dataset.d, eu = b.dataset.eur, st = performance.now(), dur = 1300; const f = now => { const p = Math.min(1, (now - st) / dur), e = 1 - Math.pow(1 - p, 3), v = n * e; b.textContent = eu ? eur(Math.round(v)) : d ? v.toFixed(d).replace('.', ',') : Math.round(v).toLocaleString('it-IT'); if (p < 1) requestAnimationFrame(f); }; requestAnimationFrame(f); });
+  const show = j => { if (j < 0) j = 0; if (j >= out.length) return close(); i = j; const s = out[i];
+    stage.innerHTML = `<section class="rx-slide rx-${s.bg}">${s.html}</section>`; el.classList.toggle('end', !!s.end); bars.forEach((b, k) => { b.firstChild.style.width = k < i ? '100%' : '0%'; }); t0 = performance.now(); pAt = 0; count(stage);
+    if (s.fx) setTimeout(() => confetti(90), 450);
+    $$('[data-wr]', stage).forEach(b => b.onclick = async e => { e.stopPropagation(); const w = b.dataset.wr; if (w === 'again') return show(0);
+      const blob = await Wrap.png(s), name = `${s.R.title.replace(/\s+/g, '-')}.png`;
+      if (w === 'share') { try { await navigator.share({ files: [new File([blob], name, { type: 'image/png' })], title: s.R.title }); } catch (_) {} } else saveFile(name, blob, 'image/png'); }); };
+  const loop = now => { if (!el.isConnected) return; if (!paused && i >= 0 && !out[i].end) { const p = Math.min(1, (now - t0) / DUR); bars[i].firstChild.style.width = p * 100 + '%'; if (p >= 1) show(i + 1); } else if (i >= 0 && out[i].end) bars[i].firstChild.style.width = '100%'; raf = requestAnimationFrame(loop); };
+  const close = () => { cancelAnimationFrame(raf); el.classList.remove('on'); document.removeEventListener('keydown', key, true); setTimeout(() => el.remove(), 260); };
+  const key = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } else if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); show(i + 1); } else if (e.key === 'ArrowLeft') { e.preventDefault(); show(i - 1); } };
+  document.addEventListener('keydown', key, true);
+  $('.rx-x', el).onclick = close; $('.rx-nav.prev', el).onclick = () => show(i - 1); $('.rx-nav.next', el).onclick = () => show(i + 1);
+  /* hold to pause, swipe down to close */
+  let y0 = null, hold = 0; el.addEventListener('pointerdown', e => { if (e.target.closest('button')) return; y0 = e.clientY; hold = setTimeout(() => { paused = true; pAt = performance.now(); el.classList.add('paused'); }, 220); });
+  el.addEventListener('pointerup', e => { clearTimeout(hold); if (paused) { paused = false; t0 += performance.now() - pAt; el.classList.remove('paused'); } if (y0 != null && e.clientY - y0 > 120) close(); y0 = null; });
+  if (window.__androidBack !== undefined) { const ob = window.__androidBack; window.__androidBack = () => { if (el.isConnected) { close(); window.__androidBack = ob; return true; } window.__androidBack = ob; return ob ? ob() : false; }; }
+  show(0); raf = requestAnimationFrame(loop); Game.add(3, 'Riepilogo', { silent: true }); }
+/** which recap to offer now: the year from mid-December to mid-January, otherwise last month in its first week */
+Wrap.offer = () => { const t = todayK(), d = new Date(), m = d.getMonth(), day = d.getDate();
+  if (m === 11 || (m === 0 && day <= 15)) { const y = m === 11 ? d.getFullYear() : d.getFullYear() - 1; return { kind: 'year', ref: String(y), t: `Il tuo ${y}` }; }
+  if (day <= 7) { const pm = new Date(d.getFullYear(), m - 1, 1), ref = `${pm.getFullYear()}-${pad(pm.getMonth() + 1)}`; return { kind: 'month', ref, t: `Il tuo ${MONTHS[pm.getMonth()]}` }; } void t; return null; };
+TODAY_CARDS.wrap = 'Il tuo mese / anno';
+if (!TODAY_DEFAULT.includes('wrap')) TODAY_DEFAULT.unshift('wrap');
+const wrapSeen = () => { let w = S.profile.wrapSeen; if (typeof w === 'string') w = S.profile.wrapSeen = { ['year' + w]: 1 }; return w || {}; };
+TODAY_EXTRA.wrap = () => { const o = Wrap.offer(); if (!o || wrapSeen()[o.kind + o.ref]) return ''; const { out } = Wrap.slides(o.kind, o.ref); if (out.length < 4) return '';
+  return `<section class="card span-12 rx-today" data-act="wrapGo" data-k="${o.kind}" data-r="${o.ref}"><div class="rx-tp"><span class="rx-tpo">🪐</span><span class="grow"><small>È pronto</small><b>${esc(o.t)}</b><span>${out.length - 2} storie da sfogliare: i tuoi numeri, il confronto e il tuo personaggio</span></span><span class="btn primary">${ico('play', 'sm')}Guarda</span></div></section>`; };
+ACT.wrapGo = el => { const k = el.dataset.k, r = el.dataset.r; S.profile.wrapSeen = { ...wrapSeen(), [k + r]: Date.now() }; save('profile'); wrapPlay(k, r); setTimeout(() => App.refresh(), 400); };
+ACT.wrapMonth = () => { const d = new Date(), pm = d.getDate() <= 7 ? new Date(d.getFullYear(), d.getMonth() - 1, 1) : d; wrapPlay('month', `${pm.getFullYear()}-${pad(pm.getMonth() + 1)}`); };
+ACT.wrapYear = () => { const d = new Date(); wrapPlay('year', String(d.getMonth() === 0 && d.getDate() <= 15 ? d.getFullYear() - 1 : d.getFullYear())); };
+ACT.wrapPick = () => { const d = new Date(), M = []; for (let i = 0; i < 12; i++) { const x = new Date(d.getFullYear(), d.getMonth() - i, 1); M.push([`${x.getFullYear()}-${pad(x.getMonth() + 1)}`, `${cap(MONTHS[x.getMonth()])} ${x.getFullYear()}`]); }
+  openSheet({ title: '🪐 Riepiloghi', left: { label: 'Chiudi' }, body: `<div class="list">${[[String(d.getFullYear()), `Il tuo ${d.getFullYear()} (finora)`, 'year'], [String(d.getFullYear() - 1), `Il tuo ${d.getFullYear() - 1}`, 'year'], ...M.map(m => [m[0], m[1], 'month'])].map(([r, t, k]) => `<button class="row" data-wpk="${k}" data-wpr="${r}"><span style="font-size:22px">${k === 'year' ? '🗓️' : '📆'}</span><span class="grow"><div class="t">${esc(t)}</div></span>${ico('right', 'sm')}</button>`).join('')}</div>`,
+    onMount: (el, api) => $$('[data-wpk]', el).forEach(b => b.onclick = () => { api.close(); setTimeout(() => wrapPlay(b.dataset.wpk, b.dataset.wpr), 200); }) }); };
+CMD_ACT.push(['Il tuo mese in Orbita', 'spark', () => ACT.wrapMonth()], ['Riepiloghi dei mesi passati', 'spark', () => ACT.wrapPick()]);
+/* the older “Il tuo anno in Orbita” now opens these stories (same button in Resoconto and Il mio anno, now with every month too) */
+ACT.yearWrap = () => ACT.wrapYear();
+ACT.yearWrapT = el => { const y = String(+(el && el.dataset && el.dataset.y) || new Date().getFullYear()); S.profile.wrapSeen = { ...wrapSeen(), ['year' + y]: Date.now() }; save('profile'); wrapPlay('year', y); setTimeout(() => App.refresh(), 400); };
+for (const v of ['report', 'year']) { const V = VIEWS[v]; if (!V || !V.actions) continue; const oA = V.actions; V.actions = function (...a) { return String(oA.apply(this, a)).replace(/<button class="btn sm" data-act="yearWrap"[^>]*>[\s\S]*?<\/button>/, `<button class="btn sm" data-act="wrapPick" title="Il tuo mese e il tuo anno">✨<span class="hide-narrow">Riepiloghi</span></button>`); }; }
+
+/* =========================================================
+   PROMEMORIA QUANDO ARRIVI — “quando arrivo in università:
+   restituire il libro”, “al supermercato: la lista della spesa”.
+   — nell'app Android avvisa anche ad app chiusa (allarmi di
+     prossimità del telefono, se la posizione è “Consenti sempre”);
+   — nel browser, su iPad e iPhone avvisa mentre Orbita è aperta;
+   — sul computer non ha senso (non si muove): lo dice.
+   ========================================================= */
+const PlaceR = {
+  R: [[100, '100 m'], [200, '200 m'], [500, '500 m']],
+  recent() { return (S.profile.places || []).slice(0, 8); },
+  remember(p) { const L = (S.profile.places || []).filter(x => dist(x, p) > 60); L.unshift({ name: p.name, lat: p.lat, lng: p.lng }); S.profile.places = L.slice(0, 12); save('profile'); },
+  /** what to watch: tasks with a place + the supermarkets when the shopping list has something */
+  list() { const out = [];
+    for (const t of S.tasks || []) if (!t.done && t.place && t.place.lat != null) out.push({ key: 'pl:' + t.id, lat: +t.place.lat, lng: +t.place.lng, r: +t.place.r || 150, title: `📍 ${t.title}`, body: `Sei ${/^(casa|università|uni|ufficio|lavoro|palestra)$/i.test(t.place.name) ? 'a ' + t.place.name.toLowerCase() : 'qui: ' + t.place.name}${t.notes ? ' · ' + String(t.notes).slice(0, 80) : ''}`, task: t.id, view: 'tasks', at: t.place.at || 0 });
+    const open = (S.shop || []).filter(x => !x.done); if (open.length) for (const [i, p] of (S.profile.shopPlaces || []).entries()) out.push({ key: 'sp:' + i + ':' + Math.round(p.lat * 1e3), lat: p.lat, lng: p.lng, r: p.r || 120, title: `🛒 Sei da ${p.name}`, body: `Nella lista: ${open.slice(0, 6).map(x => x.name).join(', ')}${open.length > 6 ? ` e altre ${open.length - 6}` : ''}`, view: 'shop', at: 0 });
+    return out; },
+  /* ---------- Android: the phone watches for us ---------- */
+  syncAnd() { if (!AND || !AND.places) return; const L = this.list().map(x => ({ key: x.key, lat: x.lat, lng: x.lng, r: x.r, title: x.title, body: x.body, data: JSON.stringify({ key: x.key, task: x.task || null, view: x.view, open: null }) })); try { AND.places(JSON.stringify(L)); } catch (_) {} },
+  /* ---------- elsewhere: while Orbita is open ---------- */
+  st() { try { return JSON.parse(localStorage.getItem('orbita.placeIn') || '{}'); } catch (_) { return {}; } },
+  setSt(o) { try { localStorage.setItem('orbita.placeIn', JSON.stringify(o)); } catch (_) {} },
+  async check() { if (AND || DESK || document.hidden || IN_CLAUDE) return; const L = this.list(); if (!L.length || !navigator.geolocation) return; if ((await Here.perm()) !== 'granted') return;
+    const g = await new Promise(ok => navigator.geolocation.getCurrentPosition(p => ok({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }), () => ok(null), { maximumAge: 60e3, timeout: 15e3, enableHighAccuracy: true })); if (!g || g.acc > 400) return;
+    const st = this.st(), now = Date.now();
+    for (const x of L) { const inside = dist(g, x) <= x.r + Math.min(150, g.acc / 2), was = st[x.key];
+      if (inside && !was && now - (x.at || 0) > 2 * 60e3) { Island.toast({ icon: 'pin', c: 'var(--orange)', t: x.title, s: x.body, action: x.task ? { label: 'Fatto', fn: () => { const t = S.tasks.find(z => z.id === x.task); if (t && !t.done) ACT.toggleTask({ dataset: { id: t.id } }); } } : { label: 'Apri', fn: () => go(x.view) }, ms: 9000 }); try { Notify.send(x.title, x.body, { key: x.key, task: x.task, view: x.view }); } catch (_) {} Sound.done && Sound.done(); }
+      st[x.key] = inside; }
+    this.setSt(st); },
+  /** pick a place: search, here, home, recent, your spots */
+  pick(cur) { return new Promise(done => { let L = [], r = (cur && cur.r) || 150, fin = false; const H = S.profile.home, rec = this.recent(), spots = (S.spots || []).filter(s => s.lat != null).slice(0, 8);
+    const end = v => { if (fin) return; fin = true; done(v); };
+    const sh = openSheet({ title: '📍 Quando arrivo a…', left: { label: 'Annulla', act: s => { s.close(); end(undefined); } }, onClose: () => end(undefined),
+      body: `${DESK ? '<p class="pl-warn">Sul computer non posso sapere quando arrivi in un posto: l\'avviso ti arriva dal telefono (app Android) o con Orbita aperta su iPhone e iPad.</p>' : ''}
+        <div style="display:flex;gap:8px"><input class="input" id="plQ" placeholder="Es. Conad via Roma, Università, palestra…" style="flex:1" enterkeyhint="search"><button class="btn primary" id="plGo">${ico('search', 'sm')}</button></div>
+        <div class="list" id="plR"></div>
+        <div class="chips" id="plC">${!DESK && navigator.geolocation ? `<button class="chip" data-plh="1">📍 Qui adesso</button>` : ''}${H && H.lat != null ? `<button class="chip" data-plx="home">🏠 Casa</button>` : ''}${rec.map((p, i) => `<button class="chip" data-plx="r${i}">🕘 ${esc(p.name)}</button>`).join('')}${spots.map((p, i) => `<button class="chip" data-plx="s${i}">⭐ ${esc(p.name)}</button>`).join('')}</div>
+        <div class="field"><span class="lbl">Avvisami entro</span>${seg('plr', this.R, r)}</div>
+        ${cur ? '<button class="btn plain danger" id="plDel" style="align-self:flex-start">Togli il luogo</button>' : ''}`,
+      onMount: el => { wireSeg(el, 'plr', v => r = +v); const R = $('#plR', el), q = $('#plQ', el);
+        const choose = p => { const o = { name: p.name, lat: +(+p.lat).toFixed(6), lng: +(+p.lng).toFixed(6), r, at: Date.now() }; this.remember(o); end(o); sh.close(); };
+        const go2 = async () => { const t = q.value.trim(); if (!t) return q.focus(); R.innerHTML = '<div class="row"><span class="muted">Cerco…</span></div>'; const me = Here.last();
+          try { const P = { q: t, format: 'jsonv2', addressdetails: 1, limit: 6, 'accept-language': 'it' }; if (me && me.lat != null) Object.assign(P, { viewbox: [me.lng - .35, me.lat + .25, me.lng + .35, me.lat - .25].join(','), bounded: 0 });
+            const A = await (await fetch('https://nominatim.openstreetmap.org/search?' + new URLSearchParams(P))).json();
+            L = (A || []).map(x => { const a = x.address || {}, nm = x.name || [a.road, a.house_number].filter(Boolean).join(' ') || x.display_name.split(',')[0], town = a.city || a.town || a.village || ''; return { name: nm + (town && !nm.includes(town) ? ', ' + town : ''), full: x.display_name, lat: +x.lat, lng: +x.lon, km: me && me.lat != null ? dist(me, { lat: +x.lat, lng: +x.lon }) / 1000 : null }; }).sort((a, b) => (a.km ?? 1e9) - (b.km ?? 1e9));
+            R.innerHTML = L.length ? L.map((x, i) => `<button class="row" data-pli="${i}"><span class="tile-ico" style="background:var(--orange)">${ico('pin')}</span><span class="grow" style="min-width:0"><div class="t">${esc(x.name)}</div><div class="s" style="white-space:normal">${esc(x.full)}${x.km != null ? ` · ${x.km < 10 ? x.km.toFixed(1).replace('.', ',') : Math.round(x.km)} km` : ''}</div></span></button>`).join('') : '<div class="row"><span class="muted">Nessun risultato: prova con via e città</span></div>';
+            $$('[data-pli]', R).forEach(b => b.onclick = () => choose(L[+b.dataset.pli])); } catch (_) { R.innerHTML = '<div class="row"><span class="muted">Ricerca non raggiungibile: controlla la connessione</span></div>'; } };
+        $('#plGo', el).onclick = go2; q.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); go2(); } };
+        const hb = $('[data-plh]', el); if (hb) hb.onclick = async () => { hb.textContent = '📍 Cerco la posizione…'; const g = await Here.gps(true); if (!g) { hb.textContent = '📍 Qui adesso'; Island.toast({ icon: 'pin', c: 'var(--orange)', t: 'Posizione non permessa', s: 'Cerca il posto per nome qui sopra', ms: 2600 }); return; } choose({ name: (await Here.addr(g.lat, g.lng)) || 'Qui', lat: g.lat, lng: g.lng }); };
+        $$('[data-plx]', el).forEach(b => b.onclick = () => { const k = b.dataset.plx; choose(k === 'home' ? { name: 'Casa', lat: H.lat, lng: H.lng } : k[0] === 'r' ? rec[+k.slice(1)] : spots[+k.slice(1)]); });
+        const d = $('#plDel', el); if (d) d.onclick = () => { end(null); sh.close(); };
+        setTimeout(() => q.focus(), 80); } });
+  }); },
+  /** after choosing: ask Android for the position (and "always" for the background) */
+  arm() { if (AND && AND.placeAsk) { let p = {}; try { p = JSON.parse(AND.placePerm()); } catch (_) {} if (!p.fine || !p.bg) { if (S.profile.plAsked && p.fine) return this.syncAnd(); S.profile.plAsked = 1; save('profile');
+        openSheet({ title: '📍 Avvisi quando arrivi', left: { label: 'Dopo' }, body: `<p style="margin:0">Per avvisarti anche quando Orbita è chiusa, Android deve poter usare la posizione <b>sempre</b>.</p><ol class="pl-steps"><li>Tocca <b>Continua</b> e consenti la posizione</li><li>Nella pagina che si apre scegli <b>Consenti sempre</b></li></ol><p class="muted" style="margin:0;font-size:13px">Orbita non registra dove vai: il telefono avvisa solo quando entri nei posti che hai scelto.</p><button class="btn primary" id="plOk" style="height:46px">Continua</button>`,
+          onMount: (el, api) => $('#plOk', el).onclick = () => { api.close(); AND.placeAsk(true); } }); } this.syncAnd(); return; }
+    if (!DESK) Here.gps(true); },
+};
+window.__androidPlaces = p => { PlaceR.syncAnd(); if (p && p.fine && !p.bg) Island.toast({ icon: 'pin', c: 'var(--orange)', t: 'Avvisi solo con Orbita aperta', s: 'Per riceverli sempre: Impostazioni › App › Orbita › Posizione › Consenti sempre', ms: 5200 }); else if (p && p.fine) Island.toast({ icon: 'pin', c: 'var(--green)', t: 'Fatto: ti avviso quando arrivi', ms: 2400 }); };
+/* the task editor gets a “quando arrivo” row */
+{ const oE = editTask; editTask = function (id, preset = {}) { const n0 = (S.tasks || []).length, r = oE.apply(this, arguments), sh = Sheets[Sheets.length - 1]; if (!sh || !$('#tT', sh.el)) return r;
+    const t0 = id ? S.tasks.find(x => x.id === id) : null; let place = t0 && t0.place ? { ...t0.place } : preset.place || null, touched = false;
+    const list = $('.list.flat', sh.el); if (!list) return r; const row = document.createElement('div'); row.className = 'row'; row.id = 'tPlRow';
+    const paint = () => { row.innerHTML = `<span class="tile-ico" style="background:var(--orange)">${ico('pin')}</span><span class="grow" style="min-width:0"><div class="t">Quando arrivo in un posto</div><div class="s">${place ? `${esc(place.name)} · entro ${place.r || 150} m` : 'Avvisami lì, non a un\'ora'}</div></span><button class="btn sm ${place ? 'plain' : ''}" type="button">${place ? 'Cambia' : 'Scegli'}</button>`; $('button', row).onclick = async () => { const p = await PlaceR.pick(place); if (p === undefined) return; place = p; touched = true; paint(); }; };
+    paint(); list.appendChild(row);
+    const R = $('[data-sh=right]', sh.wrap); if (R) R.addEventListener('click', () => { const title = ($('#tT', sh.el) || {}).value; if (!touched || !String(title || '').trim()) return;
+      setTimeout(() => { const t = id ? S.tasks.find(x => x.id === id) : (S.tasks.length > n0 ? S.tasks[S.tasks.length - 1] : null); if (!t) return; if (place) t.place = place; else delete t.place; save('tasks'); if (place) { PlaceR.arm(); Island.toast({ icon: 'pin', c: 'var(--orange)', t: 'Ti avviso quando arrivi', s: place.name, ms: 2400 }); } PlaceR.syncAnd(); }, 0); }, true);
+    return r; }; }
+/* the shopping list: “avvisami al supermercato” */
+{ const V = VIEWS.shop; if (V) { const oA = V.actions; V.actions = () => `<button class="btn sm" data-act="shopPlaces">📍<span class="hide-narrow">${(S.profile.shopPlaces || []).length ? 'Supermercati' : 'Avvisami lì'}</span></button>` + (oA ? oA() : ''); } }
+ACT.shopPlaces = () => { const paint = el => { const P = S.profile.shopPlaces || []; $('#spL', el).innerHTML = P.length ? P.map((p, i) => `<div class="row"><span class="tile-ico" style="background:var(--green)">🛒</span><span class="grow"><div class="t">${esc(p.name)}</div><div class="s">entro ${p.r || 120} m</div></span><button class="icon-btn" data-spx="${i}" aria-label="Togli">${ico('x', 'sm')}</button></div>`).join('') : '<div class="row"><span class="muted">Nessun negozio: aggiungi quelli dove fai la spesa di solito.</span></div>';
+    $$('[data-spx]', el).forEach(b => b.onclick = () => { S.profile.shopPlaces.splice(+b.dataset.spx, 1); save('profile'); PlaceR.syncAnd(); paint(el); }); };
+  openSheet({ title: '🛒 Avvisami al supermercato', left: { label: 'Fine' }, body: `<p class="muted" style="margin:0;font-size:14px">Quando entri in uno di questi negozi e la lista non è vuota, ti mostro cosa prendere.</p><div class="list" id="spL"></div><button class="btn primary" id="spAdd">${ico('plus', 'sm')}Aggiungi un negozio</button>`,
+    onMount: el => { paint(el); $('#spAdd', el).onclick = async () => { const p = await PlaceR.pick(null); if (!p) return; (S.profile.shopPlaces ||= []).push({ name: p.name, lat: p.lat, lng: p.lng, r: p.r }); save('profile'); PlaceR.arm(); PlaceR.syncAnd(); paint(el); }; } }); };
+/* keep the phone's list in step; check every 2 minutes elsewhere */
+if (AND) { setTimeout(() => PlaceR.syncAnd(), 3000); setInterval(() => PlaceR.syncAnd(), 60e3); }
+else if (!DESK && !IN_CLAUDE) { setTimeout(() => PlaceR.check(), 6000); setInterval(() => PlaceR.check(), 120e3); document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(() => PlaceR.check(), 800); }); }
+
+/* =========================================================
+   TELEFONO, ANCORA PIÙ NATIVO
+   — notifiche con i pulsanti “Fatto” e “Rimanda 10 min”;
+   — scorciatoie tenendo premuta l'icona (Android e app web
+     installata): promemoria, Parla con Orbita, scontrino, lingua;
+   — la voce di Android per leggere ad alta voce (la WebView non
+     ne ha una): lingue, ripasso in cuffia, risposte a voce.
+   ========================================================= */
+const quickGo = k => { const F = {
+    task: () => editTask(), voice: () => voiceSheet(), lang: () => ACT.langToday(), quick: () => ACT.quickAdd && ACT.quickAdd(),
+    /* the camera can only open after a tap: one big button first */
+    receipt: () => openSheet({ title: '🧾 Scontrino', left: { label: 'Annulla' }, body: `<p class="muted" style="margin:0">Fotografalo o scegli una foto: lo leggo e diventa una spesa nelle Finanze.</p><button class="btn primary" id="qrGo" style="height:52px;font-size:17px">${ico('scan', 'sm')}Fotografa lo scontrino</button>`, onMount: (el, api) => $('#qrGo', el).onclick = () => { api.close(); ACT.receiptScan(); } }),
+    podcast: () => typeof podPick === 'function' && podPick(),
+  }; const f = F[k]; if (!f) return; const run = () => { if (document.querySelector('.lk-wrap')) return setTimeout(run, 700); Sheets.slice().forEach(s => { try { s.close(); } catch (_) {} }); setTimeout(f, 120); }; run(); };
+window.__androidShortcut = quickGo;
+/* app web installata: ?new=voice|receipt|lang|podcast (task/note/event/quick are already handled) */
+{ const q = new URLSearchParams(location.search).get('new'); if (q && ['voice', 'receipt', 'lang', 'podcast'].includes(q)) setTimeout(() => quickGo(q), 1600); }
+if (AND) {
+  /* ---------- buttons on the notifications ---------- */
+  window.__androidActions = () => { let L = []; try { L = JSON.parse((AND.takeActions && AND.takeActions()) || '[]'); } catch (_) {} if (!L.length) return;
+    for (const o of L) { let d = {}; try { d = JSON.parse(o.data || '{}'); } catch (_) {} try { Alerts.mark(o.key); } catch (_) {}
+      if (o.type === 'done' && d.task) { const t = S.tasks.find(x => x.id === d.task); if (t && !t.done) { ACT.toggleTask({ dataset: { id: t.id } }); Island.toast({ icon: 'check', c: 'var(--green)', t: 'Fatto dalla notifica', s: t.title, ms: 2400 }); } }
+      if (o.type === 'snooze' && Date.now() - (o.at || 0) < 90e3) Island.toast({ icon: 'clock', c: 'var(--indigo)', t: 'Te lo ricordo tra 10 minuti', ms: 2000 }); } };
+  setTimeout(() => window.__androidActions(), 1800);
+  /* ---------- reading aloud with Android's voice ---------- */
+  if (AND.speak) {
+    const U = new Map(); let seq = 0, vc = null, rdy = !!(AND.ttsReady && AND.ttsReady());
+    const fire = (u, t) => { const ev = { type: t, utterance: u, error: t === 'error' ? 'synthesis-failed' : undefined }; try { if (typeof u['on' + t] === 'function') u['on' + t](ev); } catch (e) { console.error(e); } try { if (u instanceof Utt) u.dispatchEvent(new Event(t)); } catch (_) {} };
+    /* our own utterance: the WebView's one refuses voices that are not its own */
+    const Utt = class extends EventTarget { constructor(t) { super(); this.text = String(t || ''); this.lang = ''; this.voice = null; this.rate = 1; this.pitch = 1; this.volume = 1; this.onstart = this.onend = this.onerror = null; } };
+    try { Object.defineProperty(window, 'SpeechSynthesisUtterance', { configurable: true, writable: true, value: Utt }); } catch (_) { window.SpeechSynthesisUtterance = Utt; }
+    const syn = {
+      speaking: false, pending: false, paused: false, onvoiceschanged: null,
+      getVoices() { if (vc) return vc; let L = []; try { L = JSON.parse(AND.voices() || '[]'); } catch (_) {} if (!L.length) return []; L.sort((a, b) => (b.q || 0) - (a.q || 0) || (a.net ? 1 : 0) - (b.net ? 1 : 0));
+        const seen = {}; vc = L.map(v => { const lang = String(v.lang || ''), n = (seen[lang] = (seen[lang] || 0) + 1); return { name: v.name, voiceURI: v.name, lang, localService: !v.net, default: false, label: `${lang} · voce ${n}${v.net ? ' (online)' : ''}` }; }); return vc; },
+      speak(u) { const id = 't' + (++seq); U.set(id, u); this.pending = true; const v = u.voice && u.voice.name ? u.voice.name : '';
+        AND.speak(id, String(u.text || ''), String(u.lang || (u.voice && u.voice.lang) || 'it-IT'), v, +u.rate || 1, +u.pitch || 1, true); },
+      cancel() { U.clear(); this.speaking = this.pending = false; try { AND.stopSpeak(); } catch (_) {} },
+      pause() { this.cancel(); }, resume() {},
+      addEventListener(t, f) { if (t === 'voiceschanged') this.onvoiceschanged = f; }, removeEventListener() {},
+    };
+    window.__androidTTS = (id, type) => { if (type === 'ready') { rdy = true; vc = null; if (typeof syn.onvoiceschanged === 'function') syn.onvoiceschanged(); return; }
+      const u = U.get(id); if (!u) return; if (type === 'start') { syn.speaking = true; fire(u, 'start'); return; }
+      U.delete(id); if (!U.size) syn.speaking = syn.pending = false; fire(u, type === 'error' ? 'error' : 'end'); };
+    try { Object.defineProperty(window, 'speechSynthesis', { configurable: true, get: () => syn }); } catch (_) {}
+    void rdy;
+  }
+}
+
+/* =========================================================
+   RIPASSO IN CUFFIA — dagli appunti l'IA scrive un mini podcast
+   a due voci (Giulia spiega, Marco fa le domande che faresti tu),
+   con esempi e trucchi per ricordare, e chiude con tre domande
+   lampo. Si ascolta in treno o in palestra: comandi anche dalla
+   schermata di blocco, velocità, testo che scorre, riprendi da
+   dove eri. Il copione resta salvato nella nota.
+   ========================================================= */
+const Pod = {
+  SPK: { A: ['Giulia', '👩‍🏫'], B: ['Marco', '🧑‍🎓'] },
+  src(n) { return (n.text || htmlToText(n.html || '')).replace(/\s+\n/g, '\n').trim(); },
+  hash(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return String(h); },
+  async make(n, focus) { const sample = await Cap.get('sample'); if (!sample) { aiUnavailable(); return null; } const txt = this.src(n).slice(0, 14000); if (txt.length < 120) { Island.toast({ icon: 'note', c: 'var(--orange)', t: 'Appunti troppo corti', s: 'Scrivi almeno qualche paragrafo', ms: 2600 }); return null; }
+    const r = await sample.json(`Trasforma questi appunti universitari in un mini podcast di ripasso in italiano, da ascoltare in cuffia (6-9 minuti).
+Due voci: "A" = Giulia, che spiega con chiarezza e calore; "B" = Marco, uno studente sveglio che fa le domande giuste, riassume con parole sue e a volte sbaglia per farsi correggere.
+Regole: copri TUTTI i concetti importanti degli appunti nell'ordine logico; ogni battuta massimo 3 frasi, linguaggio parlato e naturale; esempi concreti; un trucco per ricordare quando serve; le formule dille a parole (es. "F uguale m per a"); niente elenchi puntati, niente markdown, niente emoji. ${focus ? `Insisti soprattutto su: ${focus}.` : ''}
+Rispondi solo con un JSON {"title": titolo breve, "lines": [{"s": "A" o "B", "t": testo}] da 22 a 40 battute, "quiz": [{"q": domanda breve, "a": risposta in una frase}] esattamente 3}.
+
+APPUNTI («${n.title || 'senza titolo'}»):
+${txt}`, { cache: false, max_tokens: 6000 });
+    const lines = ((r && r.lines) || []).filter(x => x && x.t).map(x => ({ s: x.s === 'B' ? 'B' : 'A', t: String(x.t).replace(/[*_#`]/g, '').trim() })); if (lines.length < 6) throw { message: 'Copione troppo corto, riprova' };
+    n.pod = { at: Date.now(), h: this.hash(txt), title: String(r.title || n.title || 'Ripasso'), lines, quiz: ((r && r.quiz) || []).filter(q => q && q.q).slice(0, 3), pos: 0 }; save('note-' + n.id); return n.pod; },
+  /** two different voices of the right language when the device has them */
+  voices() { const all = ('speechSynthesis' in window) ? speechSynthesis.getVoices() : [], it = all.filter(v => /^it/i.test(v.lang || '')); const good = it.filter(v => /premium|enhanced|natural|neural|google/i.test(v.name)), pool = good.length >= 2 ? good : it;
+    const fem = pool.find(v => /alice|federica|elsa|isabella|paola|emma|chiara|female|donna|f\b/i.test(v.name)), mal = pool.find(v => v !== fem && /luca|diego|giorgio|cosimo|marco|male|uomo|m\b/i.test(v.name));
+    const a = fem || pool[0] || null, b = mal || pool.find(v => v !== a) || a; return { A: a, B: b, same: !a || a === b }; },
+};
+function podPlay(n) { const P = n.pod, L = P.lines; let i = Math.min(P.pos || 0, L.length - 1), playing = false, rate = S.profile.podRate || 1, q = -1, tok = 0; const V = Pod.voices();
+  const say = (text, who, done) => { const my = ++tok; try { speechSynthesis.cancel(); } catch (_) {} const u = new SpeechSynthesisUtterance(text); const v = V[who]; u.lang = (v && v.lang) || 'it-IT'; if (v) { try { u.voice = v; } catch (_) {} }
+    u.rate = rate * (who === 'B' ? 1.04 : 1); u.pitch = V.same ? (who === 'A' ? 1.12 : .86) : 1; u.onend = () => { if (my === tok) done && done(); }; u.onerror = e => { if (my === tok && e && e.error !== 'interrupted' && e.error !== 'canceled') done && done(); }; speechSynthesis.speak(u); };
+  const sh = openSheet({ title: '🎧 ' + P.title, wide: true, left: { label: 'Chiudi' }, onClose: () => { tok++; try { speechSynthesis.cancel(); } catch (_) {} P.pos = i; save('note-' + n.id); try { navigator.mediaSession.playbackState = 'none'; } catch (_) {} },
+    body: `<div class="pc-stage"><div class="pc-av" data-w="A"><span>${Pod.SPK.A[1]}</span><b>${Pod.SPK.A[0]}</b></div><div class="pc-wave"><i></i><i></i><i></i><i></i><i></i></div><div class="pc-av" data-w="B"><span>${Pod.SPK.B[1]}</span><b>${Pod.SPK.B[0]}</b></div></div>
+      <div class="pc-bar"><i id="pdP"></i></div>
+      <div class="pc-ctl"><button class="icon-btn" id="pdPrev" aria-label="Indietro">${ico('prev')}</button><button class="pc-play" id="pdGo" aria-label="Riproduci">${ico('play')}</button><button class="icon-btn" id="pdNext" aria-label="Avanti">${ico('next')}</button></div>
+      <div class="pc-opt">${seg('pdr', [[.9, '0,9×'], [1, '1×'], [1.2, '1,2×'], [1.4, '1,4×']], rate)}</div>
+      ${V.A ? '' : '<p class="pl-warn">Su questo dispositivo non trovo una voce italiana: installala nelle impostazioni di sintesi vocale. Intanto puoi leggere il testo qui sotto.</p>'}
+      <div class="pc-tx" id="pdT">${L.map((x, j) => `<p data-l="${j}" class="${x.s}"><b>${Pod.SPK[x.s][0]}</b> ${esc(x.t)}</p>`).join('')}${P.quiz.length ? `<div class="pc-quiz"><h4>⚡ Domande lampo</h4>${P.quiz.map((z, j) => `<div class="pc-q" data-q="${j}"><b>${esc(z.q)}</b><button class="btn sm" data-qa="${j}">Mostra risposta</button><p hidden>${esc(z.a)}</p></div>`).join('')}</div>` : ''}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn plain sm" id="pdRe">${ico('refresh', 'sm')}Rifai il copione</button></div>`,
+    onMount: el => { wireSeg(el, 'pdr', v => { rate = +v; S.profile.podRate = rate; save('profile'); if (playing) play(); });
+      $('#pdGo', el).onclick = () => playing ? pause() : play(); $('#pdPrev', el).onclick = () => { i = Math.max(0, i - 1); q = -1; playing ? play() : mark(); }; $('#pdNext', el).onclick = () => { i = Math.min(L.length - 1, i + 1); q = -1; playing ? play() : mark(); };
+      $$('[data-l]', el).forEach(p => p.onclick = () => { i = +p.dataset.l; q = -1; play(); });
+      $$('[data-qa]', el).forEach(b => b.onclick = () => { b.nextElementSibling.hidden = false; b.remove(); });
+      $('#pdRe', el).onclick = async () => { const f = prompt('Su cosa vuoi insistere? (lascia vuoto per rifarlo uguale)', '') ; if (f === null) return; pause(); const b = $('#pdRe', el); b.disabled = true; b.textContent = 'Riscrivo…'; try { await Pod.make(n, f.trim()); sh.close(); setTimeout(() => podPlay(n), 250); } catch (e) { aiError(e); b.disabled = false; } }; } });
+  const el = sh.el;
+  const mark = () => { $$('[data-l]', el).forEach(p => p.classList.toggle('on', +p.dataset.l === i && q < 0)); const cur = $(`[data-l="${i}"]`, el); if (cur && q < 0) cur.scrollIntoView({ block: 'center', behavior: 'smooth' }); $$('.pc-av', el).forEach(a => a.classList.toggle('on', playing && q < 0 && a.dataset.w === L[i].s)); $('#pdP', el).style.width = `${(i + 1) / L.length * 100}%`; el.classList.toggle('pc-on', playing); $('#pdGo', el).innerHTML = ico(playing ? 'pause' : 'play'); };
+  const quiz = () => { if (!P.quiz.length || q >= P.quiz.length - 1) { playing = false; mark(); P.pos = 0; save('note-' + n.id); Island.toast({ icon: 'check', c: 'var(--green)', t: 'Ripasso finito', s: P.quiz.length ? 'Com\'è andata con le domande lampo?' : '', ms: 2600 }); Game.add(10, 'Ripasso in cuffia', { icon: 'music' }); return; }
+    q++; const box = $(`[data-q="${q}"]`, el); if (box) { box.classList.add('on'); box.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+    say(`Domanda ${q + 1}. ${P.quiz[q].q}`, 'B', () => setTimeout(() => { if (!playing) return; const bt = box && $('[data-qa]', box); if (bt) bt.click(); say(P.quiz[q].a, 'A', () => setTimeout(() => playing && quiz(), 900)); }, 4500)); };
+  const step = () => { if (!playing) return; if (i >= L.length) { i = L.length - 1; return quiz(); } mark(); say(L[i].t, L[i].s, () => { i++; P.pos = Math.min(i, L.length - 1); if (i >= L.length) { i = L.length - 1; mark(); setTimeout(() => playing && quiz(), 700); } else setTimeout(step, 260); }); };
+  function play() { playing = true; q = -1; step(); media(); }
+  function pause() { playing = false; tok++; try { speechSynthesis.cancel(); } catch (_) {} mark(); try { navigator.mediaSession.playbackState = 'paused'; } catch (_) {} }
+  const media = () => { try { const M = navigator.mediaSession; if (!M) return; M.metadata = new MediaMetadata({ title: P.title, artist: 'Ripasso in cuffia · Orbita', album: n.title || 'Appunti', artwork: [{ src: 'icon-512.png', sizes: '512x512', type: 'image/png' }] }); M.playbackState = 'playing';
+    M.setActionHandler('play', play); M.setActionHandler('pause', pause); M.setActionHandler('nexttrack', () => $('#pdNext', el).click()); M.setActionHandler('previoustrack', () => $('#pdPrev', el).click()); } catch (_) {} };
+  mark(); return sh; }
+async function podOpen(n) { if (!n) return; const h = Pod.hash(Pod.src(n).slice(0, 14000));
+  if (n.pod && n.pod.lines && n.pod.lines.length) { if (n.pod.h !== h) Island.toast({ icon: 'note', c: 'var(--orange)', t: 'Gli appunti sono cambiati', s: 'Nel player tocca «Rifai il copione» per aggiornarlo', ms: 3200 }); return podPlay(n); }
+  const it = { icon: 'music', c: 'var(--orange)', t: 'Scrivo il copione del podcast…', s: 'Ci vuole circa mezzo minuto', ms: 45000 }; Island.toast(it);
+  /* the long “writing…” toast goes away as soon as the script is ready */
+  const drop = () => { const i = Island.q.indexOf(it); if (i >= 0) Island.q.splice(i, 1); else if (Island.busy && $('#island .i-t') && $('#island .i-t').textContent === it.t) { clearTimeout(Island.t); Island.busy = false; Island.run(); } };
+  try { const p = await Pod.make(n); drop(); if (p) podPlay(n); } catch (e) { drop(); aiError(e); } }
+function podPick() { const N = Object.values(S.notes || {}).filter(n => Pod.src(n).length >= 120).sort((a, b) => (b.updated || 0) - (a.updated || 0)).slice(0, 25);
+  openSheet({ title: '🎧 Ripasso in cuffia', left: { label: 'Chiudi' }, body: N.length ? `<p class="muted" style="margin:0;font-size:14px">Scegli gli appunti: ne faccio un mini podcast a due voci con le domande finali.</p><div class="list">${N.map(n => `<button class="row" data-pdn="${n.id}"><span class="tile-ico" style="background:var(--orange)">${n.pod ? '🎧' : ico('note')}</span><span class="grow" style="min-width:0"><div class="t">${esc(n.title || 'Senza titolo')}</div><div class="s">${n.pod ? `Pronto · ${n.pod.lines.length} battute` : `${Math.round(Pod.src(n).length / 1000 * 10) / 10}k caratteri`}</div></span>${ico('right', 'sm')}</button>`).join('')}</div>` : '<div class="empty">' + ico('note') + '<b>Nessun appunto abbastanza lungo</b><p>Scrivi o importa i tuoi appunti nelle Note.</p></div>',
+    onMount: (el, api) => $$('[data-pdn]', el).forEach(b => b.onclick = () => { api.close(); setTimeout(() => podOpen(S.notes[b.dataset.pdn]), 200); }) }); }
+ACT.podNote = () => podOpen(S.notes[UI.note]);
+ACT.podcast = () => podPick();
+CMD_ACT.push(['Ripasso in cuffia (podcast dagli appunti)', 'music', () => podPick()]);
+{ const V = VIEWS.notes, oR = V.render; V.render = function (...a) { const h = oR.apply(this, a); return h.replace('<button class="btn sm" data-act="editCards">', `<button class="btn sm" data-act="podNote" style="color:var(--orange)">🎧 Podcast</button><button class="btn sm" data-act="editCards">`); }; }
+/* in the exam session card: listen to your notes on the way */
+{ const oS = TODAY_EXTRA.session; if (oS) TODAY_EXTRA.session = () => String(oS() || '').replace('<button class="btn sm plain" data-act="sessOff">', `<button class="btn sm" data-act="podcast">🎧 Ripasso in cuffia</button><button class="btn sm plain" data-act="sessOff">`); }
 
 /* =========================================================
    ASSISTANT — "Segretario": Claude with page tools

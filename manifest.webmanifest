@@ -25,24 +25,67 @@
   ],
   "shortcuts": [
     {
+      "name": "Nuovo promemoria",
+      "short_name": "Promemoria",
+      "url": "./?new=task",
+      "icons": [
+        {
+          "src": "sc-task.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Parla con Orbita",
+      "short_name": "Parla",
+      "url": "./?new=voice",
+      "icons": [
+        {
+          "src": "sc-voice.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Fotografa uno scontrino",
+      "short_name": "Scontrino",
+      "url": "./?new=receipt",
+      "icons": [
+        {
+          "src": "sc-receipt.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Lezione di lingua",
+      "short_name": "Lingue",
+      "url": "./?new=lang",
+      "icons": [
+        {
+          "src": "sc-lang.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
       "name": "Aggiunta rapida",
       "short_name": "Aggiungi",
       "url": "./?new=quick"
     },
     {
-      "name": "Nuovo promemoria",
-      "short_name": "Promemoria",
-      "url": "./?new=task"
+      "name": "Ripasso in cuffia",
+      "short_name": "Ripasso",
+      "url": "./?new=podcast"
     },
     {
       "name": "Avvia 25 minuti di focus",
       "short_name": "Focus",
       "url": "./?focus=1"
-    },
-    {
-      "name": "Agenda di oggi",
-      "short_name": "Oggi",
-      "url": "./?view=today"
     }
   ]
 }
