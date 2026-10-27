@@ -21527,6 +21527,465 @@ CMD_ACT.push(['Ripasso in cuffia (podcast dagli appunti)', 'music', () => podPic
 { const oS = TODAY_EXTRA.session; if (oS) TODAY_EXTRA.session = () => String(oS() || '').replace('<button class="btn sm plain" data-act="sessOff">', `<button class="btn sm" data-act="podcast">🎧 Ripasso in cuffia</button><button class="btn sm plain" data-act="sessOff">`); }
 
 /* =========================================================
+   KIT D'ESAME DAL PDF — carichi dispense, slide o libro e
+   Orbita prepara tutto per l'appello:
+   — divide il materiale in capitoli (con le pagine) e li mette
+     nel piano di studio fino alla data dell'esame;
+   — per ogni capitolo una nota (riassunto, cose da sapere,
+     formule), le flashcard e il podcast di ripasso;
+   — la simulazione d'esame sul materiale e il formulario;
+   — il PDF finisce nei Documenti del corso.
+   ========================================================= */
+const ExKit = {
+  /** every page's text (up to 400 pages); scanned PDFs → a few page images */
+  async read(file, onP) { await loadScript(PDFJS); const lib = window.pdfjsLib; lib.GlobalWorkerOptions.workerSrc = PDFJS_W;
+    const pdf = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise, n = Math.min(pdf.numPages, 400), pages = [];
+    for (let p = 1; p <= n; p++) { const pg = await pdf.getPage(p); const tc = await pg.getTextContent(); pages.push(tc.items.map(i => i.str + (i.hasEOL ? '\n' : ' ')).join('').replace(/[ \t]+/g, ' ').trim()); if (onP && p % 5 === 0) onP(p, n); }
+    const chars = pages.join('').replace(/\s/g, '').length, images = [];
+    if (chars < n * 60) for (let p = 1; p <= Math.min(pdf.numPages, 12); p++) { const pg = await pdf.getPage(p), vp = pg.getViewport({ scale: 1.4 }), cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height; await pg.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise; images.push(await new Promise(r => cv.toBlob(r, 'image/jpeg', .8))); }
+    return { pages, total: pdf.numPages, read: n, scanned: images.length > 0, images }; },
+  /** pages → pieces the AI can read in one go (at most 10 pieces) */
+  chunks(pages) { const all = pages.reduce((s, p) => s + p.length, 0), size = Math.min(30000, Math.max(14000, Math.ceil(all / 10))), out = []; let cur = { a: 1, b: 0, t: '' };
+    pages.forEach((p, i) => { if (cur.t.length + p.length > size && cur.t) { out.push(cur); cur = { a: i + 1, b: i, t: '' }; } cur.t += `\n[pagina ${i + 1}]\n${p}`; cur.b = i + 1; }); if (cur.t.trim()) out.push(cur); return out.slice(0, 10); },
+  ASK: (exam, i, n, a, b) => `Sei un tutor universitario esperto. Questo è il pezzo ${i} di ${n} del materiale per l'esame di «${exam}» (pagine ${a}-${b}).
+Individua gli ARGOMENTI d'esame trattati in questo pezzo (da 1 a 6: veri capitoli o sottocapitoli, non frammenti). Per ciascuno:
+"title" breve come il titolo di un capitolo; "pages" es. "12-15"; "summary" 3-5 frasi chiare e corrette; "points" da 3 a 6 cose da sapere per l'esame (frasi brevi); "formulas" le formule importanti come [{"name": nome breve, "tex": formula in LaTeX senza $, "txt": la stessa formula leggibile in testo con simboli unicode (es. σ = M·y / I), "vars": cosa sono i simboli e le unità, in una riga}] (lista vuota se non ce ne sono); "cards" da 3 a 5 flashcard [{"q": domanda precisa, "a": risposta breve}]; "weight" da 1 a 3 (3 = argomento corposo o molto probabile all'esame); "exercises" SOLO se nel testo ci sono esercizi svolti o proposti su quell'argomento: al massimo 2, come [{"q": testo completo con i dati, "hints": [1-2 suggerimenti], "steps": [passaggi della soluzione], "answer": risultato finale con unità}] (lista vuota se non ce ne sono). Scrivi le formule in testo con simboli unicode, niente LaTeX negli esercizi.
+Scrivi in italiano. Rispondi solo con JSON {"topics": [...]}.`,
+  norm: s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/^(capitolo|cap\.?|lezione|unita|parte)\s*\d+[\s.:–-]*/, '').replace(/[^a-z0-9]+/g, ' ').trim(),
+  merge(list) { const out = []; for (const t of list) { if (!t || !t.title) continue; const k = this.norm(t.title), ex = out.find(o => this.norm(o.title) === k);
+      const clean = { title: String(t.title).slice(0, 90), pages: String(t.pages || ''), summary: String(t.summary || ''), points: (t.points || []).map(String).slice(0, 8), formulas: (t.formulas || []).filter(f => f && (f.tex || f.txt)), cards: (t.cards || []).filter(c => c && c.q && c.a).map(c => ({ q: String(c.q), a: String(c.a) })), weight: Math.max(1, Math.min(3, +t.weight || 2)), exercises: (t.exercises || []).filter(e => e && e.q && (e.answer || (e.steps || []).length)) };
+      if (ex) { if (clean.summary && !ex.summary.includes(clean.summary)) ex.summary += ' ' + clean.summary; ex.points.push(...clean.points); ex.formulas.push(...clean.formulas); ex.cards.push(...clean.cards); ex.exercises.push(...clean.exercises); ex.pages = this.span(ex.pages + ',' + clean.pages); ex.weight = Math.max(ex.weight, clean.weight); } else out.push(clean); }
+    /* the same chapter can show up in two neighbouring pieces: no repeats */
+    for (const t of out) { const u = (L, f) => { const seen = new Set(); return L.filter(x => { const k = f(x); if (!k || seen.has(k)) return false; seen.add(k); return true; }); };
+      t.points = u(t.points, x => this.norm(x)).slice(0, 8); t.cards = u(t.cards, c => this.norm(c.q)).slice(0, 8); t.formulas = u(t.formulas, f => Formula.key(f)); t.pages = this.span(t.pages); }
+    return out.slice(0, 40); },
+  span(p) { const N = String(p || '').match(/\d+/g); if (!N) return ''; const n = N.map(Number), a = Math.min(...n), b = Math.max(...n); return a === b ? String(a) : `${a}-${b}`; },
+  /** chapter → note with summary, points, formulas and flashcards */
+  noteHtml(t, file) { return `<p><i>Dal PDF «${esc(file)}»${t.pages ? `, pagine ${esc(t.pages)}` : ''}</i></p><h2>Riassunto</h2><p>${esc(t.summary)}</p>${t.points.length ? `<h2>Da sapere per l'esame</h2><ul>${t.points.map(p => `<li>${esc(p)}</li>`).join('')}</ul>` : ''}${t.formulas.length ? `<h2>Formule</h2>${t.formulas.map(f => `<p><b>${esc(f.name || '')}</b>${f.name ? ': ' : ''}${esc(f.txt || f.tex)}${f.vars ? `<br><i>${esc(f.vars)}</i>` : ''}</p>`).join('')}` : ''}`; },
+  course(x) { let c = StudyPlan.course(x); if (!c) { c = { id: uid(), name: x.name, prof: '', cfu: +x.cfu || 0, color: COURSE_COLORS[S.courses.length % COURSE_COLORS.length], topics: [], links: [], created: Date.now(), examId: x.id }; S.courses.push(c); save('courses'); } else if (!c.examId) { c.examId = x.id; save('courses'); } return c; },
+  /** everything that belongs to the kit of an exam */
+  of(x) { const c = StudyPlan.course(x); if (!c) return null; const N = Object.values(S.notes).filter(n => n.course === c.id && n.kit); return { c, notes: N, topics: (c.topics || []).filter(t => t.note && S.notes[t.note]) }; },
+  async build(x, files, ui) { const sample = await Cap.get('sample'); if (!sample) { aiUnavailable(); return null; } const c = this.course(x); let made = { topics: 0, cards: 0, formulas: 0, pages: 0 };
+    for (const [fi, file] of files.entries()) {
+      ui(`Leggo «${file.name}»…`, 0); let R;
+      try { R = await this.read(file, (p, n) => ui(`Leggo «${file.name}»: pagina ${p} di ${n}`, p / n * .15)); } catch (e) { ui(`Non riesco a leggere «${file.name}»`, 0, true); continue; }
+      made.pages += R.read; const T = [];
+      if (R.scanned) { ui(`«${file.name}» è una scansione: leggo le prime ${R.images.length} pagine come immagini`, .2);
+        for (let i = 0; i < R.images.length; i += 4) { try { const r = await sample.json(this.ASK(x.name, i / 4 + 1, Math.ceil(R.images.length / 4), i + 1, Math.min(R.images.length, i + 4)), { images: R.images.slice(i, i + 4), cache: false }); T.push(...((r && r.topics) || [])); } catch (e) { if (AIX && AIX.busy && AIX.busy(e)) await new Promise(r => setTimeout(r, 4000)); } ui(`Pagine ${i + 1}-${Math.min(R.images.length, i + 4)} lette`, .2 + .7 * (i + 4) / R.images.length); } }
+      else { const C = this.chunks(R.pages);
+        for (const [i, ch] of C.entries()) { ui(`Studio le pagine ${ch.a}-${ch.b} (${i + 1} di ${C.length})…`, .15 + .75 * i / C.length);
+          let r = null; for (let tr = 0; tr < 2 && !r; tr++) { try { r = await sample.json(this.ASK(x.name, i + 1, C.length, ch.a, ch.b) + `\n\nTESTO:\n${ch.t}`, { cache: false }); } catch (e) { if (tr) aiError(e); else await new Promise(z => setTimeout(z, 3500)); } }
+          const got = ((r && r.topics) || []); T.push(...got); if (got.length) ui(`Trovati: ${got.map(t => t.title).join(' · ')}`, .15 + .75 * (i + 1) / C.length); } }
+      const topics = this.merge(T); if (!topics.length) { ui(`Da «${file.name}» non ho ricavato argomenti`, .95, true); continue; }
+      ui('Preparo note, flashcard e piano di studio…', .95);
+      /* the PDF in Documenti, under the course */
+      try { const before = new Set(S.docs.map(d => d.id)), old = UI.docFilter; UI.docFilter = 'all'; await Docs.upload([file]); UI.docFilter = old; const d = S.docs.find(z => !before.has(z.id)); if (d) { d.subject = c.name; save('docs'); } } catch (_) {}
+      for (const t of topics) { const n = { id: uid(), title: t.title, html: this.noteHtml(t, file.name), text: [t.summary, ...t.points, ...t.formulas.map(f => f.txt || f.tex)].join(' '), updated: Date.now(), created: Date.now(), subject: c.name, course: c.id }; S.notes[n.id] = n; n.kit = x.id; n.cards = t.cards.slice(0, 8); n.pages = t.pages; n.src = file.name; n.ex = t.exercises.slice(0, 4).map(e => Ex.norm(e, 'pdf')); save('note-' + n.id);
+        const k = this.norm(t.title), ex = (c.topics ||= []).find(z => this.norm(z.t) === k); if (ex) { ex.note = n.id; ex.w = t.weight; } else c.topics.push({ t: t.title, st: 0, w: t.weight, note: n.id });
+        (c.formulas ||= []).push(...t.formulas.map(f => ({ id: uid(), topic: t.title, name: String(f.name || ''), tex: String(f.tex || ''), txt: String(f.txt || ''), vars: String(f.vars || '') })));
+        made.topics++; made.cards += n.cards.length; made.formulas += t.formulas.length; }
+      c.formulas = Formula.dedup(c.formulas || []); c.kit = { exam: x.id, at: Date.now(), files: [...((c.kit || {}).files || []), { name: file.name, pages: R.total, read: R.read }] }; save('courses');
+      Game.add(30, 'Kit d\'esame pronto', { icon: 'grad' }); void fi; }
+    App.refresh(); return made; },
+};
+/* ---------- the wizard ---------- */
+function kitNew(examId) { let x = examId ? S.exams.find(e => e.id === examId) : null, files = [];
+  const P = S.exams.filter(e => e.status === 'planned').sort((a, b) => String(a.date || '9').localeCompare(String(b.date || '9')));
+  const sh = openSheet({ title: '📘 Prepara l\'esame dal PDF', wide: true, left: { label: 'Annulla' }, body: '<div id="kitB" class="kit-b"></div>' }); const B = () => $('#kitB', sh.el);
+  const step1 = () => { B().innerHTML = `<p class="muted" style="margin:0">Carica dispense, slide o libro: li divido in capitoli, li metto nel piano di studio fino all'appello e per ogni capitolo preparo riassunto, flashcard e podcast. In più simulazione d'esame e formulario.</p>
+      <div class="section-h" style="margin:4px 0 0">Per quale esame?</div><div class="list">${P.map(e => `<button class="row" data-kx="${e.id}"><span class="tile-ico" style="background:var(--indigo)">${ico('grad')}</span><span class="grow"><div class="t">${esc(e.name)}</div><div class="s">${e.date ? `${fmtLong(e.date)} · tra ${dayDiff(todayK(), e.date)} giorni` : 'data da decidere'}${e.cfu ? ' · ' + e.cfu + ' CFU' : ''}</div></span>${ico('right', 'sm')}</button>`).join('')}<button class="row" data-kx="new"><span class="tile-ico" style="background:var(--green)">${ico('plus')}</span><span class="grow"><div class="t">Nuovo esame</div></span>${ico('right', 'sm')}</button></div>`;
+    $$('[data-kx]', B()).forEach(b => b.onclick = () => { if (b.dataset.kx === 'new') return stepNew(); x = S.exams.find(e => e.id === b.dataset.kx); x.date ? step2() : stepDate(); }); };
+  const stepNew = () => { B().innerHTML = `<div class="form-grid"><div class="field"><label for="kxN">Nome dell'esame</label><input class="input" id="kxN" placeholder="Es. Scienza delle costruzioni"></div><div class="field"><label for="kxD">Data dell'appello</label><input class="input" type="date" id="kxD" value="${addDK(todayK(), 30)}"></div><div class="field"><label for="kxC">CFU</label><input class="input" type="number" id="kxC" value="6" inputmode="numeric"></div></div><button class="btn primary" id="kxGo">Avanti</button>`;
+    $('#kxN', B()).focus(); $('#kxGo', B()).onclick = () => { const name = $('#kxN', B()).value.trim(); if (!name) return $('#kxN', B()).focus(); x = { id: uid(), name, cfu: +$('#kxC', B()).value || 6, status: 'planned', date: $('#kxD', B()).value || null, grade: null, created: Date.now() }; S.exams.push(x); save('exams'); step2(); }; };
+  const stepDate = () => { B().innerHTML = `<p style="margin:0">Quando c'è l'appello di <b>${esc(x.name)}</b>? Mi serve per distribuire lo studio.</p><input class="input" type="date" id="kxD" value="${addDK(todayK(), 30)}"><button class="btn primary" id="kxGo">Avanti</button>`; $('#kxGo', B()).onclick = () => { x.date = $('#kxD', B()).value || addDK(todayK(), 30); save('exams'); step2(); }; };
+  const step2 = () => { B().innerHTML = `<div class="kit-ex"><b>${esc(x.name)}</b><span class="muted">${fmtLong(x.date)} · tra ${dayDiff(todayK(), x.date)} giorni</span></div>
+      <label class="kit-drop" id="kxDrop"><input type="file" id="kxF" accept="application/pdf,.pdf" multiple hidden><span class="kit-dropi">📄</span><b>Scegli i PDF</b><small class="muted">Dispense, slide, capitoli del libro · anche più file · fino a 400 pagine l'uno</small></label>
+      <div class="list" id="kxL"></div><p class="muted" id="kxCost" style="margin:0;font-size:13px"></p><button class="btn primary" id="kxGo" disabled style="height:46px">${ico('spark', 'sm')}Prepara il kit</button>`;
+    const paint = () => { $('#kxL', B()).innerHTML = files.map((f, i) => `<div class="row"><span class="tile-ico" style="background:var(--red)">📄</span><span class="grow"><div class="t">${esc(f.name)}</div><div class="s">${Math.max(1, Math.round(f.size / 1024))} KB</div></span><button class="icon-btn" data-kfx="${i}" aria-label="Togli">${ico('x', 'sm')}</button></div>`).join(''); $$('[data-kfx]', B()).forEach(b => b.onclick = () => { files.splice(+b.dataset.kfx, 1); paint(); }); $('#kxGo', B()).disabled = !files.length; $('#kxCost', B()).textContent = files.length ? 'Per ogni PDF faccio da 1 a 10 richieste all\'IA, a seconda della lunghezza: qualche minuto in tutto.' : ''; };
+    $('#kxF', B()).onchange = e => { files.push(...[...e.target.files].filter(f => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name))); e.target.value = ''; paint(); };
+    const dz = $('#kxDrop', B()); dz.ondragover = e => { e.preventDefault(); dz.classList.add('over'); }; dz.ondragleave = () => dz.classList.remove('over'); dz.ondrop = e => { e.preventDefault(); dz.classList.remove('over'); files.push(...[...e.dataTransfer.files].filter(f => /\.pdf$/i.test(f.name))); paint(); };
+    $('#kxGo', B()).onclick = step3; paint(); };
+  const step3 = async () => { B().innerHTML = `<div class="kit-run"><div class="kit-orb"><span class="ai-orb"></span></div><b id="kxS">Inizio…</b><div class="kit-bar"><i id="kxP"></i></div><div class="kit-log" id="kxLog"></div><p class="muted" style="margin:0;font-size:13px">Puoi chiudere: continuo e ti avviso quando è pronto.</p></div>`;
+    const ui = (t, p, warn) => { const S2 = $('#kxS', sh.el); if (S2) { S2.textContent = t; $('#kxP', sh.el).style.width = Math.round(Math.min(1, p) * 100) + '%'; if (/^Trovati|^Da «|^Non riesco|scansione/.test(t)) $('#kxLog', sh.el).insertAdjacentHTML('beforeend', `<div class="${warn ? 'warn' : ''}">${warn ? '⚠️' : '✓'} ${esc(t)}</div>`); } };
+    const made = await ExKit.build(x, files, ui);
+    if (!made || !made.topics) { if (!sh.closed) ui('Non sono riuscito a preparare il kit: riprova o controlla l\'IA collegata', 1, true); return; }
+    Island.toast({ icon: 'grad', c: 'var(--green)', t: `Kit pronto: ${x.name}`, s: `${made.topics} capitoli · ${made.cards} flashcard`, action: { label: 'Apri', fn: () => kitOpen(x.id) }, ms: 6000 }); confetti(80);
+    if (!sh.closed) { sh.close(); setTimeout(() => kitOpen(x.id, made), 250); } };
+  x ? (x.date ? step2() : stepDate()) : step1(); return sh; }
+/* ---------- the kit of an exam ---------- */
+const KST = [['Da studiare', '⚪', 'var(--gray)'], ['Studiato', '🟡', 'var(--orange)'], ['Ripassato', '🟢', 'var(--green)']];
+function kitOpen(examId, made) { const x = S.exams.find(e => e.id === examId); if (!x) return; const K = ExKit.of(x); if (!K || !K.topics.length) return kitNew(examId);
+  const sh = openSheet({ title: '📘 ' + x.name, wide: true, left: { label: 'Chiudi' }, right: { label: 'Aggiungi PDF', primary: false, act: s => { s.close(); setTimeout(() => kitNew(x.id), 200); } }, body: '<div id="kitH" class="kit-b"></div>' });
+  const paint = () => { const K2 = ExKit.of(x), c = K2.c, T = K2.topics, left = x.date ? dayDiff(todayK(), x.date) : null, ready = Math.round((typeof Sess !== 'undefined' ? Sess.ready(x) : Courses.prog(c)) * 100), today = StudyPlan.day().find(p => p.x.id === x.id), due = T.reduce((s, t) => s + Srs.dueList(t.note).length, 0), done = T.filter(t => (t.st || 0) >= 1).length;
+    $('#kitH', sh.el).innerHTML = `${made ? `<div class="kit-made">✨ Ho preparato <b>${made.topics} capitoli</b>, <b>${made.cards} flashcard</b>${made.formulas ? ` e <b>${made.formulas} formule</b>` : ''} da ${made.pages} pagine. Lo studio è già nel piano fino all'appello.</div>` : ''}
+      <div class="kit-top"><div class="kit-k"><b class="tnum">${left != null ? (left <= 0 ? 'Oggi' : left) : '—'}</b><small>${left > 0 ? (left === 1 ? 'giorno' : 'giorni') : ''} all'esame</small></div><div class="kit-k"><b class="tnum">${ready}%</b><small>pronto</small></div><div class="kit-k"><b class="tnum">${done}/${T.length}</b><small>capitoli studiati</small></div><div class="kit-k"><b class="tnum">${today ? StudyPlan.fmt(today.min || today.want || 0) : '—'}</b><small>da studiare oggi</small></div></div>
+      ${today && today.topicsToday.length ? `<div class="kit-today">📌 Oggi: <b>${today.topicsToday.map(esc).join(', ')}</b>${today.isReview ? ' · ripasso finale' : ''}</div>` : ''}
+      <div class="kit-acts"><button class="btn primary" data-ka="focus">${ico('timer', 'sm')}Studia ora</button><button class="btn" data-ka="sim">🧪 Simulazione d'esame</button><button class="btn" data-ka="cards" ${due ? '' : 'disabled'}>🃏 Ripassa${due ? ' ' + due : ''}</button><button class="btn" data-ka="ex">✏️ Esercizi</button><button class="btn" data-ka="oral">🎤 Orale simulato</button><button class="btn" data-ka="formule">📐 Formulario</button><button class="btn" data-ka="map">🗺️ Mappa del corso</button><button class="btn" data-ka="cal">📅 Metti in calendario</button></div>
+      <div class="section-h" style="margin:4px 0 0">Capitoli</div>
+      <div class="list kit-list">${T.map((t, i) => { const n = S.notes[t.note], st = KST[t.st || 0], d = Srs.dueList(t.note).length; return `<div class="row kit-row"><button class="kit-st" data-kst="${i}" title="${st[0]}" style="--c:${st[2]}">${st[1]}</button><span class="grow" style="min-width:0"><div class="t">${'★'.repeat(t.w || 1)}<span class="kit-tt"> ${esc(t.t)}</span>${t.weak ? ' <span class="kit-weak" title="Punto debole all\'orale simulato">⚠️ da rinforzare</span>' : ''}</div><div class="s">${st[0]}${n.pages ? ` · pag. ${esc(n.pages)}` : ''}${(n.cards || []).length ? ` · ${n.cards.length} flashcard${d ? `, ${d} da ripassare` : ''}` : ''}${(n.ex || []).length ? ` · esercizi ${(n.ex || []).filter(e => e.ok).length}/${n.ex.length}` : ''}</div></span><button class="icon-btn" data-kn="${t.note}" aria-label="Apri la nota">${ico('note', 'sm')}</button>${(n.cards || []).length ? `<button class="icon-btn" data-kc="${t.note}" aria-label="Flashcard">${ico('cards', 'sm')}</button>` : ''}<button class="icon-btn" data-ke="${t.note}" aria-label="Esercizi">✏️</button><button class="icon-btn" data-kp="${t.note}" aria-label="Podcast">🎧</button></div>`; }).join('')}</div>
+      <p class="muted" style="margin:0;font-size:13px">★ = quanto pesa all'esame. Tocca il pallino per segnare un capitolo come studiato o ripassato: il piano si aggiorna da solo.${(c.kit && c.kit.files || []).length ? ` Fonti: ${c.kit.files.map(f => esc(f.name)).join(', ')}.` : ''}</p>`;
+    $$('[data-kst]', sh.el).forEach(b => b.onclick = () => { const t = T[+b.dataset.kst]; t.st = ((t.st || 0) + 1) % 3; save('courses'); if (t.st === 2) Game.add(5, 'Capitolo ripassato', { silent: true }); paint(); });
+    $$('[data-kn]', sh.el).forEach(b => b.onclick = () => { sh.close(); UI.note = b.dataset.kn; UI.noteEditing = false; go('notes'); });
+    $$('[data-kc]', sh.el).forEach(b => b.onclick = () => Srs.session(b.dataset.kc));
+    $$('[data-kp]', sh.el).forEach(b => b.onclick = () => podOpen(S.notes[b.dataset.kp]));
+    $$('[data-ka]', sh.el).forEach(b => b.onclick = () => { const a = b.dataset.ka;
+      if (a === 'focus') { sh.close(); StudyPlan.start(x.id); } if (a === 'sim') { sh.close(); simExam({ courseId: c.id }); } if (a === 'cards') { const L = T.map(t => [t.note, Srs.dueList(t.note).length]).filter(z => z[1]).sort((p, q) => q[1] - p[1]); if (L.length) Srs.session(L[0][0]); }
+      if (a === 'formule') formulaSheet(c.id); if (a === 'cal') { StudyPlan.schedule(7); }
+      if (a === 'ex') exPick(c.id); if (a === 'oral') { sh.close(); setTimeout(() => oralSim(c.id), 200); } if (a === 'map') { sh.close(); courseMap(c.id); } });
+    $$('[data-ke]', sh.el).forEach(b => b.onclick = () => exPlay(S.notes[b.dataset.ke])); };
+  paint(); return sh; }
+ACT.kitNew = () => kitNew(); ACT.kitPick = () => { const L = S.exams.filter(e => e.status === 'planned' && ExKit.of(e) && ExKit.of(e).topics.length); if (L.length === 1) return kitOpen(L[0].id); if (!L.length) return kitNew();
+  openSheet({ title: '📘 Kit d\'esame', left: { label: 'Chiudi' }, body: `<div class="list">${L.map(e => `<button class="row" data-kop="${e.id}"><span class="tile-ico" style="background:var(--indigo)">${ico('grad')}</span><span class="grow"><div class="t">${esc(e.name)}</div><div class="s">${e.date ? fmtLong(e.date) : ''} · ${ExKit.of(e).topics.length} capitoli</div></span>${ico('right', 'sm')}</button>`).join('')}<button class="row" data-kop="new"><span class="tile-ico" style="background:var(--green)">${ico('plus')}</span><span class="grow"><div class="t">Prepara un altro esame dal PDF</div></span></button></div>`,
+    onMount: (el, api) => $$('[data-kop]', el).forEach(b => b.onclick = () => { api.close(); setTimeout(() => b.dataset.kop === 'new' ? kitNew() : kitOpen(b.dataset.kop), 200); }) }); };
+CMD_ACT.push(['Prepara un esame dal PDF', 'grad', () => kitNew()], ['Kit d\'esame', 'grad', () => ACT.kitPick()]);
+/* in Esami e media: the button, and each planned exam's kit */
+{ const V = VIEWS.exams; if (V) { const oA = V.actions; V.actions = () => `<button class="btn sm" data-act="kitPick">📘<span class="hide-narrow">Dal PDF</span></button>` + (oA ? oA() : ''); } }
+/* in the exam-session card on Today */
+{ const oS = TODAY_EXTRA.session; if (oS) TODAY_EXTRA.session = () => { const h = String(oS() || ''); if (!h) return h; const s = Sess.get(); const k = s && s.exams.find(e => ExKit.of(e) && ExKit.of(e).topics.length); return h.replace('<button class="btn sm" data-act="podcast">', `${k ? `<button class="btn sm" data-act="kitOpenEl" data-id="${k.id}">📘 Kit ${esc(k.name)}</button>` : `<button class="btn sm" data-act="kitNew">📘 Prepara dal PDF</button>`}<button class="btn sm" data-act="podcast">`); }; }
+ACT.kitOpenEl = el => kitOpen(el.dataset.id);
+
+/* =========================================================
+   FORMULARIO — tutte le formule di un corso in un foglio pulito:
+   scritte bene (come sul libro), divise per argomento, con il
+   significato dei simboli e le unità. Le prende dal kit d'esame
+   e, a richiesta, dagli appunti del corso. Scegli colonne e
+   dimensione, togli quelle che non servono, stampa o salva in PDF.
+   ========================================================= */
+const KATEX = 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js', KATEX_CSS = 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css';
+const Formula = {
+  ok: null,
+  /** the maths font, when it can be loaded; otherwise the readable text version is used */
+  async tex() { if (this.ok !== null) return this.ok; try { if (!document.querySelector(`link[href="${KATEX_CSS}"]`)) { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = KATEX_CSS; document.head.appendChild(l); }
+      await Promise.race([loadScript(KATEX), new Promise((_, ko) => setTimeout(() => ko(new Error('timeout')), 7000))]); this.ok = !!window.katex; } catch (_) { this.ok = false; } return this.ok; },
+  html(f, display) { if (this.ok && window.katex && f.tex) { try { return window.katex.renderToString(f.tex, { throwOnError: true, displayMode: !!display, output: 'html', strict: 'ignore' }); } catch (_) {} } return `<span class="fx-txt">${esc(f.txt || f.tex || '')}</span>`; },
+  key: f => String(f.txt || f.tex || '').toLowerCase().replace(/\s+/g, '').replace(/[·*×]/g, ''),
+  dedup(L) { const seen = new Set(), out = []; for (const f of L) { const k = this.key(f); if (!k || seen.has(k)) continue; seen.add(k); out.push(f); } return out; },
+  /** look for formulas in the course notes (those not already in the kit) */
+  async fromNotes(c, onP) { const sample = await Cap.get('sample'); if (!sample) { aiUnavailable(); return 0; }
+    const N = Courses.notes(c).filter(n => !n.kit), txt = N.map(n => `## ${n.title}\n${(n.text || htmlToText(n.html || '')).slice(0, 6000)}`).join('\n\n');
+    if (txt.replace(/\s/g, '').length < 80) { Island.toast({ icon: 'note', c: 'var(--orange)', t: 'Negli appunti del corso non c\'è abbastanza testo', s: 'Usa «Dal PDF» per partire dalle dispense', ms: 3200 }); return 0; }
+    const parts = []; for (let i = 0; i < txt.length && parts.length < 5; i += 24000) parts.push(txt.slice(i, i + 24000)); let n = 0;
+    for (const [i, p] of parts.entries()) { onP && onP(i, parts.length);
+      try { const r = await sample.json(`Estrai TUTTE le formule importanti da questi appunti del corso «${c.name}» per un formulario d'esame. Correggi eventuali errori di battitura evidenti. Per ognuna: {"topic": argomento breve, "name": nome breve, "tex": LaTeX senza $, "txt": versione leggibile con simboli unicode, "vars": significato dei simboli e unità in una riga}. Rispondi solo con JSON {"formulas": [...]}.\n\n${p}`, { cache: false });
+        const F = ((r && r.formulas) || []).filter(f => f && (f.tex || f.txt)).map(f => ({ id: uid(), topic: String(f.topic || 'Altro'), name: String(f.name || ''), tex: String(f.tex || ''), txt: String(f.txt || ''), vars: String(f.vars || '') }));
+        const before = (c.formulas || []).length; c.formulas = this.dedup([...(c.formulas || []), ...F]); n += c.formulas.length - before; } catch (e) { aiError(e); break; } }
+    save('courses'); return n; },
+  groups(L) { const G = []; for (const f of L) { const t = f.topic || 'Altro'; let g = G.find(x => x.t === t); if (!g) G.push(g = { t, L: [] }); g.L.push(f); } return G; },
+  sheet(c, o, forPrint) { const L = (c.formulas || []).filter(f => !f.off), G = o.group ? this.groups(L) : [{ t: '', L }];
+    return `<div class="fx-paper ${o.size} ${forPrint ? 'print' : ''}" style="--cols:${o.cols}"><header class="fx-h"><b>${esc(c.name)}</b><span>Formulario · ${L.length} formule${forPrint ? '' : ''}</span></header><div class="fx-cols">${G.map(g => `<section class="fx-g">${g.t ? `<h4>${esc(g.t)}</h4>` : ''}${g.L.map(f => `<div class="fx-f" data-fx="${f.id}">${f.name ? `<small>${esc(f.name)}</small>` : ''}<div class="fx-m">${this.html(f, o.size !== 'tiny')}</div>${o.vars && f.vars ? `<em>${esc(f.vars)}</em>` : ''}</div>`).join('')}</section>`).join('')}</div><footer class="fx-ft">🪐 Orbita · ${dIt(todayK())}</footer></div>`; },
+};
+function formulaSheet(courseId) { const c = courseId ? Courses.get(courseId) : null;
+  if (!c) { const C = S.courses.filter(x => (x.formulas || []).length || Courses.notes(x).length); if (!C.length) { Island.toast({ icon: 'grad', c: 'var(--orange)', t: 'Nessun corso con appunti', s: 'Prepara un esame dal PDF o scrivi qualche nota', ms: 3000 }); return; } if (C.length === 1) return formulaSheet(C[0].id);
+    return openSheet({ title: '📐 Formulario', left: { label: 'Chiudi' }, body: `<p class="muted" style="margin:0;font-size:14px">Di quale corso?</p><div class="list">${C.map(x => `<button class="row" data-fxc="${x.id}"><span class="tile-ico" style="background:${x.color || 'var(--indigo)'}">📐</span><span class="grow"><div class="t">${esc(x.name)}</div><div class="s">${(x.formulas || []).length ? `${x.formulas.length} formule` : 'Le cerco negli appunti'}</div></span>${ico('right', 'sm')}</button>`).join('')}</div>`,
+      onMount: (el, api) => $$('[data-fxc]', el).forEach(b => b.onclick = () => { api.close(); setTimeout(() => formulaSheet(b.dataset.fxc), 200); }) }); }
+  const o = { cols: 2, size: 'normal', vars: true, group: true, ...(S.profile.fxOpt || {}) }, keep = () => { S.profile.fxOpt = o; save('profile'); };
+  const sh = openSheet({ title: '📐 Formulario · ' + c.name, wide: true, left: { label: 'Chiudi' }, right: { label: 'Stampa', act: () => print() }, body: `<div class="fx-bar"><div>${seg('fxc', [[1, '1 colonna'], [2, '2'], [3, '3']], o.cols)}</div><div>${seg('fxs', [['tiny', 'Compatto'], ['normal', 'Normale'], ['big', 'Grande']], o.size)}</div><label class="fx-ck"><input type="checkbox" id="fxV" ${o.vars ? 'checked' : ''}> Simboli e unità</label><label class="fx-ck"><input type="checkbox" id="fxG" ${o.group ? 'checked' : ''}> Per argomento</label></div><div id="fxBody"></div>` });
+  const B = () => $('#fxBody', sh.el);
+  const paint = () => { const all = c.formulas || [], off = all.filter(f => f.off).length;
+    B().innerHTML = all.length ? `<p class="muted fx-hint">Tocca una formula per toglierla dal foglio${off ? ` · ${off} tolte <button class="btn plain sm" id="fxAll">rimettile tutte</button>` : ''}.</p><div class="fx-wrap">${Formula.sheet(c, o)}</div>${off ? `<div class="fx-off">${all.filter(f => f.off).map(f => `<button class="chip" data-fxon="${f.id}">＋ ${esc(f.name || f.txt)}</button>`).join('')}</div>` : ''}
+      <div class="fx-acts"><button class="btn primary" id="fxP">${ico('printer', 'sm')}Stampa o salva PDF</button><button class="btn" id="fxN">${ico('note', 'sm')}Salva come nota</button><button class="btn" id="fxT">${ico('copy', 'sm')}Copia in LaTeX</button><button class="btn" id="fxA">${ico('spark', 'sm')}Cerca altre formule negli appunti</button></div>`
+      : `<div class="empty"><span style="font-size:42px">📐</span><b>Ancora nessuna formula per ${esc(c.name)}</b><p>Le cerco negli appunti del corso, oppure prepara il kit d'esame dal PDF delle dispense.</p><div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center"><button class="btn primary" id="fxA">${ico('spark', 'sm')}Cerca negli appunti</button><button class="btn" id="fxK">📘 Dal PDF</button></div></div>`;
+    $$('[data-fx]', B()).forEach(d => d.onclick = () => { const f = all.find(z => z.id === d.dataset.fx); if (f) { f.off = true; save('courses'); paint(); } });
+    $$('[data-fxon]', B()).forEach(d => d.onclick = () => { const f = all.find(z => z.id === d.dataset.fxon); if (f) { delete f.off; save('courses'); paint(); } });
+    const on = (id, fn) => { const e = $('#' + id, B()); if (e) e.onclick = fn; };
+    on('fxAll', () => { all.forEach(f => delete f.off); save('courses'); paint(); });
+    on('fxP', print); on('fxK', () => { sh.close(); const x = Courses.exam(c); setTimeout(() => kitNew(x && x.status === 'planned' ? x.id : null), 200); });
+    on('fxN', () => { const L = all.filter(f => !f.off), G = Formula.groups(L); const n = { id: uid(), title: `Formulario · ${c.name}`, html: G.map(g => `<h2>${esc(g.t)}</h2>${g.L.map(f => `<p><b>${esc(f.name || '')}</b>${f.name ? ': ' : ''}${esc(f.txt || f.tex)}${f.vars ? `<br><i>${esc(f.vars)}</i>` : ''}</p>`).join('')}`).join(''), text: L.map(f => `${f.name}: ${f.txt || f.tex}`).join(' '), updated: Date.now(), created: Date.now(), subject: c.name, course: c.id }; S.notes[n.id] = n; save('note-' + n.id); Island.toast({ icon: 'note', c: 'var(--green)', t: 'Formulario salvato nelle Note', action: { label: 'Apri', fn: () => { sh.close(); UI.note = n.id; UI.noteEditing = false; go('notes'); } }, ms: 3000 }); });
+    on('fxT', () => { const L = all.filter(f => !f.off); copyText(Formula.groups(L).map(g => `% ${g.t}\n` + g.L.map(f => `% ${f.name}${f.vars ? ' — ' + f.vars : ''}\n\\[ ${f.tex || f.txt} \\]`).join('\n')).join('\n\n')); Island.toast({ icon: 'copy', c: 'var(--green)', t: 'LaTeX copiato', ms: 1800 }); });
+    on('fxA', async () => { const b = $('#fxA', B()); b.disabled = true; const n = await Formula.fromNotes(c, (i, t) => { b.textContent = `Leggo gli appunti… ${i + 1}/${t}`; }); Island.toast({ icon: 'spark', c: n ? 'var(--green)' : 'var(--orange)', t: n ? `${n} formule trovate` : 'Nessuna formula nuova', ms: 2400 }); paint(); }); };
+  const print = () => { if (!(c.formulas || []).some(f => !f.off)) return; const area = document.createElement('div'); area.id = 'printArea'; area.innerHTML = Formula.sheet(c, o, true); document.body.appendChild(area); document.body.classList.add('print-mode');
+    const done = () => { document.body.classList.remove('print-mode'); area.remove(); window.removeEventListener('afterprint', done); }; window.addEventListener('afterprint', done); setTimeout(() => { window.print(); setTimeout(done, 1500); }, 150); };
+  wireSeg(sh.el, 'fxc', v => { o.cols = +v; keep(); paint(); }); wireSeg(sh.el, 'fxs', v => { o.size = v; keep(); paint(); });
+  $('#fxV', sh.el).onchange = e => { o.vars = e.target.checked; keep(); paint(); }; $('#fxG', sh.el).onchange = e => { o.group = e.target.checked; keep(); paint(); };
+  B().innerHTML = '<div class="empty"><span class="ai-orb"></span></div>'; Formula.tex().then(paint); return sh; }
+ACT.formulas = () => formulaSheet(); ACT.formulasC = el => formulaSheet(el.dataset.id);
+CMD_ACT.push(['Formulario', 'grad', () => formulaSheet()]);
+{ const V = VIEWS.courses; if (V) { const oA = V.actions; V.actions = () => `<button class="btn sm" data-act="formulas">📐<span class="hide-narrow">Formulario</span></button>` + (oA ? oA() : ''); } }
+
+/* =========================================================
+   PROVA DEL RIPRISTINO + BACKUP COMPLETO
+   — la prova: prepara la copia di sicurezza, la rilegge come se
+     la stessi ripristinando su un altro dispositivo e confronta
+     sezione per sezione con i dati di adesso; controlla anche che
+     i file dei Documenti si aprano davvero;
+   — si può provare anche un file di backup già salvato, senza
+     toccare niente;
+   — il backup completo (.zip) contiene anche i file dei Documenti,
+     e “Importa un backup” ora sa leggerlo.
+   ========================================================= */
+const BK = {
+  /** the same content as “Fai un backup” */
+  obj() { return { app: 'pitwall', name: 'Orbita', v: 2, at: new Date().toISOString(), ...Object.fromEntries(CORE.filter(k => k !== 'aikeys').map(k => [k, S[k]])), notes: S.notes, boards: S.boards, anns: S.anns, dtx: S.dtx }; },
+  LBL: { events: 'Eventi', tasks: 'Promemoria', exams: 'Esami', courses: 'Corsi', notes: 'Note', boards: 'Lavagne', docs: 'Documenti (elenco)', money: 'Finanze', health: 'Salute', habits: 'Abitudini', langs: 'Lingue', projects: 'Progetti', contacts: 'Rubrica', trips: 'Viaggi', journal: 'Diario', shop: 'Spesa', goals: 'Obiettivi', profile: 'Impostazioni e profilo', game: 'Livelli e progressi', meds: 'Farmaci', social: 'Social', spots: 'Posti', media: 'Da vedere e leggere', recipes: 'Ricette' },
+  count(v) { if (v == null) return 0; if (Array.isArray(v)) return v.length; if (typeof v === 'object') { if (Array.isArray(v.tx)) return v.tx.length; if (v.days && typeof v.days === 'object') return Object.keys(v.days).length; return Object.keys(v).length; } return 1; },
+  keys() { return [...new Set([...CORE.filter(k => k !== 'aikeys'), 'notes', 'boards', 'anns', 'dtx'])]; },
+  /** compare a backup (as read back) with the data now */
+  compare(j) { const out = []; for (const k of this.keys()) { const now = S[k], b = j[k]; if (now == null && b == null) continue;
+      const a = JSON.stringify(now ?? null), c = JSON.stringify(b ?? null), same = a === c, n1 = this.count(now), n2 = this.count(b);
+      out.push({ k, l: this.LBL[k] || TITLES[k] || { places: 'Promemoria per luogo', hours: 'Ore lavorate', mails: 'Email', routines: 'Routine', music: 'Musica', anns: 'Evidenziazioni nei PDF', dtx: 'Testo dei documenti', daypics: 'Foto del giorno', aikeys: 'Chiavi IA' }[k] || k, now: n1, bk: n2, same, missing: b == null && now != null }); }
+    return out.sort((x, y) => (x.same - y.same) || (y.now - x.now)); },
+  /** the files behind Documenti: can each one still be opened? */
+  async files() { const out = { ok: 0, bad: [], local: 0, cloud: 0, bytes: 0 };
+    for (const d of S.docs || []) { try { if (d.assetId) { out.cloud++; out.ok++; continue; } const b = await IDB.get(d.id); if (b && b.size != null) { out.ok++; out.local++; out.bytes += b.size; } else out.bad.push(d.name); } catch (_) { out.bad.push(d.name); } }
+    return out; },
+  /** backup + every Documenti file in one .zip */
+  async zip(onP) { const JSZip = await needLib('jszip', 'JSZip'), z = new JSZip(); z.file('orbita-backup.json', JSON.stringify(this.obj()));
+    let i = 0, n = 0; const L = S.docs || [];
+    for (const d of L) { i++; onP && onP(i, L.length); try { let b = null; if (d.assetId) { const u = await Docs.url(d); if (u) { const r = await fetch(u); if (r.ok) b = await r.blob(); } } else b = await IDB.get(d.id); if (b) { z.file(`documenti/${d.id}__${d.name.replace(/[\\/:*?"<>|]/g, '_')}`, b); n++; } } catch (_) {} }
+    const blob = await z.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 5 } }); return { blob, n }; },
+  async readZip(file) { const JSZip = await needLib('jszip', 'JSZip'), z = await JSZip.loadAsync(file), jf = z.file('orbita-backup.json'); if (!jf) throw new Error('manca orbita-backup.json');
+    const j = JSON.parse(await jf.async('string')), files = []; z.folder('documenti').forEach((p, f) => { if (!f.dir) files.push({ id: p.split('__')[0], f }); }); return { j, files }; },
+};
+function restoreTest() { let res = null;
+  const sh = openSheet({ title: '🛟 Prova del ripristino', wide: true, left: { label: 'Chiudi' }, body: '<div id="rtB" class="rt-b"></div>' }); const B = () => $('#rtB', sh.el);
+  const intro = () => { const last = S.profile.restoreTest; B().innerHTML = `<p style="margin:0">Controllo che la copia di sicurezza contenga davvero tutto e che si possa ripristinare: la preparo, la rileggo come farebbe un altro dispositivo e la confronto sezione per sezione con i tuoi dati di adesso. <b>Non cambio niente.</b></p>
+      ${last ? `<p class="muted" style="margin:0;font-size:14px">Ultima prova: ${dIt(last.k)} · ${last.ok ? '✅ tutto a posto' : '⚠️ c\'erano problemi'}</p>` : ''}
+      <div class="rt-acts"><button class="btn primary" id="rtGo" style="height:46px">${ico('check', 'sm')}Fai la prova</button><button class="btn" id="rtFile">${ico('upload', 'sm')}Prova un file di backup che hai già</button></div>`;
+    $('#rtGo', B()).onclick = run; $('#rtFile', B()).onclick = pick; };
+  const table = (rows, mode) => `<div class="rt-t">${rows.map(r => `<div class="rt-r ${r.same ? 'ok' : r.missing ? 'bad' : 'warn'}"><span>${r.same ? '✅' : r.missing ? '❌' : '⚠️'}</span><span class="grow">${esc(r.l)}</span><b class="tnum">${r.now.toLocaleString('it-IT')}</b>${mode === 'file' ? `<span class="tnum muted">${r.bk.toLocaleString('it-IT')}</span>` : ''}</div>`).join('')}</div>`;
+  const run = async () => { B().innerHTML = '<div class="empty"><span class="ai-orb"></span><b>Preparo la copia e la rileggo…</b></div>'; await new Promise(r => setTimeout(r, 60));
+    let j = null, size = 0, err = ''; try { const txt = JSON.stringify(BK.obj(), null, 1); size = txt.length; j = JSON.parse(txt); } catch (e) { err = String(e && e.message || e); }
+    const rows = j ? BK.compare(j) : [], F = await BK.files(), bad = rows.filter(r => !r.same), keys = typeof AIK !== 'undefined' && j && j.aikeys;
+    const ok = !err && !bad.length && !F.bad.length && !keys; res = { ok, k: todayK(), rows: rows.length, files: F.ok }; S.profile.restoreTest = res; save('profile');
+    B().innerHTML = `<div class="rt-v ${ok ? 'ok' : 'bad'}"><span>${ok ? '✅' : '⚠️'}</span><div><b>${ok ? 'Il ripristino funziona' : 'Ho trovato qualcosa da sistemare'}</b><small>${ok ? `Tutte le ${rows.length} sezioni tornano uguali, ${F.ok ? (F.ok === 1 ? 'e l\'unico file dei Documenti si apre' : `e tutti i ${F.ok} file dei Documenti si aprono`) : 'e non hai file nei Documenti'}.` : err ? 'La copia non si rilegge: ' + esc(err) : `${bad.length ? bad.length + ' sezioni non tornano uguali. ' : ''}${F.bad.length ? F.bad.length + ' documenti non si aprono più.' : ''}`}</small></div></div>
+      <div class="rt-facts"><div><b class="tnum">${(size / 1048576).toFixed(size > 1048576 ? 1 : 2).replace('.', ',')} MB</b><small>la copia</small></div><div><b class="tnum">${rows.length}</b><small>sezioni</small></div><div><b class="tnum">${F.ok}</b><small>file dei Documenti</small></div></div>
+      ${F.local ? `<p class="rt-n">📁 <b>${F.local} ${F.local === 1 ? 'documento è' : 'documenti sono'} solo su questo dispositivo</b> (${fmtSize(F.bytes)}): la copia normale salva l'elenco ma non i file. Per averli al sicuro usa il <b>backup completo</b>.</p>` : ''}
+      ${F.bad.length ? `<p class="rt-n bad">❌ Non si aprono più: ${F.bad.slice(0, 6).map(esc).join(', ')}${F.bad.length > 6 ? '…' : ''}. Se li hai altrove, caricali di nuovo.</p>` : ''}
+      <p class="rt-n">🔐 Le chiavi dell'intelligenza artificiale <b>${keys ? 'sono nella copia: non dovrebbe succedere' : 'non sono nella copia'}</b>${keys ? '' : ': restano cifrate nel tuo account, come deve essere'}.</p>
+      <details class="rt-d"><summary>Sezione per sezione</summary>${table(rows)}</details>
+      <div class="rt-acts"><button class="btn primary" id="rtZip">${ico('download', 'sm')}Backup completo con i documenti (.zip)</button><button class="btn" id="rtJson">${ico('download', 'sm')}Solo i dati (.json)</button><button class="btn plain" id="rtAgain">Rifai la prova</button></div>`;
+    wire(); if (ok) confetti(50); };
+  const wire = () => { const z = $('#rtZip', B()); if (z) z.onclick = () => ACT.backupZip(z); const j = $('#rtJson', B()); if (j) j.onclick = () => ACT.exportData(); const a = $('#rtAgain', B()); if (a) a.onclick = run; };
+  const pick = () => { const i = document.createElement('input'); i.type = 'file'; i.accept = '.json,.zip,application/json,application/zip'; i.onchange = async () => { const f = i.files[0]; if (!f) return; B().innerHTML = '<div class="empty"><span class="ai-orb"></span><b>Leggo il file…</b></div>';
+      try { let j, files = []; if (/\.zip$/i.test(f.name)) ({ j, files } = await BK.readZip(f)); else j = JSON.parse(await f.text()); if (!j || j.app !== 'pitwall') throw new Error('non è un backup di Orbita');
+        const rows = BK.compare(j), older = rows.filter(r => r.bk < r.now && !['profile', 'game', 'aikeys'].includes(r.k)), newer = rows.filter(r => r.bk > r.now), docsIn = files.length, docsAll = (j.docs || []).length;
+        B().innerHTML = `<div class="rt-v ${older.length ? 'warn' : 'ok'}"><span>${older.length ? '🕘' : '✅'}</span><div><b>Il file si legge ed è ripristinabile</b><small>Backup del ${new Date(j.at).toLocaleString('it-IT', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}${older.length ? ` · rispetto a oggi mancano dati in ${older.length} sezioni (normale se è vecchio)` : ''}</small></div></div>
+          <p class="rt-n">📁 ${docsAll ? (docsIn ? `Contiene ${docsIn} file dei Documenti su ${docsAll}.` : `Elenca ${docsAll} documenti ma <b>non contiene i file</b>: è un backup dei soli dati.`) : 'Nessun documento nel backup.'}</p>
+          <div class="rt-head"><span class="grow"></span><small>adesso</small><small>nel file</small></div>${table(rows, 'file')}
+          <p class="muted" style="margin:0;font-size:13px">Per ripristinarlo davvero: Impostazioni › I tuoi dati › Importa un backup. ${newer.length ? '' : ''}</p><div class="rt-acts"><button class="btn plain" id="rtBack">Indietro</button></div>`;
+        $('#rtBack', B()).onclick = intro; } catch (e) { B().innerHTML = `<div class="rt-v bad"><span>❌</span><div><b>Questo file non si può ripristinare</b><small>${esc(String(e && e.message || e))}</small></div></div><div class="rt-acts"><button class="btn" id="rtBack">Indietro</button></div>`; $('#rtBack', B()).onclick = intro; } };
+    i.click(); };
+  intro(); return sh; }
+ACT.restoreTest = () => restoreTest();
+ACT.backupZip = async btn => { const t0 = btn ? btn.innerHTML : ''; try { if (btn) btn.disabled = true; const { blob, n } = await BK.zip((i, t) => { if (btn) btn.textContent = `Preparo… ${i}/${t}`; }); await saveBlob(blob, `Orbita-backup-completo-${todayK()}.zip`); S.profile.lastBackup = todayK(); save('profile'); Island.toast({ icon: 'download', c: 'var(--green)', t: 'Backup completo salvato', s: `Dati + ${n} ${n === 1 ? 'documento' : 'documenti'}`, ms: 2800 }); }
+  catch (e) { Island.toast({ icon: 'x', c: 'var(--red)', t: 'Non riesco a creare lo zip', s: String(e && e.message || '').slice(0, 80), ms: 3200 }); } finally { if (btn) { btn.disabled = false; btn.innerHTML = t0; } } };
+/* “Importa un backup” also reads the complete .zip (data + documents) */
+Promise.resolve().then(() => { const oI = ACT.importData; ACT.importData = () => { /* after 80_ai.js, which defines the original */ const p = $('#importPick'); if (!p) return oI && oI(); p.accept = '.json,.zip,application/json,application/zip';
+    const chained = () => { const f = p.files && p.files[0]; if (!f || !/\.zip$/i.test(f.name)) return false; (async () => { try { const { j, files } = await BK.readZip(f); if (j.app !== 'pitwall') throw new Error('x');
+          openSheet({ title: 'Importa backup completo', body: `<p style="margin:0">Il backup del <b>${new Date(j.at).toLocaleDateString('it-IT')}</b> sostituirà i dati attuali: ${(j.events || []).length} eventi, ${(j.tasks || []).length} promemoria, ${(j.exams || []).length} esami, ${Object.keys(j.notes || {}).length} note, ${Object.keys(j.boards || {}).length} lavagne e <b>${files.length} file dei Documenti</b>.</p>`, left: { label: 'Annulla' }, right: { label: 'Importa', act: async s => {
+              const old = Store.docIdsLocal(); for (const k of CORE) if (j[k] != null) Store.apply(k, j[k]); S.notes = j.notes || {}; S.boards = j.boards || {}; if (j.anns) S.anns = j.anns; if (j.dtx) S.dtx = j.dtx;
+              let n = 0; for (const x of files) { try { const d = (S.docs || []).find(z => z.id === x.id); if (!d) continue; await IDB.put(d.id, await x.f.async('blob')); d.local = true; delete d.assetId; n++; } catch (_) {} } save('docs');
+              for (const id of new Set([...old, ...Store.docIdsLocal()])) save(id, 60); applyTheme(); s.close(); App.render(); Island.toast({ icon: 'upload', c: 'var(--green)', t: 'Backup completo importato', s: `${n} documenti ripristinati`, ms: 2800 }); } } }); }
+        catch (_) { Island.toast({ icon: 'x', c: 'var(--red)', t: 'File non valido', s: 'Scegli un backup esportato da Orbita', ms: 3000 }); } })(); return true; };
+    oI(); const prev = p.onchange; p.onchange = async e => { if (chained()) return; return prev && prev.call(p, e); }; }; });
+/* rows in Impostazioni › I tuoi dati */
+Promise.resolve().then(() => { const V = VIEWS.settings; if (!V) return; const oR = V.render;
+  V.render = function () { const h = oR.apply(this, arguments); if (h.includes('data-act="restoreTest"')) return h; const t = S.profile.restoreTest;
+    const row = `<button class="row" data-act="restoreTest"><span class="tile-ico" style="background:var(--green)">🛟</span><span class="grow"><div class="t">Prova del ripristino</div><div class="s">${t ? `Ultima prova ${dIt(t.k)}: ${t.ok ? 'tutto a posto' : 'da controllare'}` : 'Controlla che il backup contenga davvero tutto'}</div></span>${ico('right', 'sm chev')}</button><button class="row" data-act="backupZip"><span class="tile-ico" style="background:var(--teal)">${ico('download')}</span><span class="grow"><div class="t">Backup completo (.zip)</div><div class="s">Tutti i dati e i file dei Documenti in un file solo</div></span>${ico('right', 'sm chev')}</button>`;
+    const at = '<div class="section-h">I tuoi dati</div><div class="list flat">'; return h.includes(at) ? h.replace(at, at + row) : h; }; });
+CMD_ACT.push(['Prova del ripristino', 'check', () => restoreTest()], ['Backup completo con i documenti', 'download', () => ACT.backupZip()]);
+
+/* =========================================================
+   ORBITA SU MISURA — il menu impara cosa usi:
+   — conta quali sezioni apri davvero (solo su questo dispositivo)
+     e in “Personalizza il menu” propone “✨ Su misura per te”;
+   — le aree della prima configurazione comprendono anche le
+     sezioni nuove (Allenamento, Social…);
+   — quando arrivano sezioni nuove, Oggi te lo dice e scegli se
+     tenerle;
+   — le schede di Oggi di una sezione nascosta si nascondono con lei.
+   ========================================================= */
+{ const add = (a, ...ids) => { for (const id of ids) if (!NAVP[a].includes(id)) NAVP[a].push(id); }; add('salute', 'train'); add('lavoro', 'social'); add('studio', 'lang'); add('soldi', 'receipts'); }
+const NavUse = {
+  K: 'orbita.navUse', CORE: ['today', 'calendar', 'tasks', 'assistant', 'write', 'settings', 'account'],
+  get() { try { return JSON.parse(localStorage.getItem(this.K) || '{}'); } catch (_) { return {}; } },
+  hit(v) { if (!v || this.CORE.includes(v)) return; const U = this.get(), d = todayK(), x = U[v] || { n: 0, days: [] }; x.n++; if (x.days[x.days.length - 1] !== d) x.days.push(d); x.days = x.days.slice(-40); x.last = d; U[v] = x; try { localStorage.setItem(this.K, JSON.stringify(U)); } catch (_) {} },
+  /** sections opened on at least 2 different days in the last 30 */
+  mine() { const U = this.get(), from = addDK(todayK(), -30); return Object.entries(U).filter(([, x]) => (x.days || []).filter(k => k >= from).length >= 2).map(([v]) => v); },
+  all() { return NAV.flatMap(g => g.items.map(x => x[0])).filter(id => id !== 'today'); },
+  since() { const U = this.get(), days = Object.values(U).flatMap(x => x.days || []).sort(); return days[0] || null; },
+};
+{ const oG = go; go = function (v, o) { try { NavUse.hit(v); } catch (_) {} return oG(v, o); }; }
+/* “✨ Su misura per te” in Personalizza il menu */
+{ const oN = ACT.navEdit; ACT.navEdit = () => { const sh = oN(); const B = $('#neB', sh.el); if (!B) return sh;
+    const mine = NavUse.mine(), since = NavUse.since(), enough = since && dayDiff(since, todayK()) >= 7;
+    const box = document.createElement('div'); box.className = 'nu-box';
+    box.innerHTML = `<div><b>✨ Su misura per te</b><small>${enough ? `Negli ultimi 30 giorni hai usato davvero ${mine.length} ${mine.length === 1 ? 'sezione' : 'sezioni'}${mine.length ? ': ' + mine.slice(0, 6).map(v => esc(TITLES[v] || v)).join(', ') + (mine.length > 6 ? '…' : '') : ''}. Tengo quelle e le essenziali, nascondo il resto.` : 'Sto imparando quali sezioni usi: tra qualche giorno ti propongo un menu su misura. Intanto puoi scegliere tu qui sotto.'}</small></div>${enough && mine.length ? '<button class="btn sm primary" type="button">Applica</button>' : ''}`;
+    B.parentNode.insertBefore(box, B);
+    const btn = $('button', box); if (btn) btn.onclick = () => { const keep = new Set([...NavUse.CORE, ...mine]); for (const id of NavUse.all()) { const el = $('#nt_' + id, sh.el); if (el && (el.getAttribute('aria-pressed') === 'true') !== keep.has(id)) el.click(); } btn.textContent = 'Fatto ✓'; btn.disabled = true; Island.toast({ icon: 'spark', c: 'var(--accent)', t: `Menu con ${mine.length} sezioni + le essenziali`, s: 'Tocca Fine per salvarlo', ms: 2600 }); };
+    return sh; }; }
+/* new sections since you last chose: tell, and let you keep or hide them */
+Promise.resolve().then(() => { const P = S.profile, all = NavUse.all(); if (!P.navKnown) { P.navKnown = (P.hidden || []).length ? all.filter(id => !['train'].includes(id)) : all; save('profile'); } }); /* Allenamento arrived after many had already chosen their menu */
+TODAY_CARDS.navnew = 'Nuove sezioni nel menu'; if (!TODAY_DEFAULT.includes('navnew')) TODAY_DEFAULT.splice(1, 0, 'navnew');
+TODAY_EXTRA.navnew = () => { const P = S.profile; if (!P.navKnown || !(P.hidden || []).length) return ''; const N = NavUse.all().filter(id => !P.navKnown.includes(id)); if (!N.length) return '';
+  return `<section class="card span-12 nu-new"><div class="card-h"><h3>🆕 Nuove sezioni in Orbita</h3></div><p class="muted" style="margin:0 0 8px;font-size:14px">Da quando hai scelto il tuo menu sono arrivate queste. Le tengo?</p><div class="nu-l">${N.map(id => { const it = NAV.flatMap(g => g.items).find(x => x[0] === id); return `<div class="nu-i"><span class="tile-ico" style="background:var(--accent)">${ico(it ? it[2] : 'spark')}</span><b class="grow">${esc(TITLES[id] || (it && it[1]) || id)}</b><button class="btn sm" data-nuk="${id}" data-on="1">Tieni</button><button class="btn sm plain" data-nuk="${id}" data-on="0">Nascondi</button></div>`; }).join('')}</div></section>`; };
+document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('[data-nuk]'); if (!b) return; const P = S.profile, id = b.dataset.nuk; P.navKnown = [...new Set([...(P.navKnown || []), id])]; const H = new Set(P.hidden || []); b.dataset.on === '1' ? H.delete(id) : H.add(id); P.hidden = [...H]; save('profile'); App.render(); });
+/* Today cards follow their section: hidden section → hidden card */
+{ const VOF = { lang: 'lang', train: 'train', session: 'exams', exammode: 'exams', chal: 'shared', social: 'social', health: 'health', money: 'money', trips: 'trips' };
+  for (const [card, view] of Object.entries(VOF)) { const f = TODAY_EXTRA[card]; if (typeof f !== 'function') continue; TODAY_EXTRA[card] = function (...a) { if ((S.profile.hidden || []).includes(view) && !(S.profile.todayForce || []).includes(card)) return ''; return f.apply(this, a); }; } }
+
+/* =========================================================
+   STUDIO D'ESAME, ANCORA PIÙ VERO
+   — ESERCIZI: dagli appunti (e dagli esercizi trovati nel PDF)
+     esercizi tipo d'esame, uno alla volta: suggerimenti a gradini,
+     la tua soluzione scritta o in FOTO del foglio, correzione con
+     gli errori precisi, soluzione passo passo;
+   — ORALE SIMULATO: il professore ti interroga a voce sul
+     programma, incalza se la risposta è vaga e alla fine dà il
+     voto con i punti deboli (che finiscono nel kit d'esame);
+   — MAPPA DEL CORSO: i capitoli del kit e i loro collegamenti su
+     una lavagna.
+   ========================================================= */
+const Ex = {
+  norm(e, src) { return { id: uid(), q: String(e.q || ''), hints: (e.hints || []).map(String).slice(0, 3), steps: (e.steps || []).map(String).slice(0, 12), answer: String(e.answer || ''), src: src || 'ai', tries: [], ok: false }; },
+  text(n) { return (n.text || htmlToText(n.html || '')).slice(0, 9000); },
+  async gen(n, k = 3, level = 'esame') { const sample = await Cap.get('sample'); if (!sample) { aiUnavailable(); return 0; }
+    const old = (n.ex || []).map(e => '- ' + e.q.slice(0, 120)).join('\n');
+    const r = await sample.json(`Sei un docente universitario. Sul capitolo «${n.title}» prepara ${k} esercizi ${level === 'facile' ? 'di riscaldamento, semplici' : level === 'difficile' ? 'difficili, come le domande più toste d\'esame' : 'tipo d\'esame scritto'}, diversi tra loro e da quelli già fatti. Preferisci esercizi con dati numerici e risultato verificabile quando l'argomento lo permette; altrimenti domande di ragionamento con risposta precisa.
+Per ognuno: "q" testo completo con tutti i dati e le unità; "hints" 2 suggerimenti a gradini (il primo vago, il secondo quasi la strada); "steps" i passaggi della soluzione, uno per riga, con i conti; "answer" il risultato finale con unità.
+Scrivi la matematica in testo con simboli unicode (σ, ², √, ·, π…), niente LaTeX e niente markdown.
+Rispondi solo con JSON {"exercises": [...]}.
+${old ? `Già fatti (non ripeterli):\n${old}\n` : ''}
+APPUNTI:\n${this.text(n)}`, { cache: false });
+    const L = ((r && r.exercises) || []).filter(e => e && e.q && (e.answer || (e.steps || []).length)).map(e => this.norm(e)); n.ex = [...(n.ex || []), ...L]; save('note-' + n.id); return L.length; },
+  /** grade the student's work: written text and/or photos of the sheet */
+  async grade(n, e, ans, imgs) { const sample = await Cap.get('sample'); if (!sample) { aiUnavailable(); return null; }
+    return sample.json(`Correggi come un docente universitario equo e preciso. Esercizio:\n${e.q}\n\nSoluzione di riferimento:\n${e.steps.join('\n')}\nRisultato: ${e.answer}\n\nRisposta dello studente${imgs.length ? ' (nelle foto del foglio, più l\'eventuale testo)' : ''}:\n${ans || '(vedi foto)'}\n\nValuta il procedimento e il risultato (accetta arrotondamenti ragionevoli e metodi diversi ma corretti). Rispondi solo con JSON {"score": da 0 a 1, "verdict": una frase, "errors": [errori precisi, con il punto in cui sbaglia], "good": [cosa ha fatto bene], "tip": il consiglio più utile per la prossima volta}.`, imgs.length ? { images: imgs.slice(0, 3), cache: false } : { cache: false }); },
+};
+function exPick(courseId) { const c = Courses.get(courseId); if (!c) return; const T = (c.topics || []).filter(t => t.note && S.notes[t.note]);
+  openSheet({ title: '✏️ Esercizi · ' + c.name, left: { label: 'Chiudi' }, body: `<p class="muted" style="margin:0;font-size:14px">Scegli il capitolo. In alto quelli dove hai fatto meno esercizi.</p><div class="list">${T.slice().sort((a, b) => ((S.notes[a.note].ex || []).filter(e => e.ok).length - (S.notes[b.note].ex || []).filter(e => e.ok).length) || (b.w || 1) - (a.w || 1)).map(t => { const n = S.notes[t.note], E = n.ex || []; return `<button class="row" data-exn="${n.id}"><span class="tile-ico" style="background:var(--orange)">✏️</span><span class="grow" style="min-width:0"><div class="t">${esc(t.t)}${t.weak ? ' ⚠️' : ''}</div><div class="s">${E.length ? `${E.filter(e => e.ok).length} su ${E.length} risolti${E.some(e => e.src === 'pdf') ? ' · anche dal PDF' : ''}` : 'Ancora nessun esercizio'}</div></span>${ico('right', 'sm')}</button>`; }).join('')}</div>`,
+    onMount: (el, api) => $$('[data-exn]', el).forEach(b => b.onclick = () => { api.close(); setTimeout(() => exPlay(S.notes[b.dataset.exn]), 200); }) }); }
+async function exPlay(n) { if (!n) return; if (!(n.ex || []).some(e => !e.ok)) { Island.toast({ icon: 'spark', c: 'var(--orange)', t: 'Preparo gli esercizi…', s: n.title, ms: 9000 }); try { const k = await Ex.gen(n, 3); if (!k) return; } catch (e) { return aiError(e); } }
+  let i = Math.max(0, n.ex.findIndex(e => !e.ok)), hint = 0, step = 0, imgs = [], busy = false;
+  const sh = openSheet({ title: '✏️ ' + n.title, wide: true, left: { label: 'Chiudi' }, body: '<div id="exB" class="ex-b"></div>', onClose: () => imgs.forEach(x => URL.revokeObjectURL(x.u)) }); const B = () => $('#exB', sh.el);
+  const paint = (fb) => { const e = n.ex[i], L = n.ex.length;
+    B().innerHTML = `<div class="ex-top"><span class="ex-n">Esercizio ${i + 1} di ${L}${e.src === 'pdf' ? ' · dal PDF' : ''}</span><span class="ex-dots">${n.ex.map((z, j) => `<i class="${z.ok ? 'ok' : z.tries.length ? 'try' : ''} ${j === i ? 'cur' : ''}" data-exj="${j}"></i>`).join('')}</span></div>
+      <div class="ex-q">${esc(e.q).replace(/\n/g, '<br>')}</div>
+      ${e.hints.slice(0, hint).map((h, j) => `<div class="ex-h">💡 <b>Suggerimento ${j + 1}</b> ${esc(h)}</div>`).join('')}
+      <textarea class="input" id="exA" rows="4" placeholder="Scrivi il procedimento o almeno il risultato (es. σ = 120 MPa)…"></textarea>
+      <div class="ex-ph">${imgs.map((x, j) => `<span><img src="${x.u}" alt=""><button data-exrm="${j}" aria-label="Togli">✕</button></span>`).join('')}<label class="btn sm">${ico('scan', 'sm')}${imgs.length ? 'Altra foto' : 'Foto del foglio'}<input type="file" accept="image/*" capture="environment" id="exF" hidden multiple></label></div>
+      <div class="ex-acts">${hint < e.hints.length ? `<button class="btn" id="exH">💡 Suggerimento</button>` : ''}<button class="btn primary" id="exC">${ico('check', 'sm')}Correggi</button><button class="btn plain" id="exS">Mostra la soluzione</button></div>
+      <div id="exFb">${fb || ''}</div>
+      ${step ? `<div class="ex-sol"><b>Soluzione</b><ol>${e.steps.slice(0, step).map(s => `<li>${esc(s)}</li>`).join('')}</ol>${step >= e.steps.length ? `<div class="ex-ans">Risultato: <b>${esc(e.answer)}</b></div>` : `<button class="btn sm" id="exS2">Passaggio successivo</button>`}</div>` : ''}
+      <div class="ex-nav"><button class="btn plain" id="exP" ${i ? '' : 'disabled'}>${ico('left', 'sm')}Precedente</button><span class="grow"></span>${i < L - 1 ? `<button class="btn" id="exN">Prossimo${ico('right', 'sm')}</button>` : `<button class="btn" id="exMore">${ico('plus', 'sm')}Altri 3 esercizi</button>`}</div>`;
+    const on = (id, f) => { const x = $('#' + id, B()); if (x) x.onclick = f; };
+    on('exH', () => { hint++; paint($('#exFb', B()).innerHTML); }); on('exS', () => { step = Math.max(step, 1); paint($('#exFb', B()).innerHTML); }); on('exS2', () => { step++; paint($('#exFb', B()).innerHTML); });
+    on('exP', () => { i--; reset(); }); on('exN', () => { i++; reset(); }); $$('[data-exj]', B()).forEach(d => d.onclick = () => { i = +d.dataset.exj; reset(); });
+    on('exMore', async () => { const b = $('#exMore', B()); b.disabled = true; b.textContent = 'Preparo…'; try { const k = await Ex.gen(n, 3, n.ex.filter(z => z.ok).length >= 3 ? 'difficile' : 'esame'); if (k) { i = n.ex.length - k; reset(); } } catch (err) { aiError(err); b.disabled = false; } });
+    $('#exF', B()).onchange = ev => { for (const f of [...ev.target.files].slice(0, 3)) imgs.push({ f, u: URL.createObjectURL(f) }); paint($('#exFb', B()).innerHTML); };
+    $$('[data-exrm]', B()).forEach(x => x.onclick = () => { URL.revokeObjectURL(imgs[+x.dataset.exrm].u); imgs.splice(+x.dataset.exrm, 1); paint($('#exFb', B()).innerHTML); });
+    on('exC', async () => { if (busy) return; const ans = $('#exA', B()).value.trim(); if (!ans && !imgs.length) { $('#exA', B()).focus(); return; } busy = true; $('#exFb', B()).innerHTML = '<div class="ex-fb wait"><span class="ai-orb"></span> Correggo…</div>';
+      try { const r = await Ex.grade(n, e, ans, imgs.map(x => x.f)); busy = false; if (!r) return; const s = Math.max(0, Math.min(1, +r.score || 0)), ok = s >= .75;
+        e.tries.push({ at: Date.now(), s, h: hint }); if (ok && !e.ok) { e.ok = true; Game.add(hint ? 8 : 12, 'Esercizio risolto', { icon: 'check' }); if (n.ex.every(z => z.ok)) confetti(70); } save('note-' + n.id);
+        $('#exFb', B()).innerHTML = `<div class="ex-fb ${ok ? 'ok' : s >= .4 ? 'mid' : 'bad'}"><b>${ok ? '✅' : s >= .4 ? '🟡' : '❌'} ${Math.round(s * 100)}% · ${esc(r.verdict || '')}</b>${(r.good || []).length ? `<div>👍 ${r.good.map(esc).join(' · ')}</div>` : ''}${(r.errors || []).length ? `<ul>${r.errors.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}${r.tip ? `<div class="ex-tip">➡️ ${esc(r.tip)}</div>` : ''}</div>`;
+        $$('.ex-dots i', B())[i].className = `${e.ok ? 'ok' : 'try'} cur`; } catch (err) { busy = false; $('#exFb', B()).innerHTML = ''; aiError(err); } }); };
+  const reset = () => { hint = 0; step = 0; imgs.forEach(x => URL.revokeObjectURL(x.u)); imgs = []; paint(); };
+  paint(); return sh; }
+ACT.exNote = () => exPlay(S.notes[UI.note]);
+{ const V = VIEWS.notes, oR = V.render; V.render = function (...a) { const h = oR.apply(this, a); return h.replace('<button class="btn sm" data-act="podNote"', `<button class="btn sm" data-act="exNote" style="color:var(--orange)">✏️ Esercizi</button><button class="btn sm" data-act="podNote"`); }; }
+
+/* ---------- orale simulato ---------- */
+const Oral = {
+  material(c) { const T = (c.topics || []).filter(t => t.note && S.notes[t.note]); if (T.length) return { list: T.map(t => t.t), text: T.map(t => { const n = S.notes[t.note]; return `## ${t.t}${t.weak ? ' (punto debole)' : ''}\n${(n.text || htmlToText(n.html || '')).slice(0, 1600)}`; }).join('\n\n').slice(0, 16000) };
+    const N = Courses.notes(c); return { list: (c.topics || []).map(t => t.t), text: [`Programma: ${(c.topics || []).map(t => t.t).join('; ') || 'non indicato'}`, ...N.map(n => `## ${n.title}\n${(n.text || '').slice(0, 2500)}`)].join('\n\n').slice(0, 16000) }; },
+  sys(c, M, o) { return `Sei il professore che interroga all'esame ORALE di «${c.name}» all'università, in italiano. Stile: ${o.sev === 'gentile' ? 'gentile e incoraggiante' : o.sev === 'severo' ? 'severo e pignolo come un professore esigente, ma corretto' : 'cordiale ma esigente'}.
+Regole: fai ${o.n} domande principali su argomenti DIVERSI del programma (preferisci quelli importanti e i punti deboli). Una domanda per volta, breve e chiara come all'orale vero (niente elenchi). Se la risposta è vaga, incompleta o sbagliata, INCALZA con UNA domanda di approfondimento sullo stesso punto prima di cambiare argomento. Dai un riscontro brevissimo (una frase) prima della domanda successiva. Non dare mai la soluzione completa durante l'interrogazione. Parla come si parla, frasi brevi: il testo verrà letto ad alta voce.
+Rispondi SEMPRE e solo con JSON {"say": quello che dici ora, "topic": argomento della domanda, "followup": true se stai incalzando, "end": true solo dopo aver valutato l'ultima risposta (allora "say" è il congedo, senza voto)}.
+MATERIALE DEL CORSO:\n${M.text}`; },
+  async turn(c, M, o, hist) { const sample = await Cap.get('sample'); if (!sample) throw { code: 'not_configured' }; const last = hist.length ? hist.map(h => `${h.who === 'p' ? 'PROFESSORE' : 'STUDENTE'}: ${h.t}`).join('\n') : '(inizia tu: saluta in una frase e fai la prima domanda)';
+    return sample.json(`${this.sys(c, M, o)}\n\nINTERROGAZIONE FINORA (domande principali già fatte: ${hist.filter(h => h.who === 'p' && h.main).length} di ${o.n}):\n${last}`, { cache: false }); },
+  async verdict(c, M, hist) { const sample = await Cap.get('sample');
+    return sample.json(`Sei il professore di «${c.name}». Ecco l'interrogazione orale appena conclusa:\n${hist.map(h => `${h.who === 'p' ? 'PROFESSORE' : 'STUDENTE'}: ${h.t}`).join('\n')}\n\nDai il voto come all'esame (da 18 a 30, oppure 0 se insufficiente) con equità: conta la correttezza, la completezza e la chiarezza. Rispondi solo con JSON {"grade": numero, "lode": true/false, "summary": giudizio in 2 frasi, "strengths": [punti forti], "weak": [{"topic": argomento esattamente come nel programma se possibile, "why": cosa manca}], "advice": [2-3 consigli concreti per prepararsi]}.\nProgramma: ${M.list.join('; ')}`, { cache: false }); },
+};
+function oralSim(courseId) { const c = Courses.get(courseId); if (!c) return; const M = Oral.material(c); if (M.text.length < 200) { Island.toast({ icon: 'grad', c: 'var(--orange)', t: 'Serve materiale del corso', s: 'Prepara il kit dal PDF o scrivi qualche appunto', ms: 3000 }); return; }
+  const o = { n: 5, sev: 'normale', voice: SpeechX.ok() && 'speechSynthesis' in window, ...(S.profile.oral || {}) }; let hist = [], rec = null, speaking = false, done = false, t0 = 0;
+  const sh = openSheet({ title: '🎤 Orale · ' + c.name, wide: true, left: { label: 'Chiudi', act: s => { if (hist.length > 2 && !done && !confirm('Interrompere l\'interrogazione?')) return; s.close(); } }, onClose: () => { done = true; try { rec && rec.abort(); } catch (_) {} try { speechSynthesis.cancel(); } catch (_) {} }, body: '<div id="orB" class="or-b"></div>' });
+  const B = () => $('#orB', sh.el);
+  const setup = () => { B().innerHTML = `<div class="or-prof"><span>👨‍🏫</span></div><p style="margin:0;text-align:center">Il professore ti interroga sul programma di <b>${esc(c.name)}</b>, incalza se la risposta è vaga e alla fine ti dà il voto con i punti deboli.</p>
+      <div class="field"><span class="lbl">Domande</span>${seg('orn', [[3, '3'], [5, '5'], [7, '7']], o.n)}</div><div class="field"><span class="lbl">Professore</span>${seg('ors', [['gentile', 'Gentile'], ['normale', 'Normale'], ['severo', 'Severo']], o.sev)}</div>
+      <div class="row" style="padding:0">${toggleBtn('orV', o.voice)}<span class="grow t" style="margin-left:10px">A voce${SpeechX.ok() ? '' : ' (non disponibile qui: rispondi scrivendo)'}</span></div>
+      <button class="btn primary" id="orGo" style="height:48px">🎤 Inizia l'interrogazione</button>`;
+    wireSeg(B(), 'orn', v => o.n = +v); wireSeg(B(), 'ors', v => o.sev = v); wireToggle($('#orV', B()), v => o.voice = v && SpeechX.ok()); $('#orGo', B()).onclick = () => { S.profile.oral = { n: o.n, sev: o.sev, voice: o.voice }; save('profile'); stage(); next(); }; };
+  const stage = () => { B().innerHTML = `<div class="or-prof" id="orP"><span>👨‍🏫</span><i></i></div><div class="or-q" id="orQ"><span class="ai-orb"></span></div><div class="or-meta" id="orM"></div>
+      <div class="or-ans"><div class="or-heard" id="orH"></div><textarea class="input" id="orT" rows="3" placeholder="${o.voice ? 'Parla: scrivo io quello che dici (puoi anche correggere qui)' : 'Scrivi la tua risposta'}"></textarea><div class="or-btns">${o.voice ? `<button class="btn" id="orMic">${ico('mic', 'sm')}Parla</button>` : ''}<button class="btn primary" id="orSend">Ho finito</button></div></div>
+      <details class="or-log"><summary>Trascrizione</summary><div id="orL"></div></details>`;
+    $('#orSend', B()).onclick = send; const mb = $('#orMic', B()); if (mb) mb.onclick = () => rec ? stopRec() : listen(); };
+  const say = (t, cb) => { if (!o.voice || !('speechSynthesis' in window)) return cb && cb(); speaking = true; $('#orP', B()) && $('#orP', B()).classList.add('talk'); try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(t), v = speechSynthesis.getVoices().filter(x => /^it/i.test(x.lang || '')); u.lang = 'it-IT'; if (v.length) { const m = v.find(x => /luca|diego|giorgio|cosimo|male|uomo/i.test(x.name)) || v[0]; try { u.voice = m; } catch (_) {} } u.rate = 1.02; u.onend = u.onerror = () => { speaking = false; const p = $('#orP', B()); if (p) p.classList.remove('talk'); cb && cb(); }; speechSynthesis.speak(u); } catch (_) { speaking = false; cb && cb(); } };
+  const listen = () => { const SR = SpeechX.SR(); if (!SR || done) return; try { rec = new SR(); rec.lang = 'it-IT'; rec.continuous = true; rec.interimResults = true; let fin = $('#orT', B()).value ? $('#orT', B()).value + ' ' : '';
+      rec.onresult = e => { let it = ''; for (let k = e.resultIndex; k < e.results.length; k++) { const r = e.results[k]; if (r.isFinal) fin += r[0].transcript.trim() + ' '; else it += r[0].transcript; } $('#orT', B()).value = (fin + it).trim(); $('#orH', B()).textContent = it ? '…' + it.slice(-60) : ''; };
+      rec.onerror = e => { if (e.error === 'not-allowed') { o.voice = false; Island.toast({ icon: 'mic', c: 'var(--orange)', t: 'Microfono non disponibile', s: 'Rispondi scrivendo', ms: 2400 }); } };
+      rec.onend = () => { rec = null; const mb = $('#orMic', B()); if (mb) { mb.classList.remove('on'); mb.innerHTML = `${ico('mic', 'sm')}Parla`; } };
+      rec.start(); const mb = $('#orMic', B()); if (mb) { mb.classList.add('on'); mb.innerHTML = '⏺ Ti ascolto… tocca per fermare'; } } catch (_) { rec = null; } };
+  const stopRec = () => { try { rec && rec.stop(); } catch (_) {} };
+  const log = () => { const L = $('#orL', B()); if (L) L.innerHTML = hist.map(h => `<p class="${h.who}"><b>${h.who === 'p' ? '👨‍🏫' : '🧑‍🎓'}</b> ${esc(h.t)}</p>`).join(''); };
+  const next = async () => { if (done) return; const Q = $('#orQ', B()); Q.innerHTML = '<span class="ai-orb"></span>'; $('#orSend', B()).disabled = true;
+    let r; try { r = await Oral.turn(c, M, o, hist); } catch (e) { aiError(e); Q.textContent = 'Il professore non risponde: controlla l\'IA collegata e riprova.'; return; } if (done) return;
+    const said = String((r && r.say) || 'Prego, continui.'); hist.push({ who: 'p', t: said, main: !(r && r.followup) && !(r && r.end), topic: r && r.topic }); log();
+    const mains = hist.filter(h => h.who === 'p' && h.main).length; $('#orM', B()).textContent = r && r.end ? 'Fine dell\'interrogazione' : `Domanda ${Math.min(mains, o.n)} di ${o.n}${r && r.followup ? ' · approfondimento' : ''}${r && r.topic ? ' · ' + r.topic : ''}`;
+    Q.textContent = said; $('#orT', B()).value = ''; $('#orH', B()).textContent = '';
+    if (r && r.end) return say(said, () => finish());
+    $('#orSend', B()).disabled = false; t0 = Date.now(); say(said, () => { if (o.voice && !done) listen(); }); };
+  const send = () => { const t = $('#orT', B()).value.trim(); if (!t) { $('#orT', B()).focus(); return; } stopRec(); try { speechSynthesis.cancel(); } catch (_) {} hist.push({ who: 's', t, sec: Math.round((Date.now() - t0) / 1000) }); log(); setTimeout(next, rec ? 600 : 0); };
+  const finish = async () => { done = true; stopRec(); B().innerHTML = '<div class="empty"><span class="ai-orb"></span><b>Il professore sta decidendo il voto…</b></div>';
+    let v; try { v = await Oral.verdict(c, M, hist); } catch (e) { aiError(e); return; } const g = Math.round(+v.grade || 0), pass = g >= 18;
+    (c.sims ||= []).push({ d: todayK(), v: pass ? Math.min(30, g) : 0, n: hist.filter(h => h.who === 'p' && h.main).length, kind: 'orale' });
+    const weakT = (v.weak || []).map(w => String(w.topic || '')).filter(Boolean); for (const t of c.topics || []) { const k = ExKit.norm(t.t); if (weakT.some(w => { const z = ExKit.norm(w); return z && (k.includes(z) || z.includes(k)); })) { t.weak = true; if ((t.st || 0) > 1) t.st = 1; } } save('courses');
+    Game.add(25, 'Orale simulato', { icon: 'grad' }); if (pass && g >= 27) confetti(90);
+    B().innerHTML = `<div class="or-res"><div class="or-grade ${pass ? '' : 'ko'}"><b class="tnum">${pass ? g : '—'}</b><small>${pass ? (v.lode && g >= 30 ? 'e lode' : '/30') : 'non superato'}</small></div><p>${esc(v.summary || '')}</p></div>
+      ${(v.strengths || []).length ? `<div class="or-box ok"><b>👍 Punti forti</b><ul>${v.strengths.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+      ${(v.weak || []).length ? `<div class="or-box warn"><b>⚠️ Da rinforzare</b><ul>${v.weak.map(w => `<li><b>${esc(w.topic || '')}</b>${w.why ? ' — ' + esc(w.why) : ''}</li>`).join('')}</ul><small class="muted">Li ho segnati nel kit d'esame.</small></div>` : ''}
+      ${(v.advice || []).length ? `<div class="or-box"><b>➡️ Come prepararti</b><ul>${v.advice.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+      <details class="or-log"><summary>Rileggi l'interrogazione</summary>${hist.map(h => `<p class="${h.who}"><b>${h.who === 'p' ? '👨‍🏫' : '🧑‍🎓'}</b> ${esc(h.t)}</p>`).join('')}</details>
+      <div class="kit-acts"><button class="btn primary" id="orAgain">🎤 Un'altra interrogazione</button>${(v.weak || []).length ? '<button class="btn" id="orEx">✏️ Esercizi sui punti deboli</button>' : ''}</div>`;
+    $('#orAgain', B()).onclick = () => { hist = []; done = false; setup(); }; const ex = $('#orEx', B()); if (ex) ex.onclick = () => { const t = (c.topics || []).find(z => z.weak && z.note && S.notes[z.note]); sh.close(); if (t) setTimeout(() => exPlay(S.notes[t.note]), 200); else exPick(c.id); }; };
+  setup(); return sh; }
+ACT.oral = () => { const C = S.courses.filter(c => (c.topics || []).length || Courses.notes(c).length); if (C.length === 1) return oralSim(C[0].id); if (!C.length) { Island.toast({ icon: 'grad', c: 'var(--orange)', t: 'Prima aggiungi un corso con il programma o gli appunti', ms: 2800 }); return; }
+  openSheet({ title: '🎤 Orale simulato', left: { label: 'Chiudi' }, body: `<div class="list">${C.map(c => `<button class="row" data-orc="${c.id}"><span class="tile-ico" style="background:${c.color || 'var(--indigo)'}">🎤</span><span class="grow"><div class="t">${esc(c.name)}</div><div class="s">${(c.topics || []).length} argomenti${(c.sims || []).filter(s => s.kind === 'orale').length ? ' · ultimo orale ' + ((c.sims.filter(s => s.kind === 'orale').pop() || {}).v || '<18') : ''}</div></span>${ico('right', 'sm')}</button>`).join('')}</div>`,
+    onMount: (el, api) => $$('[data-orc]', el).forEach(b => b.onclick = () => { api.close(); setTimeout(() => oralSim(b.dataset.orc), 200); }) }); };
+
+/* ---------- mappa del corso ---------- */
+async function courseMap(courseId) { const c = Courses.get(courseId); if (!c) return; const T = (c.topics || []).filter(t => t.note && S.notes[t.note]);
+  if (!T.length) { const txt = Courses.notes(c).map(n => `${n.title}\n${n.text || ''}`).join('\n\n'); return mindMap(txt, c.name); }
+  const sample = await Cap.get('sample'); if (!sample) return aiUnavailable(); Island.toast({ icon: 'spark', c: 'var(--purple)', t: 'Disegno la mappa del corso…', ms: 4000 });
+  try { const r = await sample.json(`Crea la mappa concettuale del corso «${c.name}» per ripassare. Ecco i capitoli con i punti chiave. Rispondi solo con JSON {"t": nome del corso, "children": [uno per capitolo, nello stesso ordine: {"t": titolo del capitolo in max 4 parole, "children": [2-4 concetti chiave in max 5 parole ciascuno]}], "links": [3-8 collegamenti importanti TRA capitoli diversi: {"a": indice del primo capitolo (da 0), "b": indice del secondo, "t": il legame in max 4 parole}]}.\n\n${T.slice(0, 8).map((t, i) => `[${i}] ${t.t}: ${(S.notes[t.note].text || '').slice(0, 700)}`).join('\n\n')}`, { cache: false });
+    if (!r || !(r.children || []).length) throw new Error('mappa vuota');
+    r.children = r.children.slice(0, 8).map((k, i) => ({ ...k, t: `${(T[i] && (T[i].st || 0) >= 1) ? '✓ ' : ''}${k.t}` }));
+    const st = MMAP.build(r), n = r.children.length, R1 = 300, pos = i => { const a = -Math.PI / 2 + i * 2 * Math.PI / Math.max(1, n); return [Math.cos(a) * R1 * 1.25, Math.sin(a) * R1]; };
+    for (const l of (r.links || []).slice(0, 8)) { const a = +l.a, b = +l.b; if (!(a >= 0 && b >= 0 && a < n && b < n) || a === b) continue; const [x1, y1] = pos(a), [x2, y2] = pos(b), mx = (x1 + x2) / 2, my = (y1 + y2) / 2, cx = mx * .55, cy = my * .55;
+      /* a gentle bend away from the centre, made of two segments */
+      st.unshift({ t: 'line', c: '#8E8E93', w: 1.3, p: [x1 * .9, y1 * .9, .5, cx, cy, .5] }, { t: 'line', c: '#8E8E93', w: 1.3, p: [cx, cy, .5, x2 * .9, y2 * .9, .5] }); st.push({ t: 'txt', c: '#8E8E93', w: 12, s: String(l.t || '').slice(0, 30), p: [cx, cy - 10, 0] }); }
+    Board.create(); const b = S.boards[UI.board]; b.title = 'Mappa del corso · ' + c.name.slice(0, 40); b.bg = 'dots'; b.strokes = st; b.course = c.id; b.updated = Date.now(); Board.view = { x: 0, y: 0, s: 1 }; Board.mapCenter = true; save('board-' + b.id); go('boards');
+    [300, 900].forEach(ms => setTimeout(() => { try { if (Board.cv && Board.b && Board.b.id === b.id) Board.fit(); } catch (_) {} }, ms));
+    Island.toast({ icon: 'pencil', c: 'var(--green)', t: 'Mappa del corso sulla Lavagna', s: '✓ = capitoli già studiati · le linee grigie sono i collegamenti', ms: 3200 }); } catch (e) { aiError(e); } }
+ACT.courseMap = () => { const C = S.courses.filter(c => (c.topics || []).some(t => t.note) || Courses.notes(c).length); if (C.length === 1) return courseMap(C[0].id);
+  openSheet({ title: '🗺️ Mappa del corso', left: { label: 'Chiudi' }, body: C.length ? `<div class="list">${C.map(c => `<button class="row" data-cmc="${c.id}"><span class="tile-ico" style="background:${c.color || 'var(--indigo)'}">🗺️</span><span class="grow"><div class="t">${esc(c.name)}</div></span>${ico('right', 'sm')}</button>`).join('')}</div>` : '<p class="muted">Nessun corso con appunti.</p>', onMount: (el, api) => $$('[data-cmc]', el).forEach(b => b.onclick = () => { api.close(); courseMap(b.dataset.cmc); }) }); };
+CMD_ACT.push(['Orale simulato', 'mic', () => ACT.oral()], ['Mappa del corso', 'shape', () => ACT.courseMap()], ['Esercizi d\'esame', 'pencil', () => { const c = S.courses.find(z => (z.topics || []).some(t => t.note)); if (c) exPick(c.id); else Island.toast({ icon: 'grad', c: 'var(--orange)', t: 'Prepara prima un kit d\'esame dal PDF', s: 'oppure apri una nota e tocca ✏️ Esercizi', ms: 3000 }); }]);
+
+/* =========================================================
+   APERTURA PIÙ VELOCE — all'avvio Oggi veniva ridisegnato 4 volte
+   in 3 secondi (dati locali, calendari esterni, meteo…) anche
+   quando non cambiava niente: ogni volta il browser rifaceva tutta
+   l'impaginazione. Ora, se il risultato è identico, non si tocca
+   la pagina (niente lavoro inutile, niente sfarfallio, e restano
+   aperti i dettagli e la posizione). Lo stesso per il menu laterale
+   e la barra in basso.
+   ========================================================= */
+const Perf = { skipped: 0, last: null,
+  /** the element only rewrites itself when the new HTML is really different */
+  guard(el) { if (!el || el.__pg) return; el.__pg = 1; const D = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML'); let last = null;
+    Object.defineProperty(el, 'innerHTML', { configurable: true, get() { return D.get.call(this); }, set(v) { v = String(v); if (v === last && this.childNodes.length) { Perf.skipped++; return; } last = v; D.set.call(this, v); } }); },
+};
+Perf.guard($('#sidebar')); Perf.guard($('#tabbar'));
+{ const oR = App.render.bind(App);
+  App.render = function (scrollTop) { const v = VIEWS[UI.view];
+    if (UI.view !== 'today' || scrollTop || !v || !v.render) { Perf.last = null; return oR.apply(this, arguments); }
+    const out = v.render();
+    if (Perf.last && Perf.last.out === out && $('#view .view[data-v="today"]')) { Perf.skipped++; this.refreshChrome(); const a = v.actions ? v.actions() : ''; if ($('#topActions').innerHTML !== a) $('#topActions').innerHTML = a; return; }
+    Perf.last = { out }; const r0 = v.render; v.render = () => out; try { return oR.apply(this, arguments); } finally { v.render = r0; } }; }
+/* any change of data or of the page forgets the cache (the next render is always a real one) */
+{ const oG = go; go = function () { Perf.last = null; return oG.apply(this, arguments); }; }
+
+/* =========================================================
    ASSISTANT — "Segretario": Claude with page tools
    ========================================================= */
 const CAT_KEYS = Object.keys(CATS);
