@@ -21580,7 +21580,7 @@ Scrivi in italiano. Rispondi solo con JSON {"topics": [...]}.`,
       ui('Preparo note, flashcard e piano di studio…', .95);
       /* the PDF in Documenti, under the course */
       try { const before = new Set(S.docs.map(d => d.id)), old = UI.docFilter; UI.docFilter = 'all'; await Docs.upload([file]); UI.docFilter = old; const d = S.docs.find(z => !before.has(z.id)); if (d) { d.subject = c.name; save('docs'); } } catch (_) {}
-      for (const t of topics) { const n = { id: uid(), title: t.title, html: this.noteHtml(t, file.name), text: [t.summary, ...t.points, ...t.formulas.map(f => f.txt || f.tex)].join(' '), updated: Date.now(), created: Date.now(), subject: c.name, course: c.id }; S.notes[n.id] = n; n.kit = x.id; n.cards = t.cards.slice(0, 8); n.pages = t.pages; n.src = file.name; n.ex = t.exercises.slice(0, 4).map(e => Ex.norm(e, 'pdf')); save('note-' + n.id);
+      for (const t of topics) { const n = { id: uid(), title: t.title, html: this.noteHtml(t, file.name), text: [t.summary, ...t.points, ...t.formulas.map(f => f.txt || f.tex)].join(' '), updated: Date.now(), created: Date.now(), subject: c.name, course: c.id }; S.notes[n.id] = n; n.kit = x.id; n.cards = t.cards.slice(0, 8); n.pages = t.pages; n.src = file.name; n.exs = t.exercises.slice(0, 4).map(e => Ex.norm(e, 'pdf')); save('note-' + n.id);
         const k = this.norm(t.title), ex = (c.topics ||= []).find(z => this.norm(z.t) === k); if (ex) { ex.note = n.id; ex.w = t.weight; } else c.topics.push({ t: t.title, st: 0, w: t.weight, note: n.id });
         (c.formulas ||= []).push(...t.formulas.map(f => ({ id: uid(), topic: t.title, name: String(f.name || ''), tex: String(f.tex || ''), txt: String(f.txt || ''), vars: String(f.vars || '') })));
         made.topics++; made.cards += n.cards.length; made.formulas += t.formulas.length; }
@@ -21622,7 +21622,7 @@ function kitOpen(examId, made) { const x = S.exams.find(e => e.id === examId); i
       ${today && today.topicsToday.length ? `<div class="kit-today">📌 Oggi: <b>${today.topicsToday.map(esc).join(', ')}</b>${today.isReview ? ' · ripasso finale' : ''}</div>` : ''}
       <div class="kit-acts"><button class="btn primary" data-ka="focus">${ico('timer', 'sm')}Studia ora</button><button class="btn" data-ka="sim">🧪 Simulazione d'esame</button><button class="btn" data-ka="cards" ${due ? '' : 'disabled'}>🃏 Ripassa${due ? ' ' + due : ''}</button><button class="btn" data-ka="ex">✏️ Esercizi</button><button class="btn" data-ka="oral">🎤 Orale simulato</button><button class="btn" data-ka="formule">📐 Formulario</button><button class="btn" data-ka="map">🗺️ Mappa del corso</button><button class="btn" data-ka="cal">📅 Metti in calendario</button></div>
       <div class="section-h" style="margin:4px 0 0">Capitoli</div>
-      <div class="list kit-list">${T.map((t, i) => { const n = S.notes[t.note], st = KST[t.st || 0], d = Srs.dueList(t.note).length; return `<div class="row kit-row"><button class="kit-st" data-kst="${i}" title="${st[0]}" style="--c:${st[2]}">${st[1]}</button><span class="grow" style="min-width:0"><div class="t">${'★'.repeat(t.w || 1)}<span class="kit-tt"> ${esc(t.t)}</span>${t.weak ? ' <span class="kit-weak" title="Punto debole all\'orale simulato">⚠️ da rinforzare</span>' : ''}</div><div class="s">${st[0]}${n.pages ? ` · pag. ${esc(n.pages)}` : ''}${(n.cards || []).length ? ` · ${n.cards.length} flashcard${d ? `, ${d} da ripassare` : ''}` : ''}${(n.ex || []).length ? ` · esercizi ${(n.ex || []).filter(e => e.ok).length}/${n.ex.length}` : ''}</div></span><button class="icon-btn" data-kn="${t.note}" aria-label="Apri la nota">${ico('note', 'sm')}</button>${(n.cards || []).length ? `<button class="icon-btn" data-kc="${t.note}" aria-label="Flashcard">${ico('cards', 'sm')}</button>` : ''}<button class="icon-btn" data-ke="${t.note}" aria-label="Esercizi">✏️</button><button class="icon-btn" data-kp="${t.note}" aria-label="Podcast">🎧</button></div>`; }).join('')}</div>
+      <div class="list kit-list">${T.map((t, i) => { const n = S.notes[t.note], st = KST[t.st || 0], d = Srs.dueList(t.note).length; return `<div class="row kit-row"><button class="kit-st" data-kst="${i}" title="${st[0]}" style="--c:${st[2]}">${st[1]}</button><span class="grow" style="min-width:0"><div class="t">${'★'.repeat(t.w || 1)}<span class="kit-tt"> ${esc(t.t)}</span>${t.weak ? ' <span class="kit-weak" title="Punto debole all\'orale simulato">⚠️ da rinforzare</span>' : ''}</div><div class="s">${st[0]}${n.pages ? ` · pag. ${esc(n.pages)}` : ''}${(n.cards || []).length ? ` · ${n.cards.length} flashcard${d ? `, ${d} da ripassare` : ''}` : ''}${(n.exs || []).length ? ` · esercizi ${(n.exs || []).filter(e => e.ok).length}/${n.exs.length}` : ''}</div></span><button class="icon-btn" data-kn="${t.note}" aria-label="Apri la nota">${ico('note', 'sm')}</button>${(n.cards || []).length ? `<button class="icon-btn" data-kc="${t.note}" aria-label="Flashcard">${ico('cards', 'sm')}</button>` : ''}<button class="icon-btn" data-ke="${t.note}" aria-label="Esercizi">✏️</button><button class="icon-btn" data-kp="${t.note}" aria-label="Podcast">🎧</button></div>`; }).join('')}</div>
       <p class="muted" style="margin:0;font-size:13px">★ = quanto pesa all'esame. Tocca il pallino per segnare un capitolo come studiato o ripassato: il piano si aggiorna da solo.${(c.kit && c.kit.files || []).length ? ` Fonti: ${c.kit.files.map(f => esc(f.name)).join(', ')}.` : ''}</p>`;
     $$('[data-kst]', sh.el).forEach(b => b.onclick = () => { const t = T[+b.dataset.kst]; t.st = ((t.st || 0) + 1) % 3; save('courses'); if (t.st === 2) Game.add(5, 'Capitolo ripassato', { silent: true }); paint(); });
     $$('[data-kn]', sh.el).forEach(b => b.onclick = () => { sh.close(); UI.note = b.dataset.kn; UI.noteEditing = false; go('notes'); });
@@ -21836,30 +21836,33 @@ document.addEventListener('click', e => { const b = e.target.closest && e.target
    — MAPPA DEL CORSO: i capitoli del kit e i loro collegamenti su
      una lavagna.
    ========================================================= */
+/* exercises live in n.exs: n.ex is the “example” flag (Rimuovi esempi would delete the note) — move any old list over */
+function exFix() { try { for (const [id, n] of Object.entries(S.notes || {})) if (n && Array.isArray(n.ex)) { n.exs = [...(Array.isArray(n.exs) ? n.exs : []), ...n.ex]; delete n.ex; save('note-' + id); } } catch (_) {} }
+exFix(); { const oRE = removeExamples; removeExamples = function (...a) { exFix(); return oRE.apply(this, a); }; }
 const Ex = {
   norm(e, src) { return { id: uid(), q: String(e.q || ''), hints: (e.hints || []).map(String).slice(0, 3), steps: (e.steps || []).map(String).slice(0, 12), answer: String(e.answer || ''), src: src || 'ai', tries: [], ok: false }; },
   text(n) { return (n.text || htmlToText(n.html || '')).slice(0, 9000); },
   async gen(n, k = 3, level = 'esame') { const sample = await Cap.get('sample'); if (!sample) { aiUnavailable(); return 0; }
-    const old = (n.ex || []).map(e => '- ' + e.q.slice(0, 120)).join('\n');
+    const old = (n.exs || []).map(e => '- ' + e.q.slice(0, 120)).join('\n');
     const r = await sample.json(`Sei un docente universitario. Sul capitolo «${n.title}» prepara ${k} esercizi ${level === 'facile' ? 'di riscaldamento, semplici' : level === 'difficile' ? 'difficili, come le domande più toste d\'esame' : 'tipo d\'esame scritto'}, diversi tra loro e da quelli già fatti. Preferisci esercizi con dati numerici e risultato verificabile quando l'argomento lo permette; altrimenti domande di ragionamento con risposta precisa.
 Per ognuno: "q" testo completo con tutti i dati e le unità; "hints" 2 suggerimenti a gradini (il primo vago, il secondo quasi la strada); "steps" i passaggi della soluzione, uno per riga, con i conti; "answer" il risultato finale con unità.
 Scrivi la matematica in testo con simboli unicode (σ, ², √, ·, π…), niente LaTeX e niente markdown.
 Rispondi solo con JSON {"exercises": [...]}.
 ${old ? `Già fatti (non ripeterli):\n${old}\n` : ''}
 APPUNTI:\n${this.text(n)}`, { cache: false });
-    const L = ((r && r.exercises) || []).filter(e => e && e.q && (e.answer || (e.steps || []).length)).map(e => this.norm(e)); n.ex = [...(n.ex || []), ...L]; save('note-' + n.id); return L.length; },
+    const L = ((r && r.exercises) || []).filter(e => e && e.q && (e.answer || (e.steps || []).length)).map(e => this.norm(e)); n.exs = [...(n.exs || []), ...L]; save('note-' + n.id); return L.length; },
   /** grade the student's work: written text and/or photos of the sheet */
   async grade(n, e, ans, imgs) { const sample = await Cap.get('sample'); if (!sample) { aiUnavailable(); return null; }
     return sample.json(`Correggi come un docente universitario equo e preciso. Esercizio:\n${e.q}\n\nSoluzione di riferimento:\n${e.steps.join('\n')}\nRisultato: ${e.answer}\n\nRisposta dello studente${imgs.length ? ' (nelle foto del foglio, più l\'eventuale testo)' : ''}:\n${ans || '(vedi foto)'}\n\nValuta il procedimento e il risultato (accetta arrotondamenti ragionevoli e metodi diversi ma corretti). Rispondi solo con JSON {"score": da 0 a 1, "verdict": una frase, "errors": [errori precisi, con il punto in cui sbaglia], "good": [cosa ha fatto bene], "tip": il consiglio più utile per la prossima volta}.`, imgs.length ? { images: imgs.slice(0, 3), cache: false } : { cache: false }); },
 };
 function exPick(courseId) { const c = Courses.get(courseId); if (!c) return; const T = (c.topics || []).filter(t => t.note && S.notes[t.note]);
-  openSheet({ title: '✏️ Esercizi · ' + c.name, left: { label: 'Chiudi' }, body: `<p class="muted" style="margin:0;font-size:14px">Scegli il capitolo. In alto quelli dove hai fatto meno esercizi.</p><div class="list">${T.slice().sort((a, b) => ((S.notes[a.note].ex || []).filter(e => e.ok).length - (S.notes[b.note].ex || []).filter(e => e.ok).length) || (b.w || 1) - (a.w || 1)).map(t => { const n = S.notes[t.note], E = n.ex || []; return `<button class="row" data-exn="${n.id}"><span class="tile-ico" style="background:var(--orange)">✏️</span><span class="grow" style="min-width:0"><div class="t">${esc(t.t)}${t.weak ? ' ⚠️' : ''}</div><div class="s">${E.length ? `${E.filter(e => e.ok).length} su ${E.length} risolti${E.some(e => e.src === 'pdf') ? ' · anche dal PDF' : ''}` : 'Ancora nessun esercizio'}</div></span>${ico('right', 'sm')}</button>`; }).join('')}</div>`,
+  openSheet({ title: '✏️ Esercizi · ' + c.name, left: { label: 'Chiudi' }, body: `<p class="muted" style="margin:0;font-size:14px">Scegli il capitolo. In alto quelli dove hai fatto meno esercizi.</p><div class="list">${T.slice().sort((a, b) => ((S.notes[a.note].exs || []).filter(e => e.ok).length - (S.notes[b.note].exs || []).filter(e => e.ok).length) || (b.w || 1) - (a.w || 1)).map(t => { const n = S.notes[t.note], E = n.exs || []; return `<button class="row" data-exn="${n.id}"><span class="tile-ico" style="background:var(--orange)">✏️</span><span class="grow" style="min-width:0"><div class="t">${esc(t.t)}${t.weak ? ' ⚠️' : ''}</div><div class="s">${E.length ? `${E.filter(e => e.ok).length} su ${E.length} risolti${E.some(e => e.src === 'pdf') ? ' · anche dal PDF' : ''}` : 'Ancora nessun esercizio'}</div></span>${ico('right', 'sm')}</button>`; }).join('')}</div>`,
     onMount: (el, api) => $$('[data-exn]', el).forEach(b => b.onclick = () => { api.close(); setTimeout(() => exPlay(S.notes[b.dataset.exn]), 200); }) }); }
-async function exPlay(n) { if (!n) return; if (!(n.ex || []).some(e => !e.ok)) { Island.toast({ icon: 'spark', c: 'var(--orange)', t: 'Preparo gli esercizi…', s: n.title, ms: 9000 }); try { const k = await Ex.gen(n, 3); if (!k) return; } catch (e) { return aiError(e); } }
-  let i = Math.max(0, n.ex.findIndex(e => !e.ok)), hint = 0, step = 0, imgs = [], busy = false;
+async function exPlay(n) { if (!n) return; exFix(); if (!(n.exs || []).some(e => !e.ok)) { Island.toast({ icon: 'spark', c: 'var(--orange)', t: 'Preparo gli esercizi…', s: n.title, ms: 9000 }); try { const k = await Ex.gen(n, 3); if (!k) return; } catch (e) { return aiError(e); } }
+  let i = Math.max(0, n.exs.findIndex(e => !e.ok)), hint = 0, step = 0, imgs = [], busy = false;
   const sh = openSheet({ title: '✏️ ' + n.title, wide: true, left: { label: 'Chiudi' }, body: '<div id="exB" class="ex-b"></div>', onClose: () => imgs.forEach(x => URL.revokeObjectURL(x.u)) }); const B = () => $('#exB', sh.el);
-  const paint = (fb) => { const e = n.ex[i], L = n.ex.length;
-    B().innerHTML = `<div class="ex-top"><span class="ex-n">Esercizio ${i + 1} di ${L}${e.src === 'pdf' ? ' · dal PDF' : ''}</span><span class="ex-dots">${n.ex.map((z, j) => `<i class="${z.ok ? 'ok' : z.tries.length ? 'try' : ''} ${j === i ? 'cur' : ''}" data-exj="${j}"></i>`).join('')}</span></div>
+  const paint = (fb) => { const e = n.exs[i], L = n.exs.length;
+    B().innerHTML = `<div class="ex-top"><span class="ex-n">Esercizio ${i + 1} di ${L}${e.src === 'pdf' ? ' · dal PDF' : ''}</span><span class="ex-dots">${n.exs.map((z, j) => `<i class="${z.ok ? 'ok' : z.tries.length ? 'try' : ''} ${j === i ? 'cur' : ''}" data-exj="${j}"></i>`).join('')}</span></div>
       <div class="ex-q">${esc(e.q).replace(/\n/g, '<br>')}</div>
       ${e.hints.slice(0, hint).map((h, j) => `<div class="ex-h">💡 <b>Suggerimento ${j + 1}</b> ${esc(h)}</div>`).join('')}
       <textarea class="input" id="exA" rows="4" placeholder="Scrivi il procedimento o almeno il risultato (es. σ = 120 MPa)…"></textarea>
@@ -21871,12 +21874,12 @@ async function exPlay(n) { if (!n) return; if (!(n.ex || []).some(e => !e.ok)) {
     const on = (id, f) => { const x = $('#' + id, B()); if (x) x.onclick = f; };
     on('exH', () => { hint++; paint($('#exFb', B()).innerHTML); }); on('exS', () => { step = Math.max(step, 1); paint($('#exFb', B()).innerHTML); }); on('exS2', () => { step++; paint($('#exFb', B()).innerHTML); });
     on('exP', () => { i--; reset(); }); on('exN', () => { i++; reset(); }); $$('[data-exj]', B()).forEach(d => d.onclick = () => { i = +d.dataset.exj; reset(); });
-    on('exMore', async () => { const b = $('#exMore', B()); b.disabled = true; b.textContent = 'Preparo…'; try { const k = await Ex.gen(n, 3, n.ex.filter(z => z.ok).length >= 3 ? 'difficile' : 'esame'); if (k) { i = n.ex.length - k; reset(); } } catch (err) { aiError(err); b.disabled = false; } });
+    on('exMore', async () => { const b = $('#exMore', B()); b.disabled = true; b.textContent = 'Preparo…'; try { const k = await Ex.gen(n, 3, n.exs.filter(z => z.ok).length >= 3 ? 'difficile' : 'esame'); if (k) { i = n.exs.length - k; reset(); } } catch (err) { aiError(err); b.disabled = false; } });
     $('#exF', B()).onchange = ev => { for (const f of [...ev.target.files].slice(0, 3)) imgs.push({ f, u: URL.createObjectURL(f) }); paint($('#exFb', B()).innerHTML); };
     $$('[data-exrm]', B()).forEach(x => x.onclick = () => { URL.revokeObjectURL(imgs[+x.dataset.exrm].u); imgs.splice(+x.dataset.exrm, 1); paint($('#exFb', B()).innerHTML); });
     on('exC', async () => { if (busy) return; const ans = $('#exA', B()).value.trim(); if (!ans && !imgs.length) { $('#exA', B()).focus(); return; } busy = true; $('#exFb', B()).innerHTML = '<div class="ex-fb wait"><span class="ai-orb"></span> Correggo…</div>';
       try { const r = await Ex.grade(n, e, ans, imgs.map(x => x.f)); busy = false; if (!r) return; const s = Math.max(0, Math.min(1, +r.score || 0)), ok = s >= .75;
-        e.tries.push({ at: Date.now(), s, h: hint }); if (ok && !e.ok) { e.ok = true; Game.add(hint ? 8 : 12, 'Esercizio risolto', { icon: 'check' }); if (n.ex.every(z => z.ok)) confetti(70); } save('note-' + n.id);
+        e.tries.push({ at: Date.now(), s, h: hint }); if (ok && !e.ok) { e.ok = true; Game.add(hint ? 8 : 12, 'Esercizio risolto', { icon: 'check' }); if (n.exs.every(z => z.ok)) confetti(70); } save('note-' + n.id);
         $('#exFb', B()).innerHTML = `<div class="ex-fb ${ok ? 'ok' : s >= .4 ? 'mid' : 'bad'}"><b>${ok ? '✅' : s >= .4 ? '🟡' : '❌'} ${Math.round(s * 100)}% · ${esc(r.verdict || '')}</b>${(r.good || []).length ? `<div>👍 ${r.good.map(esc).join(' · ')}</div>` : ''}${(r.errors || []).length ? `<ul>${r.errors.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}${r.tip ? `<div class="ex-tip">➡️ ${esc(r.tip)}</div>` : ''}</div>`;
         $$('.ex-dots i', B())[i].className = `${e.ok ? 'ok' : 'try'} cur`; } catch (err) { busy = false; $('#exFb', B()).innerHTML = ''; aiError(err); } }); };
   const reset = () => { hint = 0; step = 0; imgs.forEach(x => URL.revokeObjectURL(x.u)); imgs = []; paint(); };
@@ -21984,6 +21987,111 @@ Perf.guard($('#sidebar')); Perf.guard($('#tabbar'));
     Perf.last = { out }; const r0 = v.render; v.render = () => out; try { return oR.apply(this, arguments); } finally { v.render = r0; } }; }
 /* any change of data or of the page forgets the cache (the next render is always a real one) */
 { const oG = go; go = function () { Perf.last = null; return oG.apply(this, arguments); }; }
+
+/* =========================================================
+   LAVAGNA PRECISA + SCHERMO INTERO
+   I problemi veri: la mano appoggiata sullo schermo mentre scrivi
+   veniva presa per un dito → spostava il foglio sotto la penna
+   (il tratto “scappava” di lato), due appoggi rapidi valevano come
+   “annulla”, uno scorrimento girava pagina, i pulsanti in basso
+   venivano toccati dal palmo. In più lo scarabocchio cancellava e
+   la pausa trasformava il tratto in una forma senza volerlo.
+   — rifiuto del palmo vero: mentre la penna è giù (e per un attimo
+     dopo) le dita non contano, né sul foglio né sui pulsanti; un
+     appoggio largo è sempre palmo; dopo il primo uso della penna,
+     su questo dispositivo le dita non disegnano più;
+   — gesti “furbi” sotto controllo: si attivano solo se li vuoi
+     (e restano scelti), niente punti “previsti” davanti alla penna;
+   — SCHERMO INTERO: solo il foglio, strumenti dove la mano non
+     arriva, il gesto “indietro” del browser esce dallo schermo
+     intero invece di portarti via dalla lavagna.
+   ========================================================= */
+const BPref = { get(k, d) { try { const v = localStorage.getItem('orbita.b.' + k); return v == null ? d : v === '1'; } catch (_) { return d; } }, set(k, v) { try { localStorage.setItem('orbita.b.' + k, v ? '1' : '0'); } catch (_) {} } };
+const Palm = { pen: null, penAt: 0, ignore: new Set(), block: 0,
+  seen() { try { return localStorage.getItem('orbita.penSeen') === '1'; } catch (_) { return false; } },
+  mark() { try { localStorage.setItem('orbita.penSeen', '1'); } catch (_) {} },
+  /** the pen is down, or was lifted a moment ago */
+  recent(ms = 500) { return this.pen != null || performance.now() - this.penAt < ms; },
+  /** a wide contact is a hand, not a fingertip */
+  wide(e) { return Math.max(e.width || 0, e.height || 0) > 34; },
+};
+/* the smart gestures keep the choice you made (and the risky ones start off) */
+for (const [k, d] of [['scribble', false], ['hold', true]]) { let v = BPref.get(k, d); Object.defineProperty(Board, k, { configurable: true, get: () => v, set: x => { v = !!x; BPref.set(k, v); } }); }
+/* two-finger tap = undo: on for finger users, off as soon as a pencil is used (unless you turn it on) */
+Object.defineProperty(Board, 'tapUndo', { configurable: true, get: () => BPref.get('tapUndo', !Palm.seen()), set: v => BPref.set('tapUndo', v) });
+Object.assign(Board, { predict: BPref.get('predict', false), fingerDraw: BPref.get('finger', false) });
+if (Palm.seen()) Board.penSeen = true;
+/* fingers draw only when no pencil has ever been used here (or if you ask for it) */
+{ const oC = Board.canDraw.bind(Board); Board.canDraw = function (e) { if (e.pointerType === 'touch' && (S.profile.pencilOnly || (this.penSeen && !this.fingerDraw))) return e.pointerType !== 'touch' && oC(e); if (e.pointerType === 'touch' && this.fingerDraw) return this.tool !== 'hand'; return oC(e); }; }
+/* ---------- the outermost layer of input: palm rejection ---------- */
+{ const d0 = Board.down.bind(Board), m0 = Board.move.bind(Board), u0 = Board.up.bind(Board);
+  const forgetTouches = B => { for (const [id, p] of [...B.pointers]) if (p.type === 'touch') { B.pointers.delete(id); Palm.ignore.add(id); } if (B.pan && Palm.ignore.has(B.pan.pid)) B.pan = null; B.pinch = null; B.tg = null; };
+  Board.down = function (e) {
+    if (e.pointerType === 'pen') { Palm.pen = e.pointerId; if (!Palm.seen()) Palm.mark(); this.penSeen = true; forgetTouches(this); }
+    else if (e.pointerType === 'touch' && this.penSeen && (Palm.recent() || Palm.wide(e))) { Palm.ignore.add(e.pointerId); return; }
+    return d0(e); };
+  Board.move = function (e) {
+    if (Palm.ignore.has(e.pointerId)) return;
+    if (e.pointerType === 'touch' && Palm.pen != null) { Palm.ignore.add(e.pointerId); this.pointers.delete(e.pointerId); if (this.pan && this.pan.pid === e.pointerId) this.pan = null; this.pinch = null; return; }
+    if (!this.predict && e.getPredictedEvents) { try { Object.defineProperty(e, 'getPredictedEvents', { value: undefined }); } catch (_) {} }
+    return m0(e); };
+  Board.up = function (e) {
+    if (Palm.ignore.has(e.pointerId)) { Palm.ignore.delete(e.pointerId); this.pointers.delete(e.pointerId); return; }
+    if (e.pointerType === 'pen' && Palm.pen === e.pointerId) { Palm.pen = null; Palm.penAt = performance.now(); }
+    if (e.pointerType === 'touch' && this.tg && (!this.tapUndo || performance.now() - Palm.penAt < 1500)) this.tg.max = 0; /* no “two-finger tap = undo” unless you want it */
+    return u0(e); }; }
+/* the palm on the buttons: ignored while (and just after) you write */
+document.addEventListener('pointerdown', e => { if (e.pointerType !== 'touch' || !e.target.closest) return; const w = e.target.closest('#boardWrap'); if (!w || e.target.tagName === 'CANVAS') return; if (Board.penSeen && (Palm.recent(900) || Palm.wide(e))) { Palm.block = performance.now() + 900; e.preventDefault(); e.stopPropagation(); } }, true);
+document.addEventListener('click', e => { if (performance.now() < Palm.block && e.target.closest && e.target.closest('#boardWrap')) { e.preventDefault(); e.stopPropagation(); Palm.block = 0; } }, true);
+/* ---------- full screen ---------- */
+const BFS = { on: false, ph: null, guard: false,
+  enter() { const w = $('#boardWrap'); if (!w || this.on) return; this.ph = document.createComment('lavagna'); w.before(this.ph); document.body.appendChild(w); w.classList.add('bfs'); document.body.classList.add('board-fs'); this.on = true;
+    try { const el = document.documentElement, rq = el.requestFullscreen || el.webkitRequestFullscreen; if (rq && !document.fullscreenElement) { const r = rq.call(el); if (r && r.catch) r.catch(() => {}); } } catch (_) {}
+    try { history.pushState({ bfs: 1 }, ''); this.guard = true; } catch (_) {}
+    this.btn(); requestAnimationFrame(() => Board.resize()); setTimeout(() => Board.resize(), 350);
+    Island.toast({ icon: 'pencil', t: 'Schermo intero', s: 'Solo il foglio · esci con ⤡ in alto o con Esc', ms: 2200 }); },
+  exit(fromHistory) { if (!this.on) return; const w = $('#boardWrap'); this.on = false; document.body.classList.remove('board-fs');
+    if (w) { w.classList.remove('bfs'); if (this.ph && this.ph.parentNode) { this.ph.replaceWith(w); } } this.ph = null;
+    try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {}); else if (document.webkitFullscreenElement && document.webkitExitFullscreen) document.webkitExitFullscreen(); } catch (_) {}
+    if (!fromHistory && this.guard) { this.guard = false; this.skipPop = true; try { history.back(); } catch (_) {} } this.guard = false;
+    this.btn(); requestAnimationFrame(() => Board.resize()); setTimeout(() => Board.resize(), 350); },
+  toggle() { this.on ? this.exit() : this.enter(); },
+  /* the full-screen button sits next to “Altro”, in lavagne and quaderni alike */
+  fit() { if ($('[data-act=bFull]')) return; const m = $('#boardWrap [data-act=bMore]'); if (!m) return; const g = m.closest('.glass') || m.parentNode;
+    g.insertAdjacentHTML('beforebegin', `<div class="glass"><button class="icon-btn" data-act="bFull" aria-label="Schermo intero" title="Schermo intero (F)">${FS_IN}</button></div>`); },
+  /* a redraw of the page while in full screen: the new sheet goes straight back to full screen, without leaving it */
+  soft(fn) { const w = $('#boardWrap'); if (w) { w.classList.remove('bfs'); if (this.ph && this.ph.parentNode) this.ph.replaceWith(w); else w.remove(); } this.ph = null;
+    const r = fn(); const n = $('#boardWrap'); if (n) { this.ph = document.createComment('lavagna'); n.before(this.ph); document.body.appendChild(n); n.classList.add('bfs'); this.fit(); this.btn(); requestAnimationFrame(() => Board.resize()); } else this.exit(); return r; },
+  btn() { const b = $('[data-act=bFull]'); if (b) { b.innerHTML = this.on ? FS_OUT : FS_IN; b.setAttribute('aria-label', this.on ? 'Esci dallo schermo intero' : 'Schermo intero'); } },
+};
+const FS_IN = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>', FS_OUT = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>';
+ACT.bFull = () => BFS.toggle();
+/* the browser's “back” (swipe from the edge) leaves full screen instead of the board */
+window.addEventListener('popstate', () => { if (BFS.skipPop) { BFS.skipPop = false; return; } if (BFS.on) { BFS.exit(true); return; } });
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && BFS.on && !$('#boardWrap.nb-present')) BFS.exit(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && BFS.on && !Sheets.length && !(Board.sel && Board.sel.length)) { e.preventDefault(); BFS.exit(); } if (UI.view === 'boards' && !e.metaKey && !e.ctrlKey && e.key.toLowerCase() === 'f' && !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || '')) { e.preventDefault(); BFS.toggle(); } });
+/* leaving the board (or a full redraw of the page) closes full screen first */
+{ const oG = go; go = function (...a) { if (BFS.on) BFS.exit(); return oG.apply(this, a); }; const oR = App.render.bind(App); App.render = function (...a) { if (BFS.on && UI.view === 'boards') return BFS.soft(() => oR(...a)); if (BFS.on) BFS.exit(); return oR(...a); }; }
+/* ---------- toolbar: full-screen button, position of the tools ---------- */
+{ const oR = VIEWS.boards.render, oM = VIEWS.boards.mount;
+  VIEWS.boards.render = function () { return oR.call(this).replace('<div class="board-wrap', `<div class="board-wrap pal-${BPal()}`); };
+  VIEWS.boards.mount = function (root) { oM.call(this, root); BFS.fit(); BFS.btn(); }; }
+function BPal() { try { return localStorage.getItem('orbita.b.pal') || 'bottom'; } catch (_) { return 'bottom'; } }
+{ const oMore = ACT.bMore; ACT.bMore = (...a) => { oMore(...a); const sh = Sheets[Sheets.length - 1], host = sh && $('.list.flat', sh.el); if (!host) return;
+    host.insertAdjacentHTML('afterbegin', `<div class="row"><span class="grow"><div class="t">Strumenti</div><div class="s">Mettili dove la mano non li tocca mentre scrivi</div></span>${seg('bPal', [['bottom', 'In basso'], ['top', 'In alto'], ['left', 'A sinistra']], BPal())}</div>`);
+    host.insertAdjacentHTML('beforeend', `<div class="section-h" style="margin:8px 0 0">Penna e gesti</div>
+      <div class="row"><span class="grow"><div class="t">Disegna anche con le dita</div><div class="s">${Board.penSeen ? 'Spento: con la penna le dita spostano e basta, e il palmo è ignorato' : 'Finché non usi la penna, le dita disegnano'}</div></span>${toggleBtn('bFin', Board.fingerDraw)}</div>
+      <div class="row"><span class="grow"><div class="t">Tocco con due dita = annulla</div><div class="s">Tre dita = ripristina · mai mentre scrivi</div></span>${toggleBtn('bTap', Board.tapUndo)}</div>
+      <div class="row"><span class="grow"><div class="t">Scarabocchia per cancellare</div><div class="s">Una zig-zag veloce cancella quello che c'è sotto</div></span>${toggleBtn('bScr', Board.scribble)}</div>
+      <div class="row"><span class="grow"><div class="t">Tieni ferma la penna: forma perfetta</div><div class="s">Linee, cerchi e rettangoli dritti se ti fermi alla fine del tratto</div></span>${toggleBtn('bHold', Board.hold)}</div>
+      <div class="row"><span class="grow"><div class="t">Anticipa il tratto</div><div class="s">Disegna un po' davanti alla punta per sembrare più veloce: può far tremare la fine del segno</div></span>${toggleBtn('bPred', Board.predict)}</div>`);
+    wireSeg(sh.el, 'bPal', v => { try { localStorage.setItem('orbita.b.pal', v); } catch (_) {} const w = $('#boardWrap'); if (w) { w.classList.remove('pal-bottom', 'pal-top', 'pal-left'); w.classList.add('pal-' + v); } });
+    for (const [id, f] of [['bFin', v => { Board.fingerDraw = v; BPref.set('finger', v); if (v && S.profile.pencilOnly) { S.profile.pencilOnly = false; save('profile'); } }], ['bTap', v => { Board.tapUndo = v; }], ['bScr', v => { Board.scribble = v; }], ['bHold', v => { Board.hold = v; }], ['bPred', v => { Board.predict = v; BPref.set('predict', v); }]]) { const t = $('#' + id, sh.el); if (t) wireToggle(t, f); } }; }
+/* holding still turns a stroke into a shape only after a real pause */
+Board.armHold = function (D) { clearTimeout(this.holdT); if (!this.hold || !D.st || !(D.st.t === 'pen' || D.st.t === 'hl')) return;
+  this.holdT = setTimeout(() => { if (this.drawing !== D || D.held || D.st.p.length < 12) return; const r = Shape.rec(D.st); if (!r) return; if (D.st.rec) { r.rec = D.st.rec; r.at = D.st.at; } D.st = r; D.held = true; if (navigator.vibrate) try { navigator.vibrate(8); } catch (_) {} this.draw(); }, 850); };
+/* while you write: no confetti raining on the page (it steals frames from the pen) */
+{ const oC = confetti; confetti = function (...a) { if (UI.view === 'boards' && (BFS.on || Palm.pen != null || Palm.recent(4000))) return; return oC.apply(this, a); }; }
 
 /* =========================================================
    ASSISTANT — "Segretario": Claude with page tools
